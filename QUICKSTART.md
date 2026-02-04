@@ -35,13 +35,23 @@ python -c "from src.data import init_db; init_db()"
 
 You should see: `✓ Database schema initialized`
 
-## Step 3: Test the Environment
+## Step 3: Load Real Data (Required)
+
+```powershell
+# Example: load 30 days of BTC-USD and ETH-USD candles
+python main.py collect-data --source coinbase --symbols BTC-USD,ETH-USD --interval 1h --days 30
+```
+
+If real data is unavailable, the system will error by design.
+
+## Step 4: Test the Environment
 
 ```powershell
 python main.py test-env
 ```
 
-This creates the Gym environment and runs a few test steps. You should see output like:
+This creates the Gym environment and runs a few test steps on **real data**.
+If you skipped Step 3, this will error.
 
 ```
 Testing Gym Environment...
@@ -55,7 +65,7 @@ Testing Gym Environment...
 ✓ Environment test passed!
 ```
 
-## Step 4: Run Your First Training
+## Step 5: Run Your First Training
 
 ```powershell
 python main.py train --episodes 1000
@@ -90,7 +100,7 @@ Open http://localhost:6006 to see:
 
 ## What Just Happened?
 
-1. **Environment Created**: The bot can now simulate Polymarket trading
+1. **Environment Created**: The bot can now trade on real crypto data
 2. **Database Connected**: Training metrics are stored in your Railway PostgreSQL
 3. **Agent Trained**: PPO algorithm learned a basic trading strategy
 4. **Checkpoints Saved**: Model saved in `bot/models/`
@@ -125,10 +135,10 @@ Shows your configuration and risk limits.
 Create a simple Python script:
 
 ```python
-from src.environment import PolymarketTradingEnv
+from src.environment import CryptoTradingEnv
 from src.agents.baseline_agents import get_baseline_agents, compare_agents
 
-env = PolymarketTradingEnv()
+env = CryptoTradingEnv(dataset=dataset, interval="1h")
 agents = get_baseline_agents()
 results = compare_agents(agents, env, n_episodes=10)
 

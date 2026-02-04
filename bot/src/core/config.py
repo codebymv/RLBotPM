@@ -26,12 +26,13 @@ class Settings(BaseSettings):
     # Database
     DATABASE_URL: str = Field(..., description="PostgreSQL connection string")
     
-    # Polymarket API (optional for Phase 1)
-    POLYMARKET_API_KEY: Optional[str] = Field(default=None, description="Polymarket API key")
-    POLYMARKET_API_SECRET: Optional[str] = Field(default=None, description="Polymarket API secret")
-    
     # Bot Configuration
     MODEL_SAVE_PATH: str = Field(default="./models", description="Directory to save model checkpoints")
+    DATA_SOURCE: str = Field(default="coinbase", description="Primary data source adapter")
+    DATA_STRICT_MODE: bool = Field(default=True, description="Fail fast when data is unavailable")
+    DATA_INTERVAL: str = Field(default="1h", description="OHLCV interval for training")
+    REQUIRE_HISTORICAL_DAYS: int = Field(default=30, description="Minimum history required for training")
+    DATA_SYMBOLS: Optional[str] = Field(default=None, description="Comma-separated symbol allowlist")
     
     # Risk Management Settings (Phase 1 defaults - virtual money)
     INITIAL_CAPITAL: float = Field(default=1000.0, description="Starting capital for backtesting")
@@ -94,6 +95,14 @@ class Settings(BaseSettings):
         """Ensure percentage values are between 0 and 1"""
         if not 0 <= v <= 1:
             raise ValueError("Percentage values must be between 0 and 1")
+        return v
+
+    @field_validator("DATA_INTERVAL")
+    @classmethod
+    def validate_interval(cls, v: str) -> str:
+        allowed = {"1m", "5m", "15m", "30m", "1h", "4h", "1d"}
+        if v not in allowed:
+            raise ValueError(f"DATA_INTERVAL must be one of {sorted(allowed)}")
         return v
     
     def __init__(self, **kwargs):

@@ -8,7 +8,7 @@ Imagine teaching a dog new tricks. You don't tell the dog exactly what muscles t
 
 **Reinforcement Learning (RL)** works the same way:
 - The **agent** (our trading bot) takes actions
-- The **environment** (Polymarket) responds
+- The **environment** (crypto exchange) responds
 - The agent receives **rewards** for good actions
 - Over time, the agent learns a **policy** (strategy) that maximizes rewards
 
@@ -23,7 +23,7 @@ Think of it as a trader who learns from experience rather than following fixed r
 ### 2. Environment
 
 The **environment** is the world the agent interacts with. For us, that's:
-- Polymarket prediction markets
+- Crypto spot markets
 - Current prices and volumes
 - Our portfolio (capital, positions)
 - Market history

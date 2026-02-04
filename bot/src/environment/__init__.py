@@ -1,5 +1,5 @@
 """Trading environment components"""
 
-from .gym_env import PolymarketTradingEnv
+from .gym_env import CryptoTradingEnv
 
-__all__ = ["PolymarketTradingEnv"]
+__all__ = ["CryptoTradingEnv"]

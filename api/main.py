@@ -14,6 +14,7 @@ from datetime import datetime
 from typing import List, Optional
 import os
 from dotenv import load_dotenv
+from sqlalchemy import create_engine, text
 
 # Load environment variables
 load_dotenv()
@@ -24,6 +25,10 @@ app = FastAPI(
     description="Monitoring and control API for RL Trading Bot",
     version="0.1.0"
 )
+
+# Database connection (for data source health)
+DATABASE_URL = os.getenv("DATABASE_URL")
+DB_ENGINE = create_engine(DATABASE_URL) if DATABASE_URL else None
 
 # Configure CORS
 origins = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
@@ -52,10 +57,24 @@ async def root():
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
-    # TODO: Add database connectivity check
+    if not DB_ENGINE:
+        return {
+            "status": "degraded",
+            "database": "not_configured",
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+    try:
+        with DB_ENGINE.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        db_status = "connected"
+        status = "healthy"
+    except Exception:
+        db_status = "error"
+        status = "degraded"
+
     return {
-        "status": "healthy",
-        "database": "connected",  # TODO: actual check
+        "status": status,
+        "database": db_status,
         "timestamp": datetime.utcnow().isoformat()
     }
 
@@ -265,7 +284,7 @@ async def get_markets(
     category: Optional[str] = None
 ):
     """
-    Get Polymarket markets in database
+    Get crypto symbols in database
     
     Args:
         limit: Maximum markets to return
@@ -279,6 +298,70 @@ async def get_markets(
         "markets": [],
         "total": 0
     }
+
+
+@app.get("/api/data-sources/health")
+async def get_data_source_health():
+    """
+    Get health status for each data source based on latest candles in DB.
+    """
+    if not DB_ENGINE:
+        raise HTTPException(status_code=503, detail="DATABASE_URL not configured")
+
+    interval = os.getenv("DATA_INTERVAL", "1h")
+    stale_seconds = _interval_to_seconds(interval) * 2
+    now = datetime.utcnow()
+
+    query = text(
+        \"\"\"
+        SELECT source, MAX(timestamp) AS last_ts
+        FROM crypto_candles
+        GROUP BY source
+        \"\"\"
+    )
+
+    with DB_ENGINE.connect() as conn:
+        rows = conn.execute(query).fetchall()
+
+    results = []
+    for source, last_ts in rows:
+        if last_ts is None:
+            results.append({
+                "source": source,
+                "ok": False,
+                "reason": "no_data",
+                "last_timestamp": None
+            })
+            continue
+
+        age = (now - last_ts).total_seconds()
+        ok = age <= stale_seconds
+        results.append({
+            "source": source,
+            "ok": ok,
+            "last_timestamp": last_ts.isoformat(),
+            "age_seconds": age,
+            "stale_threshold_seconds": stale_seconds
+        })
+
+    if not results:
+        return {"sources": [], "status": "no_data"}
+
+    overall_ok = all(r["ok"] for r in results if r["last_timestamp"])
+    return {"sources": results, "status": "ok" if overall_ok else "stale"}
+
+
+def _interval_to_seconds(interval: str) -> int:
+    mapping = {
+        "1m": 60,
+        "5m": 300,
+        "15m": 900,
+        "30m": 1800,
+        "1h": 3600,
+        "4h": 14400,
+        "1d": 86400,
+    }
+    return mapping.get(interval, 3600)
 
 
 if __name__ == "__main__":

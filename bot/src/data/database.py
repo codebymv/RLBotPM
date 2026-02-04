@@ -115,10 +115,7 @@ class Trade(Base):
 
 class Market(Base):
     """
-    Stores Polymarket market data
-    
-    Historical market information used for training
-    and analysis.
+    Stores legacy Polymarket market data (deprecated).
     """
     __tablename__ = 'markets'
     
@@ -174,6 +171,44 @@ class ModelCheckpoint(Base):
     
     # Relationships
     training_run = relationship("TrainingRun", back_populates="models")
+
+
+class CryptoSymbol(Base):
+    """
+    Stores crypto symbols available from exchanges.
+    """
+    __tablename__ = 'crypto_symbols'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    source = Column(String(50), nullable=False)  # coinbase, kraken, etc.
+    symbol = Column(String(50), nullable=False)  # e.g., BTC-USD or XBTUSD
+    base_asset = Column(String(20), nullable=True)
+    quote_asset = Column(String(20), nullable=True)
+    status = Column(String(20), default='active')
+    metadata = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    last_updated = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class CryptoCandle(Base):
+    """
+    Stores OHLCV candles for crypto symbols.
+    """
+    __tablename__ = 'crypto_candles'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    source = Column(String(50), nullable=False)
+    symbol = Column(String(50), nullable=False)
+    interval = Column(String(10), nullable=False)  # 1m, 5m, 1h, 1d
+    timestamp = Column(DateTime, nullable=False)
+
+    open = Column(Float, nullable=False)
+    high = Column(Float, nullable=False)
+    low = Column(Float, nullable=False)
+    close = Column(Float, nullable=False)
+    volume = Column(Float, nullable=False)
+
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
 # Database engine and session factory

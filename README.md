@@ -1,14 +1,20 @@
-# RLTrade - Reinforcement Learning Trading Bot for Polymarket
+# RLTrade - Reinforcement Learning Crypto Trading Bot
 
-A comprehensive, safety-focused reinforcement learning trading bot for Polymarket prediction markets. Built with a phased approach prioritizing learning, safety, and realistic performance expectations.
+A comprehensive, safety-focused reinforcement learning trading bot for crypto spot markets. Built with a phased approach prioritizing learning, safety, and realistic performance expectations.
 
 ## 🎯 Project Overview
 
-This bot uses **Proximal Policy Optimization (PPO)** to learn profitable trading strategies on Polymarket while incorporating robust risk management and safety controls. The system is designed for gradual deployment across three phases:
+This bot uses **Proximal Policy Optimization (PPO)** to learn profitable trading strategies on real crypto market data while incorporating robust risk management and safety controls. The system is designed for gradual deployment across three phases:
 
 - **Phase 1 (Current)**: Historical backtesting environment
 - **Phase 2**: Paper trading with live data
 - **Phase 3**: Minimal live deployment with strict controls
+
+## Real Data Only Policy
+
+This system **does not allow synthetic data**. Training and evaluation only run
+when real OHLCV data is available from configured crypto exchanges. If data is
+missing or the source is unavailable, the system fails fast with a clear error.
 
 ## 🏗️ Architecture
 
@@ -227,7 +233,7 @@ MIT License - See LICENSE file for details
 ## 🙏 Acknowledgments
 
 - Stable-Baselines3 team for excellent RL implementations
-- Polymarket for providing prediction market infrastructure
+- Coinbase and Kraken for public market data APIs
 - OpenAI for PPO algorithm research
 
 ---

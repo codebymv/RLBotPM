@@ -16,9 +16,12 @@ import yaml
 
 from stable_baselines3.common.callbacks import CallbackList
 
-from ..environment import PolymarketTradingEnv
+from datetime import timedelta
+from ..environment import CryptoTradingEnv
 from ..agents import PPOAgent
-from ..data import TrainingRun, init_db, get_db_session
+from ..data import TrainingRun, init_db, get_db_session, CryptoSymbol
+from ..data.collectors import CryptoDataLoader
+from ..data.sources.base import DataUnavailableError
 from ..core.logger import get_logger
 from ..core.config import get_settings
 from .callbacks import (
@@ -77,8 +80,14 @@ class Trainer:
         logger.info(f"Starting training: {total_episodes:,} episodes")
         
         try:
+            # Load real dataset (fail fast if unavailable)
+            dataset = self._load_dataset()
+
             # Create environment
-            env = PolymarketTradingEnv()
+            env = CryptoTradingEnv(
+                dataset=dataset,
+                interval=self.settings.DATA_INTERVAL
+            )
             
             # Create agent
             agent = PPOAgent(
@@ -250,6 +259,9 @@ class Trainer:
         """
         return {
             'environment': self.settings.ENVIRONMENT,
+            'data_source': self.settings.DATA_SOURCE,
+            'data_interval': self.settings.DATA_INTERVAL,
+            'require_historical_days': self.settings.REQUIRE_HISTORICAL_DAYS,
             'initial_capital': self.settings.INITIAL_CAPITAL,
             'max_position_size_pct': self.settings.MAX_POSITION_SIZE_PCT,
             'max_open_positions': self.settings.MAX_OPEN_POSITIONS,
@@ -257,3 +269,49 @@ class Trainer:
             'training_episodes': self.settings.TRAINING_EPISODES,
             'custom_config': self.config
         }
+
+    def _load_dataset(self):
+        """
+        Load real OHLCV dataset from database.
+        Raises DataUnavailableError if data is missing.
+        """
+        source = self.settings.DATA_SOURCE
+        interval = self.settings.DATA_INTERVAL
+        days = self.settings.REQUIRE_HISTORICAL_DAYS
+
+        # Determine symbols to load
+        symbols = []
+        if self.settings.DATA_SYMBOLS:
+            symbols = [s.strip() for s in self.settings.DATA_SYMBOLS.split(",") if s.strip()]
+        else:
+            session = get_db_session()
+            try:
+                symbols = [
+                    row.symbol
+                    for row in session.query(CryptoSymbol)
+                    .filter_by(source=source, status="active")
+                    .all()
+                ]
+            finally:
+                session.close()
+
+        if not symbols:
+            raise DataUnavailableError(
+                "No symbols found in database. Run CryptoDataLoader to sync symbols and candles."
+            )
+
+        loader = CryptoDataLoader(source=source)
+        end = datetime.utcnow()
+        start = end - timedelta(days=days)
+
+        dataset = loader.load_dataset(
+            symbols=symbols,
+            interval=interval,
+            start=start,
+            end=end
+        )
+
+        if dataset is None or dataset.empty:
+            raise DataUnavailableError("Dataset is empty after loading. Check data pipeline.")
+
+        return dataset

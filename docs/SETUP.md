@@ -96,6 +96,28 @@ TRAINING_EPISODES=100000
 CHECKPOINT_FREQUENCY=10000
 ```
 
+**Data Source Settings**:
+```
+DATA_SOURCE=coinbase
+DATA_INTERVAL=1h
+REQUIRE_HISTORICAL_DAYS=30
+DATA_SYMBOLS=BTC-USD,ETH-USD
+```
+
+## Real Data Requirement (No Synthetic Data)
+
+This system **does not allow synthetic data**. You must load real OHLCV
+data from a supported exchange before training or testing the environment.
+
+### Load Real OHLCV Data
+
+```bash
+# Example: load 30 days of BTC-USD and ETH-USD candles
+python main.py collect-data --source coinbase --symbols BTC-USD,ETH-USD --interval 1h --days 30
+```
+
+If data is unavailable, the system will raise an error and stop.
+
 ## Quick Start
 
 ### Option 1: CLI Training (Simplest)
@@ -142,7 +164,8 @@ cd bot
 python main.py test-env
 ```
 
-This creates the Gym environment and runs a few random steps to verify setup.
+This creates the Gym environment and runs a few steps on **real** data to verify setup.
+If no real data is loaded, it will error by design.
 
 ## First Training Run
 

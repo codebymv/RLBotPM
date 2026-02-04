@@ -10,6 +10,7 @@ from rich.console import Console
 from rich.panel import Panel
 from dotenv import load_dotenv
 import os
+from datetime import datetime, timedelta
 
 # Load environment variables
 load_dotenv()
@@ -19,7 +20,7 @@ console = Console()
 
 @click.group()
 def cli():
-    """RLTrade - Reinforcement Learning Trading Bot for Polymarket"""
+    """RLTrade - Reinforcement Learning Crypto Trading Bot"""
     console.print(Panel.fit(
         "[bold cyan]RLTrade Bot[/bold cyan]\n"
         "[dim]Reinforcement Learning Trading System[/dim]",
@@ -85,23 +86,39 @@ def evaluate(model, episodes):
 
 
 @cli.command()
-@click.option('--months', default=6, help='Months of historical data to collect')
-@click.option('--min-volume', default=10000, help='Minimum market volume in USD')
-def collect_data(months, min_volume):
-    """Collect historical data from Polymarket"""
-    console.print(f"\n[bold cyan]Collecting data:[/bold cyan] {months} months, min volume ${min_volume}")
-    
-    from src.data.collectors.historical_loader import HistoricalDataLoader
-    
+@click.option('--source', default="coinbase", help='Data source adapter (coinbase, kraken)')
+@click.option('--symbols', required=True, help='Comma-separated symbols (e.g., BTC-USD,ETH-USD)')
+@click.option('--interval', default="1h", help='Candle interval (e.g., 1m,5m,1h,1d)')
+@click.option('--days', default=30, help='Number of days of history to collect')
+def collect_data(source, symbols, interval, days):
+    """Collect real OHLCV data from crypto exchange"""
+    console.print(
+        f"\n[bold cyan]Collecting data:[/bold cyan] source={source}, interval={interval}, days={days}"
+    )
+
+    from src.data.collectors.crypto_loader import CryptoDataLoader
+    from src.data.sources.base import DataUnavailableError
+
     try:
-        loader = HistoricalDataLoader()
-        loader.collect_historical_data(
-            months=months,
-            min_volume=min_volume
+        loader = CryptoDataLoader(source=source)
+        loader.sync_symbols()
+
+        end = datetime.utcnow()
+        start = end - timedelta(days=days)
+        symbol_list = [s.strip() for s in symbols.split(",") if s.strip()]
+
+        loader.collect_ohlcv(
+            symbols=symbol_list,
+            interval=interval,
+            start=start,
+            end=end
         )
-        
+
         console.print("\n[bold green]✓[/bold green] Data collection completed!")
-        
+
+    except DataUnavailableError as e:
+        console.print(f"\n[bold red]✗ Data Error:[/bold red] {str(e)}")
+        raise
     except Exception as e:
         console.print(f"\n[bold red]✗ Error:[/bold red] {str(e)}")
         raise
@@ -126,6 +143,9 @@ def info():
     console.print(f"  Database: {settings.DATABASE_URL.split('@')[1] if '@' in settings.DATABASE_URL else 'Not configured'}")
     console.print(f"  Model Save Path: {settings.MODEL_SAVE_PATH}")
     console.print(f"  Log Level: {settings.LOG_LEVEL}")
+    console.print(f"  Data Source: {settings.DATA_SOURCE}")
+    console.print(f"  Data Interval: {settings.DATA_INTERVAL}")
+    console.print(f"  Require History (days): {settings.REQUIRE_HISTORICAL_DAYS}")
     
     console.print("\n[bold]Risk Limits:[/bold]")
     console.print(f"  Max Daily Loss: ${settings.MAX_DAILY_LOSS_USD}")
@@ -137,29 +157,53 @@ def info():
 def test_env():
     """Test the Gym environment setup"""
     console.print("\n[bold cyan]Testing Gym Environment...[/bold cyan]")
-    
-    from src.environment.gym_env import PolymarketTradingEnv
-    
+
+    from src.environment.gym_env import CryptoTradingEnv
+    from src.data.collectors.crypto_loader import CryptoDataLoader
+    from src.data.sources.base import DataUnavailableError
+    from src.core.config import get_settings
+
     try:
-        env = PolymarketTradingEnv()
-        
+        settings = get_settings()
+        loader = CryptoDataLoader(source=settings.DATA_SOURCE)
+
+        # Load dataset from DB
+        symbols = []
+        if settings.DATA_SYMBOLS:
+            symbols = [s.strip() for s in settings.DATA_SYMBOLS.split(",") if s.strip()]
+        if not symbols:
+            raise DataUnavailableError("DATA_SYMBOLS not set. Provide symbols to test environment.")
+
+        end = datetime.utcnow()
+        start = end - timedelta(days=settings.REQUIRE_HISTORICAL_DAYS)
+        dataset = loader.load_dataset(
+            symbols=symbols,
+            interval=settings.DATA_INTERVAL,
+            start=start,
+            end=end
+        )
+
+        env = CryptoTradingEnv(dataset=dataset, interval=settings.DATA_INTERVAL)
+
         console.print(f"  State space: {env.observation_space}")
         console.print(f"  Action space: {env.action_space}")
-        
-        # Run a few random steps
+
         obs, info = env.reset()
         console.print(f"\n  Initial observation shape: {obs.shape}")
-        
+
         for i in range(5):
             action = env.action_space.sample()
             obs, reward, terminated, truncated, info = env.step(action)
             console.print(f"  Step {i+1}: action={action}, reward={reward:.4f}")
-            
+
             if terminated or truncated:
                 break
-        
+
         console.print("\n[bold green]✓[/bold green] Environment test passed!")
-        
+
+    except DataUnavailableError as e:
+        console.print(f"\n[bold red]✗ Data Error:[/bold red] {str(e)}")
+        raise
     except Exception as e:
         console.print(f"\n[bold red]✗ Error:[/bold red] {str(e)}")
         raise

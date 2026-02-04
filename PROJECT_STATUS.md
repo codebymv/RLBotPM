@@ -53,7 +53,7 @@
 
 6. **Data Pipeline** (`src/data/`)
    - Database ORM models (SQLAlchemy)
-   - Polymarket API client (synthetic for Phase 1)
+   - Crypto exchange data adapters (real data only)
    - Historical data loader
    - Market data schemas
 
@@ -101,7 +101,7 @@
   - `training_runs` - Training session metadata
   - `episodes` - Episode-level metrics
   - `trades` - Individual trade records
-  - `markets` - Polymarket market data
+  - `crypto_candles` - Crypto OHLCV data
   - `model_checkpoints` - Saved model versions
 
 #### ✅ Documentation
@@ -237,7 +237,7 @@ python main.py train --episodes 1000
 - Comprehensive testing
 
 **What to Build:**
-- [ ] Real-time Polymarket data feed
+- [ ] Real-time crypto data feed
 - [ ] Paper trading mode (no real money)
 - [ ] Live dashboard with real-time updates
 - [ ] Alert system (Telegram/email)
@@ -252,7 +252,7 @@ python main.py train --episodes 1000
 - Legal/tax considerations addressed
 
 **What to Build:**
-- [ ] Real trade execution via Polymarket API
+- [ ] Real trade execution via exchange APIs
 - [ ] Manual approval system for large trades
 - [ ] Enhanced monitoring and alerts
 - [ ] Automated daily reports

@@ -7,6 +7,8 @@ from .database import (
     Trade,
     Market,
     ModelCheckpoint,
+    CryptoSymbol,
+    CryptoCandle,
     get_db_session,
     init_db,
     DatabaseSession
@@ -19,6 +21,8 @@ __all__ = [
     "Trade",
     "Market",
     "ModelCheckpoint",
+    "CryptoSymbol",
+    "CryptoCandle",
     "get_db_session",
     "init_db",
     "DatabaseSession"

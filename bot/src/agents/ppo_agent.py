@@ -27,7 +27,8 @@ from pathlib import Path
 from typing import Optional, Dict, Callable
 import os
 
-from ..environment import PolymarketTradingEnv
+from ..environment import CryptoTradingEnv
+from ..data.sources.base import DataUnavailableError
 from ..core.logger import get_logger
 from ..core.config import get_settings
 
@@ -54,7 +55,7 @@ class PPOAgent:
     
     def __init__(
         self,
-        env: Optional[PolymarketTradingEnv] = None,
+        env: Optional[CryptoTradingEnv] = None,
         learning_rate: float = 3e-4,
         n_steps: int = 2048,
         batch_size: int = 256,
@@ -90,9 +91,9 @@ class PPOAgent:
         """
         self.settings = get_settings()
         
-        # Create environment if not provided
+        # Require a real-data environment
         if env is None:
-            env = PolymarketTradingEnv()
+            raise DataUnavailableError("PPOAgent requires a real-data environment instance.")
         
         # Wrap in vectorized environment (required by SB3)
         self.env = DummyVecEnv([lambda: env])
@@ -303,19 +304,21 @@ class PPOAgent:
         }
 
 
-def create_parallel_env(n_envs: int = 4) -> SubprocVecEnv:
+def create_parallel_env(dataset, interval: str = "1h", n_envs: int = 4) -> SubprocVecEnv:
     """
-    Create multiple parallel environments for faster training
-    
+    Create multiple parallel environments for faster training.
+
     Args:
+        dataset: DataFrame with real OHLCV data
+        interval: Candle interval
         n_envs: Number of parallel environments
-    
-    Returns:
-        Vectorized environment
     """
+    if dataset is None or len(dataset) == 0:
+        raise DataUnavailableError("Parallel env requires real OHLCV dataset.")
+
     def make_env():
         def _init():
-            return PolymarketTradingEnv()
+            return CryptoTradingEnv(dataset=dataset, interval=interval)
         return _init
-    
+
     return SubprocVecEnv([make_env() for _ in range(n_envs)])

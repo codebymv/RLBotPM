@@ -84,8 +84,8 @@ class BuyAndHoldAgent(BaselineAgent):
         - obs[15]: capital (normalized)
         - obs[20]: position_size in current market
         """
-        # Check if we have a position (obs[20] is position size)
-        has_position = observation[20] > 0.01
+        # Check if we have a position (obs[17] is position size)
+        has_position = observation[17] > 0.01
         
         if not has_position:
             # No position, buy medium (action 2)
@@ -124,8 +124,8 @@ class MeanReversionAgent(BaselineAgent):
         - obs[20]: position_size
         """
         current_price = observation[0]
-        price_change_24h = observation[8]  # 24h price change
-        has_position = observation[20] > 0.01
+        price_change_24h = observation[5]  # 24h price change
+        has_position = observation[17] > 0.01
         
         # Track price history
         self.price_history.append(current_price)
@@ -181,10 +181,10 @@ class MomentumAgent(BaselineAgent):
         - obs[10]: trend_direction (-1, 0, 1)
         - obs[20]: position_size
         """
-        price_change_6h = observation[7]
-        price_change_24h = observation[8]
-        trend_direction = observation[10]
-        has_position = observation[20] > 0.01
+        price_change_6h = observation[4]
+        price_change_24h = observation[5]
+        trend_direction = observation[11]
+        has_position = observation[17] > 0.01
         
         # Calculate momentum signal
         momentum = (price_change_6h + price_change_24h) / 2.0
@@ -227,9 +227,9 @@ class ConservativeAgent(BaselineAgent):
         - obs[20]: position_size
         """
         current_price = observation[0]
-        price_change_24h = observation[8]
-        volatility = observation[9]
-        has_position = observation[20] > 0.01
+        price_change_24h = observation[5]
+        volatility = observation[6]
+        has_position = observation[17] > 0.01
         
         if not has_position:
             self.holding_time = 0
