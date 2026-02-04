@@ -1,0 +1,116 @@
+# PPO Model Configuration
+# These hyperparameters control how the RL agent learns
+
+ppo:
+  # Learning rate - how fast the agent learns
+  # 3e-4 is the standard value that works well across many problems
+  learning_rate: 0.0003
+  
+  # Number of steps to collect per environment before updating
+  # Higher = more stable but slower learning
+  n_steps: 2048
+  
+  # Mini-batch size for training
+  # Must be a divisor of (n_steps * n_envs)
+  batch_size: 256
+  
+  # Number of training epochs per rollout
+  # Higher = more learning per data collected, but risk overfitting
+  n_epochs: 10
+  
+  # Discount factor (gamma)
+  # How much to value future rewards (0.99 = very forward-looking)
+  gamma: 0.99
+  
+  # GAE lambda for advantage estimation
+  # Balances bias vs variance in advantage estimates
+  gae_lambda: 0.95
+  
+  # PPO clipping parameter
+  # Limits how much policy can change per update (prevents destructive updates)
+  clip_range: 0.2
+  
+  # Entropy coefficient
+  # Encourages exploration (higher = more random actions)
+  ent_coef: 0.01
+  
+  # Value function coefficient
+  # Weight of value loss in total loss
+  vf_coef: 0.5
+  
+  # Gradient clipping
+  # Prevents exploding gradients
+  max_grad_norm: 0.5
+
+# Training configuration
+training:
+  # Total training episodes
+  total_timesteps: 100000
+  
+  # Evaluate every N episodes
+  eval_frequency: 10000
+  
+  # Save checkpoint every N episodes
+  checkpoint_frequency: 10000
+  
+  # Number of parallel environments (for faster training)
+  # Set to 1 for easier debugging, 4+ for production
+  num_parallel_envs: 4
+  
+  # Use GPU if available
+  use_gpu: true
+  
+  # TensorBoard logging
+  tensorboard_log: "./logs/tensorboard"
+  
+  # Verbosity (0=none, 1=info, 2=debug)
+  verbose: 1
+
+# Environment configuration
+environment:
+  # Initial capital for backtesting
+  initial_capital: 1000.0
+  
+  # Maximum steps per episode
+  max_steps: 500
+  
+  # Transaction cost percentage
+  transaction_cost: 0.001
+  
+  # Reward function weights
+  reward_weights:
+    returns: 10.0
+    transaction_cost_penalty: 100.0
+    drawdown_penalty: 10.0
+    profitable_close_bonus: 0.5
+    risk_violation_penalty: 1.0
+    long_term_profitability: 3.0
+
+# Curriculum learning stages
+curriculum:
+  enabled: true
+  
+  stages:
+    - name: "Stage 1 - Simple Markets"
+      timesteps: 20000
+      description: "Highly liquid, simple binary markets"
+      filters:
+        min_volume: 50000
+        min_liquidity: 5000
+        categories: ["sports", "entertainment"]
+    
+    - name: "Stage 2 - Mixed Markets"
+      timesteps: 30000
+      description: "Medium liquidity, mixed categories"
+      filters:
+        min_volume: 10000
+        min_liquidity: 1000
+        categories: ["sports", "entertainment", "crypto"]
+    
+    - name: "Stage 3 - All Markets"
+      timesteps: 50000
+      description: "All market types"
+      filters:
+        min_volume: 1000
+        min_liquidity: 500
+        categories: null  # All categories

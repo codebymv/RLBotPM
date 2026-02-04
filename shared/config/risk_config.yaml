@@ -1,0 +1,112 @@
+# Risk Management Configuration
+# These are HARD LIMITS that cannot be bypassed
+
+# Loss limits
+loss_limits:
+  # Maximum daily loss
+  max_daily_loss_usd: 20.0
+  max_daily_loss_pct: 0.05  # 5%
+  
+  # Maximum weekly loss
+  max_weekly_loss_usd: 50.0
+  max_weekly_loss_pct: 0.15  # 15%
+  
+  # Maximum total drawdown (triggers complete pause)
+  max_total_drawdown: 0.30  # 30%
+
+# Position limits
+position_limits:
+  # Maximum size of any single position
+  max_position_size_pct: 0.20  # 20% of capital
+  
+  # Maximum number of concurrent positions
+  max_open_positions: 3
+  
+  # Minimum position size (avoid dust trades)
+  min_position_size_pct: 0.01  # 1% of capital
+
+# Market requirements
+market_requirements:
+  # Minimum market liquidity to trade
+  min_market_liquidity: 500.0  # $500
+  
+  # Minimum volume in last 24h
+  min_volume_24h: 1000.0  # $1000
+  
+  # Don't trade within N seconds of resolution
+  no_trade_window_before_resolution: 7200  # 2 hours
+  
+  # Maximum slippage tolerance
+  max_slippage_pct: 0.02  # 2%
+
+# Circuit breakers
+circuit_breakers:
+  # Pause after N consecutive losses
+  max_consecutive_losses: 3
+  
+  # Minimum win rate over last 20 trades
+  min_win_rate_threshold: 0.35  # 35%
+  
+  # Pause after N API errors
+  max_api_errors: 3
+  
+  # Auto-resume after time period (if false, requires manual resume)
+  auto_resume: false
+  
+  # Cooldown period before auto-resume (seconds)
+  cooldown_period: 3600  # 1 hour
+
+# Position sizing
+position_sizing:
+  # Kelly Criterion fraction (0.25 = 25% Kelly)
+  # Lower = more conservative
+  kelly_fraction: 0.25
+  
+  # Minimum number of trades before using Kelly
+  min_trades_for_kelly: 10
+  
+  # Default position size (used before sufficient history)
+  default_position_size_pct: 0.05  # 5%
+  
+  # Confidence adjustment
+  # Model confidence affects position size
+  use_confidence_adjustment: true
+
+# Transaction costs
+transaction_costs:
+  # Base transaction cost
+  base_cost_pct: 0.001  # 0.1%
+  
+  # Slippage model
+  slippage_model: "volume_based"  # "fixed" or "volume_based"
+  
+  # Additional cost for large orders
+  large_order_penalty_threshold: 0.15  # Orders >15% of capital
+  large_order_penalty_pct: 0.0005  # Additional 0.05%
+
+# Correlation limits
+correlation_limits:
+  # Maximum correlation between open positions
+  max_position_correlation: 0.7
+  
+  # Maximum exposure to single category
+  max_category_exposure_pct: 0.50  # 50% of capital
+  
+  # Check correlations
+  check_correlations: true
+
+# Risk reporting
+reporting:
+  # Generate risk report every N trades
+  report_frequency: 10
+  
+  # Alert thresholds
+  alerts:
+    # Warn when approaching limits
+    daily_loss_warning_pct: 0.80  # 80% of limit
+    position_limit_warning_pct: 0.90  # 90% of limit
+    drawdown_warning_pct: 0.75  # 75% of max drawdown
+  
+  # Save risk logs
+  save_logs: true
+  log_path: "./logs/risk"
