@@ -7,7 +7,7 @@ Raises DataUnavailableError if data cannot be fetched.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Iterable, List, Optional
 
 import pandas as pd
@@ -53,7 +53,7 @@ class CryptoDataLoader:
                             source=self.source_name,
                             symbol=symbol,
                             status="active",
-                            metadata={"source": self.source_name},
+                            extra_metadata={"source": self.source_name},
                         )
                     )
 
@@ -76,33 +76,55 @@ class CryptoDataLoader:
 
         with DatabaseSession() as session:
             for symbol in symbols:
-                candles = self.adapter.get_ohlcv(
-                    symbol=symbol,
-                    interval=interval,
-                    start=start,
-                    end=end,
-                    limit=limit,
-                )
-                if not candles:
+                ranges = _build_request_ranges(start, end, interval, limit)
+                if not ranges:
                     raise DataUnavailableError(
-                        f"No candles returned for {symbol} on {self.source_name}"
+                        f"No request ranges computed for {symbol}"
                     )
 
-                for candle in candles:
-                    session.add(
-                        CryptoCandle(
+                for range_start, range_end, range_limit in ranges:
+                    existing = set(
+                        ts
+                        for (ts,) in session.query(CryptoCandle.timestamp)
+                        .filter_by(
                             source=self.source_name,
                             symbol=symbol,
                             interval=interval,
-                            timestamp=candle.timestamp,
-                            open=candle.open,
-                            high=candle.high,
-                            low=candle.low,
-                            close=candle.close,
-                            volume=candle.volume,
                         )
+                        .filter(CryptoCandle.timestamp >= range_start)
+                        .filter(CryptoCandle.timestamp <= range_end)
+                        .all()
                     )
-                total += len(candles)
+                    candles = self.adapter.get_ohlcv(
+                        symbol=symbol,
+                        interval=interval,
+                        start=range_start,
+                        end=range_end,
+                        limit=range_limit,
+                    )
+                    if not candles:
+                        raise DataUnavailableError(
+                            f"No candles returned for {symbol} on {self.source_name}"
+                        )
+
+                    for candle in candles:
+                        if candle.timestamp in existing:
+                            continue
+                        session.add(
+                            CryptoCandle(
+                                source=self.source_name,
+                                symbol=symbol,
+                                interval=interval,
+                                timestamp=candle.timestamp,
+                                open=candle.open,
+                                high=candle.high,
+                                low=candle.low,
+                                close=candle.close,
+                                volume=candle.volume,
+                            )
+                        )
+                        existing.add(candle.timestamp)
+                    total += len(candles)
 
         logger.info(
             f"Stored {total} candles from {self.source_name} ({interval})"
@@ -126,6 +148,8 @@ class CryptoDataLoader:
                 CryptoCandle.interval == interval,
                 CryptoCandle.symbol.in_(list(symbols)),
             )
+
+            query = query.order_by(CryptoCandle.symbol, CryptoCandle.timestamp)
 
             if start:
                 query = query.filter(CryptoCandle.timestamp >= start)
@@ -154,3 +178,44 @@ class CryptoDataLoader:
             ]
 
         return pd.DataFrame(data)
+
+
+def _build_request_ranges(
+    start: Optional[datetime],
+    end: Optional[datetime],
+    interval: str,
+    limit: Optional[int],
+    max_candles: int = 300,
+):
+    if limit:
+        return [(start, end, limit)]
+    if not start or not end:
+        return [(start, end, None)]
+
+    interval_seconds = _interval_to_seconds(interval)
+    max_window_seconds = max_candles * interval_seconds
+
+    ranges = []
+    current_start = start
+    while current_start < end:
+        current_end = min(current_start + timedelta(seconds=max_window_seconds), end)
+        ranges.append((current_start, current_end, None))
+        current_start = current_end
+
+    return ranges
+
+
+def _interval_to_seconds(interval: str) -> int:
+    mapping = {
+        "1m": 60,
+        "5m": 300,
+        "15m": 900,
+        "30m": 1800,
+        "1h": 3600,
+        "4h": 14400,
+        "6h": 21600,
+        "1d": 86400,
+    }
+    if interval not in mapping:
+        raise DataUnavailableError(f"Unsupported interval: {interval}")
+    return mapping[interval]

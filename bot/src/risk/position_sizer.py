@@ -79,7 +79,7 @@ class PositionSizer:
         """
         # Validate inputs
         if not (0 < win_probability < 1):
-            logger.warning(f"Invalid win probability {win_probability}, using 0.5")
+            logger.debug("Invalid win probability %.3f, using 0.5", win_probability)
             win_probability = 0.5
         
         if avg_win <= 0 or avg_loss <= 0:

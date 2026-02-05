@@ -17,7 +17,7 @@ import yaml
 from stable_baselines3.common.callbacks import CallbackList
 
 from datetime import timedelta
-from ..environment import CryptoTradingEnv
+from ..environment import CryptoTradingEnv, ExplorationWrapper, ActionMaskingWrapper
 from ..agents import PPOAgent
 from ..data import TrainingRun, init_db, get_db_session, CryptoSymbol
 from ..data.collectors import CryptoDataLoader
@@ -84,15 +84,49 @@ class Trainer:
             dataset = self._load_dataset()
 
             # Create environment
-            env = CryptoTradingEnv(
+            base_env = CryptoTradingEnv(
                 dataset=dataset,
                 interval=self.settings.DATA_INTERVAL
             )
             
+            exploration_config = self.config.get("exploration", {})
+            initial_epsilon = exploration_config.get("initial_epsilon", 0.9)
+            final_epsilon = exploration_config.get("final_epsilon", 0.0)
+            decay_fraction = exploration_config.get("decay_fraction", 0.3)
+            exclude_actions = exploration_config.get("exclude_actions", [0])
+
+            # Wrap with exploration to force action diversity during early training
+            env = ExplorationWrapper(
+                base_env,
+                initial_epsilon=initial_epsilon,
+                final_epsilon=final_epsilon,
+                decay_steps=int(total_episodes * decay_fraction),
+                exclude_actions=exclude_actions
+            )
+            # Mask invalid actions so rollouts always execute a valid trade action
+            env = ActionMaskingWrapper(env)
+            
             # Create agent
+            ppo_config = self.config.get("ppo", {})
+            training_config = self.config.get("training", {})
+            log_root = training_config.get("tensorboard_log", "./logs/tensorboard")
+            tensorboard_log = str(Path(log_root) / f"run_{self.training_run.id}")
+
             agent = PPOAgent(
                 env=env,
-                tensorboard_log=f"./logs/tensorboard/run_{self.training_run.id}"
+                learning_rate=ppo_config.get("learning_rate", 3e-4),
+                n_steps=ppo_config.get("n_steps", 2048),
+                batch_size=ppo_config.get("batch_size", 256),
+                n_epochs=ppo_config.get("n_epochs", 10),
+                gamma=ppo_config.get("gamma", 0.99),
+                gae_lambda=ppo_config.get("gae_lambda", 0.95),
+                clip_range=ppo_config.get("clip_range", 0.2),
+                ent_coef=ppo_config.get("ent_coef", 0.03),
+                vf_coef=ppo_config.get("vf_coef", 0.5),
+                max_grad_norm=ppo_config.get("max_grad_norm", 0.5),
+                use_gpu=training_config.get("use_gpu", True),
+                tensorboard_log=tensorboard_log,
+                verbose=training_config.get("verbose", 1)
             )
             
             # Create callbacks
@@ -242,9 +276,14 @@ class Trainer:
             Config dictionary
         """
         try:
-            with open(config_path, 'r') as f:
+            candidate = Path(config_path)
+            if not candidate.is_file():
+                repo_root = Path(__file__).resolve().parents[3]
+                candidate = repo_root / config_path
+
+            with open(candidate, 'r') as f:
                 config = yaml.safe_load(f)
-            logger.info(f"Loaded config from {config_path}")
+            logger.info(f"Loaded config from {candidate}")
             return config
         except Exception as e:
             logger.warning(f"Failed to load config from {config_path}: {str(e)}")

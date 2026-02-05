@@ -70,7 +70,7 @@ class Episode(Base):
     
     # Episode metadata
     markets_traded = Column(JSON, nullable=True)  # List of market IDs
-    metadata = Column(JSON, nullable=True)  # Additional info
+    extra_metadata = Column("metadata", JSON, nullable=True)  # Additional info
     
     # Relationships
     training_run = relationship("TrainingRun", back_populates="episodes")
@@ -136,7 +136,7 @@ class Market(Base):
     
     # Historical data
     price_history = Column(JSON, nullable=True)  # Time series of prices
-    metadata = Column(JSON, nullable=True)
+    extra_metadata = Column("metadata", JSON, nullable=True)
     
     # Data collection
     last_updated = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -185,7 +185,7 @@ class CryptoSymbol(Base):
     base_asset = Column(String(20), nullable=True)
     quote_asset = Column(String(20), nullable=True)
     status = Column(String(20), default='active')
-    metadata = Column(JSON, nullable=True)
+    extra_metadata = Column("metadata", JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     last_updated = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

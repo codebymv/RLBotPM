@@ -64,6 +64,7 @@ class CircuitBreaker:
         # Status
         self.status = CircuitBreakerStatus.ACTIVE
         self.events: List[CircuitBreakerEvent] = []
+        self._last_triggered_at: Dict[str, datetime] = {}
         
         # Tracking metrics
         self.daily_pnl: Dict[str, float] = {}  # date -> total P&L
@@ -329,17 +330,39 @@ class CircuitBreaker:
             threshold: Threshold that was exceeded
             severity: 'warning' or 'critical'
         """
+        now = datetime.now()
+
+        if self.settings.TRAINING_MODE:
+            last_triggered = self._last_triggered_at.get(rule)
+            if last_triggered and (now - last_triggered) < timedelta(seconds=60):
+                return
+
+            self._last_triggered_at[rule] = now
+            event = CircuitBreakerEvent(
+                timestamp=now,
+                rule_violated=rule,
+                description=description,
+                current_value=current_value,
+                threshold=threshold,
+                severity="warning"
+            )
+            self.events.append(event)
+            self.status = CircuitBreakerStatus.TRIGGERED
+
+            logger.warning(f"Circuit breaker would trigger (training mode): {description}")
+            return
+
         event = CircuitBreakerEvent(
-            timestamp=datetime.now(),
+            timestamp=now,
             rule_violated=rule,
             description=description,
             current_value=current_value,
             threshold=threshold,
             severity=severity
         )
-        
+
         self.events.append(event)
         self.status = CircuitBreakerStatus.PAUSED
-        
+
         logger.critical(f"CIRCUIT BREAKER TRIGGERED: {description}")
-        logger.critical(f"Trading PAUSED - Human review required")
+        logger.critical("Trading PAUSED - Human review required")

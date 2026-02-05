@@ -1,6 +1,7 @@
 """Training infrastructure"""
 
 from .trainer import Trainer
+from .evaluator import Evaluator
 from .callbacks import (
     CircuitBreakerCallback,
     PerformanceLogCallback,
@@ -10,6 +11,7 @@ from .callbacks import (
 
 __all__ = [
     "Trainer",
+    "Evaluator",
     "CircuitBreakerCallback",
     "PerformanceLogCallback",
     "CheckpointCallback",

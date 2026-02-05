@@ -1,7 +1,7 @@
 # Core RL Framework
 stable-baselines3==2.2.1
 gymnasium==0.29.1
-torch==2.1.2
+torch==2.2.2
 
 # Data Processing
 numpy==1.26.3
@@ -20,7 +20,7 @@ websockets==12.0
 
 # Feature Engineering
 scikit-learn==1.4.0
-ta-lib==0.4.28  # Technical analysis indicators (optional)
+# ta-lib==0.4.28  # Technical analysis indicators (optional; needs system ta-lib)
 
 # NLP (for market embeddings)
 sentence-transformers==2.3.1

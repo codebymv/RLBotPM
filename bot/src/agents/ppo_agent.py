@@ -63,7 +63,7 @@ class PPOAgent:
         gamma: float = 0.99,
         gae_lambda: float = 0.95,
         clip_range: float = 0.2,
-        ent_coef: float = 0.01,
+        ent_coef: float = 0.02,
         vf_coef: float = 0.5,
         max_grad_norm: float = 0.5,
         use_gpu: bool = True,
@@ -178,10 +178,36 @@ class PPOAgent:
         Returns:
             (action, state) tuple
         """
-        action, state = self.model.predict(
-            observation,
-            deterministic=deterministic
-        )
+        valid_actions = None
+        base_env = None
+        if hasattr(self.env, "envs") and self.env.envs:
+            base_env = self.env.envs[0]
+        if base_env is not None:
+            if hasattr(base_env, "get_wrapper_attr"):
+                try:
+                    valid_actions = base_env.get_wrapper_attr("get_valid_actions")()
+                except AttributeError:
+                    valid_actions = None
+            if valid_actions is None and hasattr(base_env, "unwrapped") and hasattr(base_env.unwrapped, "get_valid_actions"):
+                valid_actions = base_env.unwrapped.get_valid_actions()
+
+        if valid_actions:
+            probs = self.get_action_probabilities(observation)
+            if probs.ndim == 2:
+                probs = probs[0]
+            mask = np.zeros_like(probs, dtype=bool)
+            mask[valid_actions] = True
+            masked_probs = np.where(mask, probs, 0.0)
+            total = float(masked_probs.sum())
+
+            if total > 0:
+                if deterministic:
+                    action = int(np.argmax(masked_probs))
+                else:
+                    action = int(np.random.choice(len(masked_probs), p=masked_probs / total))
+                return action, None
+
+        action, state = self.model.predict(observation, deterministic=deterministic)
         return int(action), state
     
     def save(self, path: str):
@@ -229,6 +255,8 @@ class PPOAgent:
         """
         # Get policy distribution
         obs_tensor = torch.as_tensor(observation).to(self.device)
+        if obs_tensor.ndim == 1:
+            obs_tensor = obs_tensor.unsqueeze(0)
         with torch.no_grad():
             distribution = self.model.policy.get_distribution(obs_tensor)
             probs = distribution.distribution.probs.cpu().numpy()

@@ -62,7 +62,8 @@ def train(episodes, checkpoint, config):
 @cli.command()
 @click.option('--model', required=True, help='Path to trained model')
 @click.option('--episodes', default=100, help='Number of evaluation episodes')
-def evaluate(model, episodes):
+@click.option('--stochastic', is_flag=True, help='Use stochastic actions for evaluation')
+def evaluate(model, episodes, stochastic):
     """Evaluate a trained model on test data"""
     console.print(f"\n[bold cyan]Evaluating model:[/bold cyan] {model}")
     
@@ -70,16 +71,158 @@ def evaluate(model, episodes):
     
     try:
         evaluator = Evaluator(model_path=model)
-        results = evaluator.evaluate(num_episodes=episodes)
+        results = evaluator.evaluate(num_episodes=episodes, deterministic=not stochastic)
         
         # Display results
         console.print("\n[bold green]Evaluation Results:[/bold green]")
         console.print(f"  Total Return: {results['total_return']:.2%}")
         console.print(f"  Sharpe Ratio: {results['sharpe_ratio']:.3f}")
+        if "sortino_ratio" in results:
+            console.print(f"  Sortino Ratio: {results['sortino_ratio']:.3f}")
+        if "cvar_95" in results:
+            console.print(f"  CVaR (95%): {results['cvar_95']:.3f}")
         console.print(f"  Max Drawdown: {results['max_drawdown']:.2%}")
         console.print(f"  Win Rate: {results['win_rate']:.2%}")
         console.print(f"  Avg Trade P&L: ${results['avg_trade_pnl']:.2f}")
+        if "profit_factor" in results:
+            console.print(f"  Profit Factor: {results['profit_factor']:.2f}")
+        if "avg_trade_duration" in results:
+            console.print(f"  Avg Trade Duration: {results['avg_trade_duration']:.1f}")
+        if "turnover" in results:
+            console.print(f"  Turnover: {results['turnover']:.2f}x")
+        if "total_fees" in results:
+            console.print(f"  Total Fees: ${results['total_fees']:.2f}")
+        if "flat_ratio" in results:
+            console.print(f"  Flat Ratio: {results['flat_ratio']:.2%}")
+        if "in_position_ratio" in results:
+            console.print(f"  In-Position Ratio: {results['in_position_ratio']:.2%}")
+        if "avg_hold_steps" in results:
+            console.print(f"  Avg Hold Steps: {results['avg_hold_steps']:.1f}")
+
+        action_counts = results.get("action_counts", {})
+        executed_counts = results.get("executed_counts", {})
+        block_reasons = results.get("block_reasons", {})
+
+        if action_counts:
+            console.print("\n[bold]Action counts:[/bold]")
+            for action, count in sorted(action_counts.items()):
+                console.print(f"  {action}: {count}")
+
+        if executed_counts:
+            console.print("\n[bold]Executed actions:[/bold]")
+            for action, count in executed_counts.items():
+                console.print(f"  {action}: {count}")
+
+        if block_reasons:
+            console.print("\n[bold]Blocked reasons:[/bold]")
+            for reason, count in block_reasons.items():
+                console.print(f"  {reason}: {count}")
+
+        auto_exits = results.get("auto_exits", {})
+        if auto_exits:
+            console.print("\n[bold]Auto exits:[/bold]")
+            for reason, count in auto_exits.items():
+                console.print(f"  {reason}: {count}")
         
+    except Exception as e:
+        console.print(f"\n[bold red]✗ Error:[/bold red] {str(e)}")
+        raise
+
+
+@cli.command("data-qa")
+@click.option('--days', default=None, type=int, help='Override days to inspect')
+def data_qa(days):
+    """Run data quality checks on OHLCV candles"""
+    console.print("\n[bold cyan]Data Quality Report[/bold cyan]")
+
+    from src.data.qa_report import build_data_quality_report
+    from src.data.sources.base import DataUnavailableError
+
+    try:
+        report = build_data_quality_report(days=days)
+        console.print(
+            f"Source={report['source']} | Interval={report['interval']} | Days={report['days']} | "
+            f"Symbols={report['symbols']} | Rows={report['total_rows']}"
+        )
+        console.print(
+            f"Total missing={report['total_missing']} | Total duplicates={report['total_duplicates']}"
+        )
+
+        worst = sorted(
+            report["symbols_report"].items(),
+            key=lambda item: item[1]["missing_pct"],
+            reverse=True,
+        )[:5]
+        if worst:
+            console.print("\n[bold]Worst symbols (by missing %):[/bold]")
+            for symbol, stats in worst:
+                console.print(
+                    f"  {symbol}: missing={stats['missing']} "
+                    f"({stats['missing_pct']:.2%}), duplicates={stats['duplicates']}, "
+                    f"max_gap_hours={stats['max_gap_hours']:.1f}"
+                )
+
+    except DataUnavailableError as e:
+        console.print(f"\n[bold red]✗ Data Error:[/bold red] {str(e)}")
+        raise
+    except Exception as e:
+        console.print(f"\n[bold red]✗ Error:[/bold red] {str(e)}")
+        raise
+
+
+@cli.command("data-dedupe")
+@click.option('--dry-run', is_flag=True, help='Only report duplicate count')
+def data_dedupe(dry_run):
+    """Remove duplicate candles from the database"""
+    console.print("\n[bold cyan]Data Deduplication[/bold cyan]")
+
+    from src.data.cleanup import count_duplicate_candles, dedupe_crypto_candles
+
+    duplicates = count_duplicate_candles()
+    console.print(f"Duplicate candles found: {duplicates}")
+
+    if dry_run or duplicates == 0:
+        return
+
+    removed = dedupe_crypto_candles()
+    console.print(f"Removed {removed} duplicate candles")
+
+
+@cli.command("walk-forward")
+@click.option('--folds', default=3, type=int, help='Number of folds')
+@click.option('--train-days', default=8, type=int, help='Training window in days')
+@click.option('--test-days', default=3, type=int, help='Test window in days')
+@click.option('--train-episodes', default=1000, type=int, help='Training episodes per fold')
+@click.option('--eval-episodes', default=20, type=int, help='Evaluation episodes per fold')
+def walk_forward(folds, train_days, test_days, train_episodes, eval_episodes):
+    """Run walk-forward training and evaluation"""
+    console.print("\n[bold cyan]Walk-Forward Evaluation[/bold cyan]")
+
+    from src.training.walk_forward import run_walk_forward
+    from src.data.sources.base import DataUnavailableError
+
+    try:
+        results = run_walk_forward(
+            folds=folds,
+            train_days=train_days,
+            test_days=test_days,
+            train_episodes=train_episodes,
+            eval_episodes=eval_episodes,
+        )
+
+        for result in results:
+            console.print(
+                f"Fold {result.fold}: "
+                f"return={result.total_return:.2%}, "
+                f"sharpe={result.sharpe_ratio:.3f}, "
+                f"drawdown={result.max_drawdown:.2%}, "
+                f"win_rate={result.win_rate:.2%}, "
+                f"avg_trade_pnl=${result.avg_trade_pnl:.2f}"
+            )
+
+    except DataUnavailableError as e:
+        console.print(f"\n[bold red]✗ Data Error:[/bold red] {str(e)}")
+        raise
     except Exception as e:
         console.print(f"\n[bold red]✗ Error:[/bold red] {str(e)}")
         raise

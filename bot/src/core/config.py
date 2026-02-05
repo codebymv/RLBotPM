@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     
     # Bot Configuration
     MODEL_SAVE_PATH: str = Field(default="./models", description="Directory to save model checkpoints")
+    TRAINING_MODE: bool = Field(default=True, description="Relax safety enforcement during training")
     DATA_SOURCE: str = Field(default="coinbase", description="Primary data source adapter")
     DATA_STRICT_MODE: bool = Field(default=True, description="Fail fast when data is unavailable")
     DATA_INTERVAL: str = Field(default="1h", description="OHLCV interval for training")
@@ -64,7 +65,7 @@ class Settings(BaseSettings):
     CORS_ORIGINS: str = Field(default="http://localhost:3000", description="Allowed CORS origins")
     
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=(".env", "../.env"),
         env_file_encoding="utf-8",
         case_sensitive=True,
         extra="ignore"
