@@ -130,6 +130,26 @@ python main.py train --episodes 1000
 
 This runs a quick training session with 1000 episodes.
 
+### LSTM Training (RecurrentPPO)
+
+Enable LSTM policy and sequence length via CLI overrides:
+
+```bash
+python main.py train --episodes 20000 --policy MlpLstmPolicy --sequence-length 10
+```
+
+### A/B Comparison (LSTM vs MLP)
+
+```bash
+python main.py compare \
+  --model-a models/lstm_model \
+  --policy-a MlpLstmPolicy \
+  --model-b models/mlp_model \
+  --policy-b MlpPolicy \
+  --seq-b 10 \
+  --episodes 200
+```
+
 ### Option 2: Full System (Bot + API + Dashboard)
 
 **Terminal 1 - Bot Training:**

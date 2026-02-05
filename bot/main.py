@@ -32,7 +32,9 @@ def cli():
 @click.option('--episodes', default=10000, help='Number of training episodes')
 @click.option('--checkpoint', default=None, help='Resume from checkpoint path')
 @click.option('--config', default='shared/config/model_config.yaml', help='Config file path')
-def train(episodes, checkpoint, config):
+@click.option('--policy', default=None, help='Policy type (MlpPolicy or MlpLstmPolicy)')
+@click.option('--sequence-length', default=None, type=int, help='Sequence length for frame stacking')
+def train(episodes, checkpoint, config, policy, sequence_length):
     """Train the RL agent on historical data"""
     console.print(f"\n[bold green]Starting training:[/bold green] {episodes} episodes")
     
@@ -43,7 +45,12 @@ def train(episodes, checkpoint, config):
     from src.training.trainer import Trainer
     
     try:
-        trainer = Trainer(config_path=config)
+        overrides = {}
+        if policy:
+            overrides["ppo"] = {"policy_type": policy}
+        if sequence_length:
+            overrides["recurrent"] = {"sequence_length": sequence_length}
+        trainer = Trainer(config_path=config, overrides=overrides or None)
         
         if checkpoint:
             trainer.load_checkpoint(checkpoint)
@@ -63,14 +70,16 @@ def train(episodes, checkpoint, config):
 @click.option('--model', required=True, help='Path to trained model')
 @click.option('--episodes', default=100, help='Number of evaluation episodes')
 @click.option('--stochastic', is_flag=True, help='Use stochastic actions for evaluation')
-def evaluate(model, episodes, stochastic):
+@click.option('--policy', default="MlpPolicy", help='Policy type (MlpPolicy or MlpLstmPolicy)')
+@click.option('--sequence-length', default=1, type=int, help='Sequence length for frame stacking')
+def evaluate(model, episodes, stochastic, policy, sequence_length):
     """Evaluate a trained model on test data"""
     console.print(f"\n[bold cyan]Evaluating model:[/bold cyan] {model}")
     
     from src.training.evaluator import Evaluator
     
     try:
-        evaluator = Evaluator(model_path=model)
+        evaluator = Evaluator(model_path=model, policy_type=policy, sequence_length=sequence_length)
         results = evaluator.evaluate(num_episodes=episodes, deterministic=not stochastic)
         
         # Display results
@@ -127,6 +136,41 @@ def evaluate(model, episodes, stochastic):
     except Exception as e:
         console.print(f"\n[bold red]✗ Error:[/bold red] {str(e)}")
         raise
+
+
+@cli.command("compare")
+@click.option('--model-a', required=True, help='Path to model A')
+@click.option('--model-b', required=True, help='Path to model B')
+@click.option('--policy-a', default="MlpPolicy", help='Policy type for model A')
+@click.option('--policy-b', default="MlpLstmPolicy", help='Policy type for model B')
+@click.option('--seq-a', default=1, type=int, help='Sequence length for model A')
+@click.option('--seq-b', default=1, type=int, help='Sequence length for model B')
+@click.option('--episodes', default=100, type=int, help='Number of evaluation episodes')
+@click.option('--stochastic', is_flag=True, help='Use stochastic actions for evaluation')
+def compare_models_cmd(model_a, model_b, policy_a, policy_b, seq_a, seq_b, episodes, stochastic):
+    """Compare two models (A/B) on identical episodes"""
+    console.print("\n[bold cyan]Comparing models[/bold cyan]")
+
+    from src.training.evaluator import compare_models
+
+    results = compare_models(
+        model_a_path=model_a,
+        model_b_path=model_b,
+        policy_a=policy_a,
+        policy_b=policy_b,
+        seq_a=seq_a,
+        seq_b=seq_b,
+        episodes=episodes,
+        deterministic=not stochastic,
+    )
+
+    console.print("\n[bold]Model A:[/bold]")
+    for key, value in results["model_a"].items():
+        console.print(f"  {key}: {value}")
+
+    console.print("\n[bold]Model B:[/bold]")
+    for key, value in results["model_b"].items():
+        console.print(f"  {key}: {value}")
 
 
 @cli.command("data-qa")

@@ -8,11 +8,11 @@ computes high-level performance metrics.
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from typing import Dict, List
+from typing import Dict, List, Optional, Sequence
 import numpy as np
 
 from ..agents import PPOAgent
-from ..environment import CryptoTradingEnv
+from ..environment import CryptoTradingEnv, SequenceStackWrapper
 from ..data import CryptoSymbol, get_db_session
 from ..data.collectors import CryptoDataLoader
 from ..data.sources.base import DataUnavailableError
@@ -28,20 +28,32 @@ class Evaluator:
     Evaluate a trained PPO model on real OHLCV data.
     """
 
-    def __init__(self, model_path: str):
+    def __init__(self, model_path: str, policy_type: str = "MlpPolicy", sequence_length: int = 1):
         self.settings = get_settings()
         self.model_path = model_path
+        self.policy_type = policy_type
+        self.sequence_length = int(sequence_length)
 
         dataset = self._load_dataset()
-        self.env = CryptoTradingEnv(
+        base_env = CryptoTradingEnv(
             dataset=dataset,
             interval=self.settings.DATA_INTERVAL,
+            sequence_length=1,
         )
+        if self.policy_type == "MlpPolicy" and self.sequence_length > 1:
+            self.env = SequenceStackWrapper(base_env, sequence_length=self.sequence_length, flatten=True)
+        else:
+            self.env = base_env
 
-        self.agent = PPOAgent(env=self.env, use_gpu=False)
+        self.agent = PPOAgent(env=self.env, use_gpu=False, policy_type=self.policy_type)
         self.agent.load(model_path)
 
-    def evaluate(self, num_episodes: int = 100, deterministic: bool = True) -> Dict[str, float]:
+    def evaluate(
+        self,
+        num_episodes: int = 100,
+        deterministic: bool = True,
+        seeds: Optional[Sequence[int]] = None,
+    ) -> Dict[str, float]:
         """
         Run evaluation episodes and compute metrics.
         """
@@ -68,17 +80,28 @@ class Evaluator:
         profit_wins = 0.0
         profit_losses = 0.0
 
-        for _ in range(num_episodes):
-            obs, info = self.env.reset()
+        if seeds is None:
+            seeds = list(range(num_episodes))
+
+        for idx in range(num_episodes):
+            obs, info = self.env.reset(seed=seeds[idx])
             done = False
             truncated = False
             max_drawdown = 0.0
             position_streak = 0
+            lstm_state = None
+            episode_start = np.ones((1,), dtype=bool)
 
             while not (done or truncated):
-                action, _ = self.agent.predict(obs, deterministic=deterministic)
+                action, lstm_state = self.agent.predict(
+                    obs,
+                    deterministic=deterministic,
+                    state=lstm_state,
+                    episode_start=episode_start,
+                )
                 action_counts[action] = action_counts.get(action, 0) + 1
                 obs, reward, done, truncated, info = self.env.step(action)
+                episode_start = np.array([done or truncated], dtype=bool)
 
                 total_steps += 1
                 if info.get("num_positions", 0) > 0:
@@ -232,4 +255,34 @@ class Evaluator:
         if dataset is None or dataset.empty:
             raise DataUnavailableError("Dataset is empty after loading. Check data pipeline.")
 
+        min_rows = 500 + (self.sequence_length if self.policy_type == "MlpPolicy" else 1) + 1
+        counts = dataset.groupby("symbol").size()
+        valid_symbols = counts[counts >= min_rows].index.tolist()
+        dataset = dataset[dataset["symbol"].isin(valid_symbols)].reset_index(drop=True)
+        if dataset.empty:
+            raise DataUnavailableError("No symbols meet minimum row requirement for evaluation.")
+
         return dataset
+
+
+def compare_models(
+    model_a_path: str,
+    model_b_path: str,
+    policy_a: str = "MlpPolicy",
+    policy_b: str = "MlpLstmPolicy",
+    seq_a: int = 1,
+    seq_b: int = 1,
+    episodes: int = 100,
+    deterministic: bool = True,
+) -> Dict[str, Dict[str, float]]:
+    """
+    Compare two models on identical episode seeds.
+    """
+    seeds = list(range(episodes))
+    eval_a = Evaluator(model_path=model_a_path, policy_type=policy_a, sequence_length=seq_a)
+    eval_b = Evaluator(model_path=model_b_path, policy_type=policy_b, sequence_length=seq_b)
+
+    results_a = eval_a.evaluate(num_episodes=episodes, deterministic=deterministic, seeds=seeds)
+    results_b = eval_b.evaluate(num_episodes=episodes, deterministic=deterministic, seeds=seeds)
+
+    return {"model_a": results_a, "model_b": results_b}

@@ -12,6 +12,7 @@ setup(
     python_requires=">=3.10",
     install_requires=[
         "stable-baselines3>=2.2.1",
+        "sb3-contrib>=2.2.1",
         "gymnasium>=0.29.1",
         "torch>=2.1.2",
         "numpy>=1.26.3",

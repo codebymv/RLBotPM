@@ -64,6 +64,7 @@ class CryptoTradingEnv(gym.Env):
         initial_capital: Optional[float] = None,
         max_steps: int = 500,
         transaction_cost: Optional[float] = None,
+        sequence_length: int = 1,
     ):
         """
         Initialize environment with a real OHLCV dataset.
@@ -83,6 +84,7 @@ class CryptoTradingEnv(gym.Env):
         self.transaction_cost = transaction_cost or self.settings.TRANSACTION_COST_PCT
         self.max_steps = max_steps
         self.interval = interval
+        self.sequence_length = max(1, int(sequence_length))
         self.reward_config = self._load_reward_config()
         self.risk_config = self._load_risk_config()
         self.min_hold_steps = int(self.reward_config.get("min_hold_steps", 0))
@@ -401,17 +403,20 @@ class CryptoTradingEnv(gym.Env):
         if max_available <= 2:
             raise DataUnavailableError("No symbols with sufficient data for episode.")
 
-        if max_available <= self.max_steps + 1:
-            self.max_steps = max_available - 2
+        required = self.max_steps + self.sequence_length + 1
+        if max_available <= required:
+            self.max_steps = max_available - self.sequence_length - 1
             logger.warning(
                 "Insufficient history for requested max_steps; "
                 f"reducing max_steps to {self.max_steps}."
             )
+            if self.max_steps <= 0:
+                raise DataUnavailableError("Insufficient history for requested sequence length.")
 
         valid_symbols = [
             symbol
             for symbol, data in self.data_by_symbol.items()
-            if len(data) > self.max_steps + 1
+            if len(data) > self.max_steps + self.sequence_length + 1
         ]
         if not valid_symbols:
             raise DataUnavailableError("No symbols with sufficient data for episode.")

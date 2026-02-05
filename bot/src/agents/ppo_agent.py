@@ -19,6 +19,7 @@ Key hyperparameters explained:
 """
 
 from stable_baselines3 import PPO
+from sb3_contrib import RecurrentPPO
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 from stable_baselines3.common.callbacks import BaseCallback
 import torch
@@ -56,6 +57,8 @@ class PPOAgent:
     def __init__(
         self,
         env: Optional[CryptoTradingEnv] = None,
+        policy_type: str = "MlpPolicy",
+        policy_kwargs: Optional[Dict] = None,
         learning_rate: float = 3e-4,
         n_steps: int = 2048,
         batch_size: int = 256,
@@ -90,6 +93,9 @@ class PPOAgent:
             verbose: Verbosity level (0=none, 1=info, 2=debug)
         """
         self.settings = get_settings()
+        self.policy_type = policy_type
+        self.policy_kwargs = policy_kwargs
+        self.is_recurrent = policy_type == "MlpLstmPolicy"
         
         # Require a real-data environment
         if env is None:
@@ -106,24 +112,45 @@ class PPOAgent:
             self.device = "cpu"
             logger.info("Using CPU for training")
         
-        # Create PPO model
-        self.model = PPO(
-            policy="MlpPolicy",  # Multi-layer perceptron policy
-            env=self.env,
-            learning_rate=learning_rate,
-            n_steps=n_steps,
-            batch_size=batch_size,
-            n_epochs=n_epochs,
-            gamma=gamma,
-            gae_lambda=gae_lambda,
-            clip_range=clip_range,
-            ent_coef=ent_coef,
-            vf_coef=vf_coef,
-            max_grad_norm=max_grad_norm,
-            verbose=verbose,
-            device=self.device,
-            tensorboard_log=tensorboard_log
-        )
+        if self.is_recurrent:
+            self.model = RecurrentPPO(
+                policy=self.policy_type,
+                env=self.env,
+                learning_rate=learning_rate,
+                n_steps=n_steps,
+                batch_size=batch_size,
+                n_epochs=n_epochs,
+                gamma=gamma,
+                gae_lambda=gae_lambda,
+                clip_range=clip_range,
+                ent_coef=ent_coef,
+                vf_coef=vf_coef,
+                max_grad_norm=max_grad_norm,
+                verbose=verbose,
+                device=self.device,
+                tensorboard_log=tensorboard_log,
+                policy_kwargs=self.policy_kwargs,
+            )
+        else:
+            # Create PPO model
+            self.model = PPO(
+                policy=self.policy_type,
+                env=self.env,
+                learning_rate=learning_rate,
+                n_steps=n_steps,
+                batch_size=batch_size,
+                n_epochs=n_epochs,
+                gamma=gamma,
+                gae_lambda=gae_lambda,
+                clip_range=clip_range,
+                ent_coef=ent_coef,
+                vf_coef=vf_coef,
+                max_grad_norm=max_grad_norm,
+                verbose=verbose,
+                device=self.device,
+                tensorboard_log=tensorboard_log,
+                policy_kwargs=self.policy_kwargs,
+            )
         
         logger.info("PPO agent initialized")
         logger.info(f"  Device: {self.device}")
@@ -166,7 +193,9 @@ class PPOAgent:
     def predict(
         self,
         observation: np.ndarray,
-        deterministic: bool = True
+        deterministic: bool = True,
+        state: Optional[np.ndarray] = None,
+        episode_start: Optional[np.ndarray] = None,
     ) -> tuple[int, Optional[np.ndarray]]:
         """
         Predict action for given observation
@@ -178,6 +207,15 @@ class PPOAgent:
         Returns:
             (action, state) tuple
         """
+        if self.is_recurrent:
+            action, next_state = self.model.predict(
+                observation,
+                state=state,
+                episode_start=episode_start,
+                deterministic=deterministic,
+            )
+            return int(action), next_state
+
         valid_actions = None
         base_env = None
         if hasattr(self.env, "envs") and self.env.envs:
@@ -207,8 +245,8 @@ class PPOAgent:
                     action = int(np.random.choice(len(masked_probs), p=masked_probs / total))
                 return action, None
 
-        action, state = self.model.predict(observation, deterministic=deterministic)
-        return int(action), state
+        action, next_state = self.model.predict(observation, deterministic=deterministic)
+        return int(action), next_state
     
     def save(self, path: str):
         """
@@ -234,11 +272,18 @@ class PPOAgent:
         if not os.path.exists(path + ".zip"):
             raise FileNotFoundError(f"Model not found at {path}")
         
-        self.model = PPO.load(
-            path,
-            env=self.env,
-            device=self.device
-        )
+        if self.is_recurrent:
+            self.model = RecurrentPPO.load(
+                path,
+                env=self.env,
+                device=self.device
+            )
+        else:
+            self.model = PPO.load(
+                path,
+                env=self.env,
+                device=self.device
+            )
         logger.info(f"Model loaded from {path}")
     
     def get_action_probabilities(self, observation: np.ndarray) -> np.ndarray:
@@ -332,7 +377,13 @@ class PPOAgent:
         }
 
 
-def create_parallel_env(dataset, interval: str = "1h", n_envs: int = 4) -> SubprocVecEnv:
+def create_parallel_env(
+    dataset,
+    interval: str = "1h",
+    n_envs: int = 4,
+    sequence_length: int = 1,
+    frame_stack: bool = False,
+) -> SubprocVecEnv:
     """
     Create multiple parallel environments for faster training.
 
@@ -344,9 +395,14 @@ def create_parallel_env(dataset, interval: str = "1h", n_envs: int = 4) -> Subpr
     if dataset is None or len(dataset) == 0:
         raise DataUnavailableError("Parallel env requires real OHLCV dataset.")
 
+    from ..environment import SequenceStackWrapper
+
     def make_env():
         def _init():
-            return CryptoTradingEnv(dataset=dataset, interval=interval)
+            env = CryptoTradingEnv(dataset=dataset, interval=interval, sequence_length=sequence_length)
+            if frame_stack and sequence_length > 1:
+                env = SequenceStackWrapper(env, sequence_length=sequence_length, flatten=True)
+            return env
         return _init
 
     return SubprocVecEnv([make_env() for _ in range(n_envs)])

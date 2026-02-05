@@ -17,7 +17,12 @@ import yaml
 from stable_baselines3.common.callbacks import CallbackList
 
 from datetime import timedelta
-from ..environment import CryptoTradingEnv, ExplorationWrapper, ActionMaskingWrapper
+from ..environment import (
+    CryptoTradingEnv,
+    SequenceStackWrapper,
+    ExplorationWrapper,
+    ActionMaskingWrapper,
+)
 from ..agents import PPOAgent
 from ..data import TrainingRun, init_db, get_db_session, CryptoSymbol
 from ..data.collectors import CryptoDataLoader
@@ -43,7 +48,7 @@ class Trainer:
         trainer.train(total_episodes=100000)
     """
     
-    def __init__(self, config_path: Optional[str] = None):
+    def __init__(self, config_path: Optional[str] = None, overrides: Optional[Dict] = None):
         """
         Initialize trainer
         
@@ -54,6 +59,8 @@ class Trainer:
         
         # Load config if provided
         self.config = self._load_config(config_path) if config_path else {}
+        if overrides:
+            self._apply_overrides(overrides)
         
         # Initialize database
         init_db()
@@ -80,14 +87,35 @@ class Trainer:
         logger.info(f"Starting training: {total_episodes:,} episodes")
         
         try:
+            env_config = self.config.get("environment", {})
+            max_steps = env_config.get("max_steps", 500)
+            initial_capital = env_config.get("initial_capital", self.settings.INITIAL_CAPITAL)
+            transaction_cost = env_config.get("transaction_cost", self.settings.TRANSACTION_COST_PCT)
+
+            recurrent_config = self.config.get("recurrent", {})
+            sequence_length = int(recurrent_config.get("sequence_length", 1))
+
+            policy_type = self.config.get("ppo", {}).get("policy_type", "MlpPolicy")
+            use_sequence_stack = policy_type == "MlpPolicy" and sequence_length > 1
+            env_sequence_length = sequence_length if use_sequence_stack else 1
+            min_rows = max_steps + env_sequence_length + 1
+
             # Load real dataset (fail fast if unavailable)
-            dataset = self._load_dataset()
+            dataset = self._load_dataset(min_rows=min_rows)
 
             # Create environment
             base_env = CryptoTradingEnv(
                 dataset=dataset,
-                interval=self.settings.DATA_INTERVAL
+                interval=self.settings.DATA_INTERVAL,
+                initial_capital=initial_capital,
+                max_steps=max_steps,
+                transaction_cost=transaction_cost,
+                sequence_length=env_sequence_length,
             )
+
+            env = base_env
+            if use_sequence_stack:
+                env = SequenceStackWrapper(env, sequence_length=sequence_length, flatten=True)
             
             exploration_config = self.config.get("exploration", {})
             initial_epsilon = exploration_config.get("initial_epsilon", 0.9)
@@ -97,7 +125,7 @@ class Trainer:
 
             # Wrap with exploration to force action diversity during early training
             env = ExplorationWrapper(
-                base_env,
+                env,
                 initial_epsilon=initial_epsilon,
                 final_epsilon=final_epsilon,
                 decay_steps=int(total_episodes * decay_fraction),
@@ -112,8 +140,19 @@ class Trainer:
             log_root = training_config.get("tensorboard_log", "./logs/tensorboard")
             tensorboard_log = str(Path(log_root) / f"run_{self.training_run.id}")
 
+            policy_kwargs = None
+            if policy_type == "MlpLstmPolicy":
+                policy_kwargs = {
+                    "lstm_hidden_size": int(recurrent_config.get("lstm_hidden_size", 128)),
+                    "n_lstm_layers": int(recurrent_config.get("lstm_layers", 1)),
+                    "shared_lstm": bool(recurrent_config.get("shared_lstm", True)),
+                    "lstm_dropout": float(recurrent_config.get("lstm_dropout", 0.0)),
+                }
+
             agent = PPOAgent(
                 env=env,
+                policy_type=policy_type,
+                policy_kwargs=policy_kwargs,
                 learning_rate=ppo_config.get("learning_rate", 3e-4),
                 n_steps=ppo_config.get("n_steps", 2048),
                 batch_size=ppo_config.get("batch_size", 256),
@@ -288,6 +327,17 @@ class Trainer:
         except Exception as e:
             logger.warning(f"Failed to load config from {config_path}: {str(e)}")
             return {}
+
+    def _apply_overrides(self, overrides: Dict) -> None:
+        """
+        Apply CLI overrides to config.
+        """
+        for section, values in overrides.items():
+            if values is None:
+                continue
+            if section not in self.config or not isinstance(self.config.get(section), dict):
+                self.config[section] = {}
+            self.config[section].update(values)
     
     def _get_config_snapshot(self) -> Dict:
         """
@@ -309,7 +359,7 @@ class Trainer:
             'custom_config': self.config
         }
 
-    def _load_dataset(self):
+    def _load_dataset(self, min_rows: Optional[int] = None):
         """
         Load real OHLCV dataset from database.
         Raises DataUnavailableError if data is missing.
@@ -352,5 +402,14 @@ class Trainer:
 
         if dataset is None or dataset.empty:
             raise DataUnavailableError("Dataset is empty after loading. Check data pipeline.")
+
+        if min_rows:
+            counts = dataset.groupby("symbol").size()
+            valid_symbols = counts[counts >= min_rows].index.tolist()
+            dataset = dataset[dataset["symbol"].isin(valid_symbols)].reset_index(drop=True)
+            if dataset.empty:
+                raise DataUnavailableError(
+                    "No symbols meet minimum row requirement. Increase history or reduce steps."
+                )
 
         return dataset

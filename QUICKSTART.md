@@ -114,6 +114,19 @@ Open http://localhost:6006 to see:
 python main.py train --episodes 10000
 ```
 
+### Try LSTM Policy
+
+```powershell
+python main.py train --episodes 20000 --policy MlpLstmPolicy --sequence-length 10
+```
+
+### A/B Compare LSTM vs MLP
+
+```powershell
+python main.py compare --model-a models/lstm_model --policy-a MlpLstmPolicy `
+  --model-b models/mlp_model --policy-b MlpPolicy --seq-b 10 --episodes 200
+```
+
 More episodes = better learning!
 
 ### Evaluate Your Model

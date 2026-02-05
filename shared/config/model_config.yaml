@@ -2,6 +2,8 @@
 # These hyperparameters control how the RL agent learns
 
 ppo:
+  # Policy type: MlpPolicy or MlpLstmPolicy
+  policy_type: "MlpPolicy"
   # Learning rate - how fast the agent learns
   # 3e-4 is the standard value that works well across many problems
   learning_rate: 0.0003
@@ -41,6 +43,14 @@ ppo:
   # Gradient clipping
   # Prevents exploding gradients
   max_grad_norm: 0.5
+
+recurrent:
+  # Sequence length for frame stacking (MLP) or context windows
+  sequence_length: 10
+  lstm_hidden_size: 128
+  lstm_layers: 1
+  lstm_dropout: 0.0
+  shared_lstm: true
 
 # Training configuration
 training:
