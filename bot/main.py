@@ -500,6 +500,61 @@ def paper_trade_live(symbols, duration_hours, capital, trade_size_pct, entry_thr
         console.print(f"  Total Trades: {metrics['num_trades']}")
 
 
+@cli.command("rl-paper-trade")
+@click.option('--model', required=True, help='Path to trained model (e.g., models/best_model_run_73_step_955500)')
+@click.option('--symbol', default='BTC-USD', help='Trading symbol (e.g., BTC-USD, ETH-USD)')
+@click.option('--capital', default=1000.0, type=float, help='Starting capital in USD')
+@click.option('--interval', default='1h', help='Trading interval (1m, 5m, 15m, 1h)')
+@click.option('--duration', default=24, type=int, help='Duration in hours (0 = run indefinitely)')
+@click.option('--log-dir', default='./logs/paper_trading', help='Directory for trade logs')
+def rl_paper_trade(model, symbol, capital, interval, duration, log_dir):
+    """Run the trained RL model on live Coinbase data (paper trading).
+
+    This connects to Coinbase's public API, fetches real-time candles,
+    and uses the trained model to make buy/sell decisions with simulated
+    capital. All decisions are logged for later analysis.
+
+    \b
+    Example:
+      python main.py rl-paper-trade --model models/best_model_run_73_step_955500 --symbol BTC-USD --duration 48
+    """
+    console.print("\n[bold cyan]Starting RL Paper Trading (Live Mode)[/bold cyan]")
+    console.print(f"  Model: {model}")
+    console.print(f"  Symbol: {symbol}")
+    console.print(f"  Capital: ${capital:.2f}")
+    console.print(f"  Interval: {interval}")
+    console.print(f"  Duration: {duration}h {'(indefinite)' if duration == 0 else ''}")
+
+    from src.execution.live_rl_trader import LiveRLPaperTrader
+
+    try:
+        trader = LiveRLPaperTrader(
+            model_path=model,
+            symbol=symbol,
+            initial_capital=capital,
+            interval=interval,
+            log_dir=log_dir,
+        )
+
+        metrics = trader.run(duration_hours=duration, verbose=True)
+
+        # Print final metrics via Rich
+        console.print("\n[bold green]Final Metrics:[/bold green]")
+        console.print(f"  Total Return: {metrics['total_return_pct']:+.2f}%")
+        console.print(f"  Win Rate: {metrics['win_rate']:.1f}%")
+        console.print(f"  Profit Factor: {metrics['profit_factor']}")
+        console.print(f"  Total Trades: {metrics['total_trades']}")
+
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Paper trading stopped by user[/yellow]")
+    except FileNotFoundError as e:
+        console.print(f"\n[bold red]Model not found:[/bold red] {str(e)}")
+        console.print("[dim]Make sure the model path is correct (e.g., models/best_model_run_73_step_955500)[/dim]")
+    except Exception as e:
+        console.print(f"\n[bold red]Error:[/bold red] {str(e)}")
+        raise
+
+
 @cli.command()
 def info():
     """Display system information and configuration"""
