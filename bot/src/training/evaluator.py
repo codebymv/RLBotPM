@@ -164,6 +164,13 @@ class Evaluator:
         in_position_ratio = float(total_position_steps / total_steps) if total_steps else 0.0
         turnover = float(total_trade_value / (self.settings.INITIAL_CAPITAL * num_episodes)) if num_episodes else 0.0
         profit_factor = (profit_wins / profit_losses) if profit_losses > 0 else 0.0
+        winning_trades = [pnl for pnl in trade_pnls if pnl > 0]
+        losing_trades = [abs(pnl) for pnl in trade_pnls if pnl < 0]
+        avg_win_size = float(np.mean(winning_trades)) if winning_trades else 0.0
+        avg_loss_size = float(np.mean(losing_trades)) if losing_trades else 0.0
+        win_loss_ratio = (avg_win_size / avg_loss_size) if avg_loss_size > 0 else 0.0
+        fees_pct_of_gross_pnl = float(total_fees / profit_wins) if profit_wins > 0 else 0.0
+        trades_per_episode = float(len(trade_pnls) / num_episodes) if num_episodes else 0.0
 
         return {
             "total_return": float(np.mean(episode_returns)) if episode_returns else 0.0,
@@ -173,10 +180,15 @@ class Evaluator:
             "max_drawdown": float(np.max(episode_drawdowns)) if episode_drawdowns else 0.0,
             "win_rate": float(np.mean(episode_win_rates)) if episode_win_rates else 0.0,
             "avg_trade_pnl": float(np.mean(trade_pnls)) if trade_pnls else 0.0,
+            "avg_win_size": avg_win_size,
+            "avg_loss_size": avg_loss_size,
+            "win_loss_ratio": float(win_loss_ratio),
             "avg_trade_duration": avg_trade_duration,
             "turnover": turnover,
             "total_fees": float(total_fees),
             "profit_factor": float(profit_factor),
+            "fees_pct_of_gross_pnl": fees_pct_of_gross_pnl,
+            "trades_per_episode": trades_per_episode,
             "flat_ratio": flat_ratio,
             "in_position_ratio": in_position_ratio,
             "avg_hold_steps": avg_hold_steps,

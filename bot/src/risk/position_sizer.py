@@ -51,6 +51,10 @@ class PositionSizer:
         self.kelly_fraction = kelly_fraction
         
         logger.info(f"Position sizer initialized with {kelly_fraction:.0%} Kelly")
+
+    def set_kelly_fraction(self, kelly_fraction: float) -> None:
+        self.kelly_fraction = max(0.0, min(kelly_fraction, 1.0))
+        logger.debug("Updated Kelly fraction to %.2f", self.kelly_fraction)
     
     def calculate_position_size(
         self,
@@ -174,6 +178,36 @@ class PositionSizer:
             avg_loss=avg_loss,
             model_confidence=model_confidence
         )
+
+    def calculate_with_correlation(
+        self,
+        capital: float,
+        symbol: str,
+        current_positions: Dict[str, Dict],
+        model_confidence: Optional[float] = None,
+    ) -> Dict[str, float]:
+        """
+        Calculate position size with a simple correlation check.
+
+        Reduces size when adding positions correlated to existing holdings.
+        """
+        base_sizing = self.calculate_position_size(
+            capital=capital,
+            win_probability=0.5,
+            avg_win=1.0,
+            avg_loss=1.0,
+            model_confidence=model_confidence,
+        )
+
+        if not current_positions:
+            return base_sizing
+
+        if symbol.startswith("BTC") and any(
+            pos_symbol.startswith("BTC") for pos_symbol in current_positions.keys()
+        ):
+            base_sizing["suggested_size"] *= 0.5
+
+        return base_sizing
     
     def _confidence_to_multiplier(self, confidence: float) -> float:
         """

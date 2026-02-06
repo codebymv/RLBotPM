@@ -26,9 +26,9 @@ def _interval_to_pandas_freq(interval: str) -> str:
         "5m": "5min",
         "15m": "15min",
         "30m": "30min",
-        "1h": "1H",
-        "4h": "4H",
-        "1d": "1D",
+        "1h": "1h",
+        "4h": "4h",
+        "1d": "1d",
     }
     if interval not in mapping:
         raise DataUnavailableError(f"Unsupported interval: {interval}")

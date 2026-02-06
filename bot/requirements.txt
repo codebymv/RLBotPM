@@ -27,7 +27,7 @@ scikit-learn==1.8.0
 sentence-transformers==2.3.1
 
 # Monitoring & Logging
-tensorboard==2.15.1
+tensorboard==2.20.0
 python-dotenv==1.2.1
 pydantic==2.12.5
 pydantic-settings==2.12.0

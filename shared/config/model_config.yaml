@@ -45,12 +45,13 @@ ppo:
   max_grad_norm: 0.5
 
 recurrent:
-  # Sequence length for frame stacking (MLP) or context windows
-  sequence_length: 10
+  # Only used when policy_type is MlpLstmPolicy
+  sequence_length: 1
   lstm_hidden_size: 128
   lstm_layers: 1
   lstm_dropout: 0.0
-  shared_lstm: true
+  shared_lstm: false
+  enable_critic_lstm: true
 
 # Training configuration
 training:
@@ -75,6 +76,13 @@ training:
   
   # Verbosity (0=none, 1=info, 2=debug)
   verbose: 1
+
+  # Early stopping configuration
+  early_stopping:
+    eval_episodes: 50
+    patience: 3
+    min_delta: 0.0
+    metric: "sharpe_ratio"
 
 # Environment configuration
 environment:

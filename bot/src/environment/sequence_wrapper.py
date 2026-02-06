@@ -80,3 +80,14 @@ class SequenceStackWrapper(gym.Wrapper):
         if hasattr(self.env, "unwrapped") and hasattr(self.env.unwrapped, "get_valid_actions"):
             return self.env.unwrapped.get_valid_actions()
         return list(range(self.action_space.n))
+
+    def action_masks(self):
+        if hasattr(self.env, "get_wrapper_attr"):
+            try:
+                return self.env.get_wrapper_attr("action_masks")()
+            except AttributeError:
+                pass
+        if hasattr(self.env, "unwrapped") and hasattr(self.env.unwrapped, "action_masks"):
+            return self.env.unwrapped.action_masks()
+        mask = np.ones(self.action_space.n, dtype=bool)
+        return mask

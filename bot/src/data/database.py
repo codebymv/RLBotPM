@@ -239,7 +239,7 @@ def init_db():
     """
     engine = get_engine()
     Base.metadata.create_all(engine)
-    print("✓ Database schema initialized")
+    print("[OK] Database schema initialized")
 
 
 def get_db_session():

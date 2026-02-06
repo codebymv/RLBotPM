@@ -18,8 +18,7 @@ Key hyperparameters explained:
 - clip_range: How much policy can change per update (0.2 is standard)
 """
 
-from stable_baselines3 import PPO
-from sb3_contrib import RecurrentPPO
+from sb3_contrib import RecurrentPPO, MaskablePPO
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 from stable_baselines3.common.callbacks import BaseCallback
 import torch
@@ -132,8 +131,8 @@ class PPOAgent:
                 policy_kwargs=self.policy_kwargs,
             )
         else:
-            # Create PPO model
-            self.model = PPO(
+            # Create MaskablePPO model
+            self.model = MaskablePPO(
                 policy=self.policy_type,
                 env=self.env,
                 learning_rate=learning_rate,
@@ -216,37 +215,27 @@ class PPOAgent:
             )
             return int(action), next_state
 
-        valid_actions = None
+        action_masks = self._get_action_masks()
+        action, next_state = self.model.predict(
+            observation,
+            deterministic=deterministic,
+            action_masks=action_masks,
+        )
+        return int(action), next_state
+
+    def _get_action_masks(self) -> Optional[np.ndarray]:
         base_env = None
         if hasattr(self.env, "envs") and self.env.envs:
             base_env = self.env.envs[0]
         if base_env is not None:
             if hasattr(base_env, "get_wrapper_attr"):
                 try:
-                    valid_actions = base_env.get_wrapper_attr("get_valid_actions")()
+                    return base_env.get_wrapper_attr("action_masks")()
                 except AttributeError:
-                    valid_actions = None
-            if valid_actions is None and hasattr(base_env, "unwrapped") and hasattr(base_env.unwrapped, "get_valid_actions"):
-                valid_actions = base_env.unwrapped.get_valid_actions()
-
-        if valid_actions:
-            probs = self.get_action_probabilities(observation)
-            if probs.ndim == 2:
-                probs = probs[0]
-            mask = np.zeros_like(probs, dtype=bool)
-            mask[valid_actions] = True
-            masked_probs = np.where(mask, probs, 0.0)
-            total = float(masked_probs.sum())
-
-            if total > 0:
-                if deterministic:
-                    action = int(np.argmax(masked_probs))
-                else:
-                    action = int(np.random.choice(len(masked_probs), p=masked_probs / total))
-                return action, None
-
-        action, next_state = self.model.predict(observation, deterministic=deterministic)
-        return int(action), next_state
+                    pass
+            if hasattr(base_env, "unwrapped") and hasattr(base_env.unwrapped, "action_masks"):
+                return base_env.unwrapped.action_masks()
+        return None
     
     def save(self, path: str):
         """
@@ -279,7 +268,7 @@ class PPOAgent:
                 device=self.device
             )
         else:
-            self.model = PPO.load(
+            self.model = MaskablePPO.load(
                 path,
                 env=self.env,
                 device=self.device

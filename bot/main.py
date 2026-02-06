@@ -5,7 +5,10 @@ This is the command-line interface for the RL trading bot.
 Use this to train models, evaluate performance, and manage the bot.
 """
 
+import asyncio
 import click
+import numpy as np
+import json
 from rich.console import Console
 from rich.panel import Panel
 from dotenv import load_dotenv
@@ -34,7 +37,9 @@ def cli():
 @click.option('--config', default='shared/config/model_config.yaml', help='Config file path')
 @click.option('--policy', default=None, help='Policy type (MlpPolicy or MlpLstmPolicy)')
 @click.option('--sequence-length', default=None, type=int, help='Sequence length for frame stacking')
-def train(episodes, checkpoint, config, policy, sequence_length):
+@click.option('--checkpoint-frequency', default=10000, type=int, help='Save checkpoints every N episodes')
+@click.option('--eval-frequency', default=10000, type=int, help='Evaluate every N episodes')
+def train(episodes, checkpoint, config, policy, sequence_length, checkpoint_frequency, eval_frequency):
     """Train the RL agent on historical data"""
     console.print(f"\n[bold green]Starting training:[/bold green] {episodes} episodes")
     
@@ -55,14 +60,18 @@ def train(episodes, checkpoint, config, policy, sequence_length):
         if checkpoint:
             trainer.load_checkpoint(checkpoint)
         
-        trainer.train(total_episodes=episodes)
+        trainer.train(
+            total_episodes=episodes,
+            checkpoint_frequency=checkpoint_frequency,
+            eval_frequency=eval_frequency,
+        )
         
-        console.print("\n[bold green]✓[/bold green] Training completed!")
+        console.print("\n[bold green]OK[/bold green] Training completed!")
         
     except KeyboardInterrupt:
         console.print("\n[yellow]Training interrupted by user[/yellow]")
     except Exception as e:
-        console.print(f"\n[bold red]✗ Error:[/bold red] {str(e)}")
+        console.print(f"\n[bold red]Error:[/bold red] {str(e)}")
         raise
 
 
@@ -93,8 +102,18 @@ def evaluate(model, episodes, stochastic, policy, sequence_length):
         console.print(f"  Max Drawdown: {results['max_drawdown']:.2%}")
         console.print(f"  Win Rate: {results['win_rate']:.2%}")
         console.print(f"  Avg Trade P&L: ${results['avg_trade_pnl']:.2f}")
+        if "avg_win_size" in results:
+            console.print(f"  Avg Win Size: ${results['avg_win_size']:.2f}")
+        if "avg_loss_size" in results:
+            console.print(f"  Avg Loss Size: ${results['avg_loss_size']:.2f}")
+        if "win_loss_ratio" in results:
+            console.print(f"  Win/Loss Ratio: {results['win_loss_ratio']:.2f}")
         if "profit_factor" in results:
             console.print(f"  Profit Factor: {results['profit_factor']:.2f}")
+        if "fees_pct_of_gross_pnl" in results:
+            console.print(f"  Fees % of Gross PnL: {results['fees_pct_of_gross_pnl']:.2%}")
+        if "trades_per_episode" in results:
+            console.print(f"  Trades / Episode: {results['trades_per_episode']:.2f}")
         if "avg_trade_duration" in results:
             console.print(f"  Avg Trade Duration: {results['avg_trade_duration']:.1f}")
         if "turnover" in results:
@@ -134,7 +153,7 @@ def evaluate(model, episodes, stochastic, policy, sequence_length):
                 console.print(f"  {reason}: {count}")
         
     except Exception as e:
-        console.print(f"\n[bold red]✗ Error:[/bold red] {str(e)}")
+        console.print(f"\n[bold red]Error:[/bold red] {str(e)}")
         raise
 
 
@@ -207,10 +226,129 @@ def data_qa(days):
                 )
 
     except DataUnavailableError as e:
-        console.print(f"\n[bold red]✗ Data Error:[/bold red] {str(e)}")
+        console.print(f"\n[bold red]Data Error:[/bold red] {str(e)}")
         raise
     except Exception as e:
-        console.print(f"\n[bold red]✗ Error:[/bold red] {str(e)}")
+        console.print(f"\n[bold red]Error:[/bold red] {str(e)}")
+        raise
+
+
+@cli.command("paper-trade")
+@click.option('--model', required=True, help='Path to trained model')
+@click.option('--duration', default="24h", help='Duration to run (e.g., 24h, 7d)')
+@click.option('--capital', default=1000.0, help='Starting capital')
+@click.option('--interval', default="5m", help='Trading interval (1m,5m,15m,1h)')
+@click.option('--policy', default="MlpPolicy", help='Policy type (MlpPolicy or MlpLstmPolicy)')
+@click.option('--sequence-length', default=1, type=int, help='Sequence length for frame stacking')
+def paper_trade(model, duration, capital, interval, policy, sequence_length):
+    """Run paper trading with historical data replay."""
+    console.print("\n[bold cyan]Starting paper trading (replay mode)[/bold cyan]")
+    console.print(f"  Model: {model}")
+    console.print(f"  Duration: {duration}")
+    console.print(f"  Capital: ${capital:.2f}")
+    console.print(f"  Interval: {interval}")
+
+    from src.core.config import get_settings
+    from src.data.collectors.crypto_loader import CryptoDataLoader
+    from src.data.sources.base import DataUnavailableError
+    from src.environment import CryptoTradingEnv, SequenceStackWrapper
+    from src.execution.paper_trader import PaperTradingEngine
+    from src.agents import PPOAgent
+
+    settings = get_settings()
+    symbols = settings.DATA_SYMBOLS
+    if not symbols:
+        console.print("\n[bold red]Error:[/bold red] DATA_SYMBOLS is not set")
+        return
+
+    symbol_list = [s.strip() for s in symbols.split(",") if s.strip()]
+
+    interval_seconds = {
+        "1m": 60,
+        "5m": 300,
+        "15m": 900,
+        "1h": 3600,
+    }
+    if interval not in interval_seconds:
+        console.print(f"\n[bold red]Error:[/bold red] Unsupported interval: {interval}")
+        return
+
+    if duration.endswith("h"):
+        total_seconds = int(duration[:-1]) * 3600
+    elif duration.endswith("d"):
+        total_seconds = int(duration[:-1]) * 86400
+    else:
+        console.print("\n[bold red]Error:[/bold red] Duration must end with h or d")
+        return
+
+    total_steps = max(1, total_seconds // interval_seconds[interval])
+
+    try:
+        loader = CryptoDataLoader(source=settings.DATA_SOURCE)
+        days_back = max(1, total_seconds // 86400)
+        end_time = datetime.utcnow()
+        start_time = end_time - timedelta(days=days_back)
+        dataset = loader.load_dataset(
+            symbols=symbol_list,
+            interval=interval,
+            start=start_time,
+            end=end_time,
+        )
+
+        env = CryptoTradingEnv(
+            dataset=dataset,
+            interval=interval,
+            initial_capital=capital,
+            max_steps=total_steps,
+            transaction_cost=settings.TRANSACTION_COST_PCT,
+            sequence_length=1,
+        )
+
+        if policy == "MlpPolicy" and sequence_length > 1:
+            env = SequenceStackWrapper(env, sequence_length=sequence_length, flatten=True)
+
+        agent = PPOAgent(env=env, policy_type=policy)
+        agent.load(model)
+
+        paper_engine = PaperTradingEngine(initial_capital=capital, transaction_cost_pct=settings.TRANSACTION_COST_PCT)
+
+        obs, _ = env.reset()
+        lstm_state = None
+        episode_start = np.ones((1,), dtype=bool)
+
+        for _ in range(total_steps):
+            action, lstm_state = agent.predict(
+                obs,
+                deterministic=True,
+                state=lstm_state,
+                episode_start=episode_start,
+            )
+            obs, _, terminated, truncated, info = env.step(action)
+            episode_start = np.array([terminated or truncated], dtype=bool)
+            trade_result = info.get("trade_result", {})
+            if trade_result:
+                trade_result["symbol"] = info.get("current_symbol")
+                paper_engine.record_trade(trade_result)
+
+            if terminated or truncated:
+                obs, _ = env.reset()
+
+        metrics = paper_engine.get_performance_metrics()
+        metrics["timestamp"] = datetime.utcnow().isoformat()
+
+        metrics_path = os.getenv("PAPER_TRADING_METRICS_PATH", "./logs/paper_trading/metrics.json")
+        os.makedirs(os.path.dirname(metrics_path), exist_ok=True)
+        with open(metrics_path, "w", encoding="utf-8") as handle:
+            json.dump(metrics, handle, indent=2)
+
+        console.print("\n[bold green]Paper Trading Results:[/bold green]")
+        console.print(f"  Final Capital: ${metrics['capital']:.2f}")
+        console.print(f"  Total Return: {metrics['total_return_pct']:.2%}")
+        console.print(f"  Win Rate: {metrics['win_rate']:.2%}")
+        console.print(f"  Total Trades: {metrics['num_trades']}")
+
+    except DataUnavailableError as e:
+        console.print(f"\n[bold red]Error:[/bold red] {str(e)}")
         raise
 
 
@@ -265,10 +403,10 @@ def walk_forward(folds, train_days, test_days, train_episodes, eval_episodes):
             )
 
     except DataUnavailableError as e:
-        console.print(f"\n[bold red]✗ Data Error:[/bold red] {str(e)}")
+        console.print(f"\n[bold red]Data Error:[/bold red] {str(e)}")
         raise
     except Exception as e:
-        console.print(f"\n[bold red]✗ Error:[/bold red] {str(e)}")
+        console.print(f"\n[bold red]Error:[/bold red] {str(e)}")
         raise
 
 
@@ -287,12 +425,12 @@ def collect_data(source, symbols, interval, days):
     from src.data.sources.base import DataUnavailableError
 
     try:
+        symbol_list = [s.strip() for s in symbols.split(",") if s.strip()]
         loader = CryptoDataLoader(source=source)
-        loader.sync_symbols()
+        loader.sync_symbols(symbol_list)
 
         end = datetime.utcnow()
         start = end - timedelta(days=days)
-        symbol_list = [s.strip() for s in symbols.split(",") if s.strip()]
 
         loader.collect_ohlcv(
             symbols=symbol_list,
@@ -301,21 +439,65 @@ def collect_data(source, symbols, interval, days):
             end=end
         )
 
-        console.print("\n[bold green]✓[/bold green] Data collection completed!")
+        console.print("\n[bold green]OK[/bold green] Data collection completed!")
 
     except DataUnavailableError as e:
-        console.print(f"\n[bold red]✗ Data Error:[/bold red] {str(e)}")
+        console.print(f"\n[bold red]Data Error:[/bold red] {str(e)}")
         raise
     except Exception as e:
-        console.print(f"\n[bold red]✗ Error:[/bold red] {str(e)}")
+        console.print(f"\n[bold red]Error:[/bold red] {str(e)}")
         raise
 
 
-@cli.command()
-def paper_trade():
-    """Run paper trading with live data (Phase 2)"""
-    console.print("\n[bold yellow]Paper Trading Mode[/bold yellow]")
-    console.print("[dim]Phase 2 feature - Coming soon![/dim]")
+@cli.command("paper-trade-live")
+@click.option('--symbols', required=True, help='Comma-separated symbols (e.g., BTC-USD,ETH-USD)')
+@click.option('--duration-hours', default=24, type=int, help='Run duration in hours')
+@click.option('--capital', default=1000.0, type=float, help='Starting capital')
+@click.option('--trade-size-pct', default=0.05, type=float, help='Trade size as fraction of capital')
+@click.option('--entry-threshold', default=0.002, type=float, help='Entry threshold (price change pct)')
+@click.option('--exit-threshold', default=0.002, type=float, help='Exit threshold (price change pct)')
+def paper_trade_live(symbols, duration_hours, capital, trade_size_pct, entry_threshold, exit_threshold):
+    """Run paper trading with live data feed."""
+    console.print("\n[bold cyan]Starting paper trading (live mode)[/bold cyan]")
+    console.print(f"  Symbols: {symbols}")
+    console.print(f"  Duration: {duration_hours}h")
+    console.print(f"  Capital: ${capital:.2f}")
+
+    from src.execution.paper_trader import PaperTradingEngine, LivePaperTradingSession
+
+    symbol_list = [s.strip() for s in symbols.split(",") if s.strip()]
+    if not symbol_list:
+        console.print("\n[bold red]Error:[/bold red] No symbols provided")
+        return
+
+    engine = PaperTradingEngine(initial_capital=capital)
+
+    def _on_trade(trade: dict) -> None:
+        console.print(
+            f"[dim]{trade['side'].upper()} {trade['symbol']} "
+            f"@ ${trade['price']:.4f} size=${trade['size']:.2f}[/dim]"
+        )
+
+    session = LivePaperTradingSession(
+        symbols=symbol_list,
+        engine=engine,
+        trade_size_pct=trade_size_pct,
+        entry_threshold_pct=entry_threshold,
+        exit_threshold_pct=exit_threshold,
+        on_trade=_on_trade,
+    )
+
+    try:
+        asyncio.run(session.run(duration_seconds=duration_hours * 3600))
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Live paper trading interrupted by user[/yellow]")
+    finally:
+        metrics = engine.get_performance_metrics()
+        console.print("\n[bold green]Live Paper Trading Results:[/bold green]")
+        console.print(f"  Final Capital: ${metrics['capital']:.2f}")
+        console.print(f"  Total Return: {metrics['total_return_pct']:.2%}")
+        console.print(f"  Win Rate: {metrics['win_rate']:.2%}")
+        console.print(f"  Total Trades: {metrics['num_trades']}")
 
 
 @cli.command()
@@ -386,13 +568,13 @@ def test_env():
             if terminated or truncated:
                 break
 
-        console.print("\n[bold green]✓[/bold green] Environment test passed!")
+        console.print("\n[bold green]OK[/bold green] Environment test passed!")
 
     except DataUnavailableError as e:
-        console.print(f"\n[bold red]✗ Data Error:[/bold red] {str(e)}")
+        console.print(f"\n[bold red]Data Error:[/bold red] {str(e)}")
         raise
     except Exception as e:
-        console.print(f"\n[bold red]✗ Error:[/bold red] {str(e)}")
+        console.print(f"\n[bold red]Error:[/bold red] {str(e)}")
         raise
 
 

@@ -100,6 +100,10 @@ class CircuitBreaker:
         self._check_consecutive_losses()
         self._check_win_rate()
         self._check_api_errors()
+
+        if self.settings.TRAINING_MODE:
+            # Training should never be blocked; keep warnings only.
+            return True
         
         return self.status == CircuitBreakerStatus.ACTIVE
     

@@ -56,7 +56,7 @@ class RandomAgent(BaselineAgent):
     
     def __init__(self):
         super().__init__("Random")
-        self.action_space_size = 8
+        self.action_space_size = 5
     
     def predict(self, observation: np.ndarray) -> int:
         """Return random action"""
@@ -88,8 +88,8 @@ class BuyAndHoldAgent(BaselineAgent):
         has_position = observation[17] > 0.01
         
         if not has_position:
-            # No position, buy medium (action 2)
-            return 2  # ACTION_BUY_MEDIUM
+            # No position, buy
+            return 1  # ACTION_BUY
         else:
             # Have position, hold (do nothing)
             return 0  # ACTION_NO_ACTION
@@ -144,11 +144,11 @@ class MeanReversionAgent(BaselineAgent):
         if not has_position:
             # Price below mean -> Buy
             if deviation < -self.threshold:
-                return 2  # ACTION_BUY_MEDIUM
+                return 1  # ACTION_BUY
         else:
             # Price above mean -> Sell
             if deviation > self.threshold:
-                return 6  # ACTION_SELL_LARGE
+                return 3  # ACTION_SELL_ALL
         
         return 0  # ACTION_NO_ACTION
     
@@ -193,11 +193,11 @@ class MomentumAgent(BaselineAgent):
         if not has_position:
             # Strong upward momentum -> Buy
             if momentum > self.threshold and trend_direction > 0:
-                return 2  # ACTION_BUY_MEDIUM
+                return 1  # ACTION_BUY
         else:
             # Strong downward momentum -> Sell
             if momentum < -self.threshold or trend_direction < 0:
-                return 6  # ACTION_SELL_LARGE
+                return 3  # ACTION_SELL_ALL
         
         return 0  # ACTION_NO_ACTION
 
@@ -241,17 +241,17 @@ class ConservativeAgent(BaselineAgent):
             if (volatility < 0.05 and 
                 price_change_24h > 0.03 and
                 0.3 < current_price < 0.7):
-                return 1  # ACTION_BUY_SMALL (conservative size)
+                return 1  # ACTION_BUY
         else:
             self.holding_time += 1
             
             # Take profits or cut losses quickly
             if price_change_24h < -0.05:  # 5% loss
-                return 6  # ACTION_SELL_LARGE
+                return 3  # ACTION_SELL_ALL
             elif price_change_24h > 0.08:  # 8% profit
-                return 6  # ACTION_SELL_LARGE
+                return 3  # ACTION_SELL_ALL
             elif self.holding_time > 20:  # Held too long
-                return 5  # ACTION_SELL_MEDIUM
+                return 2  # ACTION_SELL_PARTIAL
         
         return 0  # ACTION_NO_ACTION
     

@@ -15,6 +15,7 @@ from typing import List, Optional
 import os
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
+import json
 
 # Load environment variables
 load_dotenv()
@@ -207,6 +208,30 @@ async def get_trades(
         "total": 0,
         "limit": limit,
         "offset": offset
+    }
+
+
+@app.get("/api/paper-trading/metrics")
+async def get_paper_trading_metrics():
+    """
+    Return latest paper trading metrics.
+    """
+    metrics_path = os.getenv("PAPER_TRADING_METRICS_PATH", "./logs/paper_trading/metrics.json")
+    if os.path.exists(metrics_path):
+        try:
+            with open(metrics_path, "r", encoding="utf-8") as handle:
+                return json.load(handle)
+        except Exception:
+            pass
+
+    return {
+        "capital": 0.0,
+        "total_return_pct": 0.0,
+        "win_rate": 0.0,
+        "num_trades": 0,
+        "open_positions": 0,
+        "recent_trades": [],
+        "timestamp": datetime.utcnow().isoformat(),
     }
 
 

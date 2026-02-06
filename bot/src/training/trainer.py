@@ -20,8 +20,6 @@ from datetime import timedelta
 from ..environment import (
     CryptoTradingEnv,
     SequenceStackWrapper,
-    ExplorationWrapper,
-    ActionMaskingWrapper,
 )
 from ..agents import PPOAgent
 from ..data import TrainingRun, init_db, get_db_session, CryptoSymbol
@@ -32,7 +30,8 @@ from ..core.config import get_settings
 from .callbacks import (
     CircuitBreakerCallback,
     PerformanceLogCallback,
-    CheckpointCallback
+    CheckpointCallback,
+    EarlyStoppingCallback,
 )
 
 
@@ -117,23 +116,6 @@ class Trainer:
             if use_sequence_stack:
                 env = SequenceStackWrapper(env, sequence_length=sequence_length, flatten=True)
             
-            exploration_config = self.config.get("exploration", {})
-            initial_epsilon = exploration_config.get("initial_epsilon", 0.9)
-            final_epsilon = exploration_config.get("final_epsilon", 0.0)
-            decay_fraction = exploration_config.get("decay_fraction", 0.3)
-            exclude_actions = exploration_config.get("exclude_actions", [0])
-
-            # Wrap with exploration to force action diversity during early training
-            env = ExplorationWrapper(
-                env,
-                initial_epsilon=initial_epsilon,
-                final_epsilon=final_epsilon,
-                decay_steps=int(total_episodes * decay_fraction),
-                exclude_actions=exclude_actions
-            )
-            # Mask invalid actions so rollouts always execute a valid trade action
-            env = ActionMaskingWrapper(env)
-            
             # Create agent
             ppo_config = self.config.get("ppo", {})
             training_config = self.config.get("training", {})
@@ -145,8 +127,8 @@ class Trainer:
                 policy_kwargs = {
                     "lstm_hidden_size": int(recurrent_config.get("lstm_hidden_size", 128)),
                     "n_lstm_layers": int(recurrent_config.get("lstm_layers", 1)),
-                    "shared_lstm": bool(recurrent_config.get("shared_lstm", True)),
-                    "lstm_dropout": float(recurrent_config.get("lstm_dropout", 0.0)),
+                    "shared_lstm": bool(recurrent_config.get("shared_lstm", False)),
+                    "enable_critic_lstm": bool(recurrent_config.get("enable_critic_lstm", True)),
                 }
 
             agent = PPOAgent(
@@ -171,12 +153,16 @@ class Trainer:
             # Create callbacks
             callbacks = self._create_callbacks(
                 checkpoint_frequency=checkpoint_frequency,
-                eval_frequency=eval_frequency
+                eval_frequency=eval_frequency,
+                policy_type=policy_type,
+                sequence_length=sequence_length,
+                training_config=training_config,
             )
             
             # Train
+            total_timesteps = total_episodes * max_steps
             agent.train(
-                total_timesteps=total_episodes,
+                total_timesteps=total_timesteps,
                 callback=callbacks,
                 log_interval=10
             )
@@ -213,7 +199,10 @@ class Trainer:
     def _create_callbacks(
         self,
         checkpoint_frequency: int,
-        eval_frequency: int
+        eval_frequency: int,
+        policy_type: str,
+        sequence_length: int,
+        training_config: Dict,
     ) -> CallbackList:
         """
         Create training callbacks
@@ -225,6 +214,13 @@ class Trainer:
         Returns:
             CallbackList with all callbacks
         """
+        early_stopping_config = training_config.get("early_stopping", {})
+        eval_episodes = int(early_stopping_config.get("eval_episodes", 50))
+        patience = int(early_stopping_config.get("patience", 3))
+        min_delta = float(early_stopping_config.get("min_delta", 0.0))
+        metric_name = str(early_stopping_config.get("metric", "sharpe_ratio"))
+        eval_sequence_length = sequence_length if policy_type == "MlpPolicy" else 1
+
         callbacks = [
             CircuitBreakerCallback(
                 training_run_id=self.training_run.id
@@ -237,7 +233,18 @@ class Trainer:
                 training_run_id=self.training_run.id,
                 save_frequency=checkpoint_frequency,
                 save_path=self.settings.MODEL_SAVE_PATH
-            )
+            ),
+            EarlyStoppingCallback(
+                training_run_id=self.training_run.id,
+                eval_frequency=eval_frequency,
+                eval_episodes=eval_episodes,
+                policy_type=policy_type,
+                sequence_length=eval_sequence_length,
+                metric_name=metric_name,
+                patience=patience,
+                min_delta=min_delta,
+                save_path=self.settings.MODEL_SAVE_PATH,
+            ),
         ]
         
         return CallbackList(callbacks)

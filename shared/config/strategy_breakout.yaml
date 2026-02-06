@@ -1,0 +1,36 @@
+# Breakout Strategy - Trade consolidation breakouts
+strategy_type: "breakout"
+
+environment:
+  initial_capital: 1000.0
+  max_steps: 500
+  transaction_cost: 0.001
+  reward_weights:
+    returns: 20.0
+    transaction_cost_penalty: 80.0
+    drawdown_penalty: 8.0
+    profitable_close_bonus: 3.0
+    consolidation_detection_bonus: 2.0
+    risk_violation_penalty: 3.0
+
+features:
+  consolidation_periods: [10, 20, 30]
+  volatility_threshold: 0.01
+  breakout_volume_multiplier: 2.0
+
+entry_rules:
+  min_consolidation_periods: 10
+  volatility_contraction: true
+  volume_expansion_on_break: true
+  confirm_close_above_resistance: true
+
+exit_rules:
+  use_trailing_stop: true
+  trailing_stop_pct: 0.04
+  failed_breakout_exit: true
+
+risk:
+  max_position_size_pct: 0.20
+  stop_loss_pct: 0.025
+  take_profit_pct: 0.15
+  max_hold_periods: 100

@@ -20,6 +20,7 @@ from ..data import Episode, Trade, ModelCheckpoint, get_db_session
 from ..risk import CircuitBreaker
 from ..core.logger import get_logger
 from ..core.config import get_settings
+from .evaluator import Evaluator
 
 
 logger = get_logger(__name__)
@@ -144,10 +145,10 @@ class PerformanceLogCallback(BaseCallback):
         try:
             # Create episode record
             total_return_pct = 0.0
-            if info.get("portfolio_value") is not None:
-                total_return_pct = (
-                    info.get("portfolio_value") - self.settings.INITIAL_CAPITAL
-                ) / self.settings.INITIAL_CAPITAL
+            final_capital = info.get("portfolio_value")
+            if final_capital is not None:
+                final_capital = float(final_capital)
+                total_return_pct = (final_capital - self.settings.INITIAL_CAPITAL) / self.settings.INITIAL_CAPITAL
 
             episode = Episode(
                 training_run_id=self.training_run_id,
@@ -158,7 +159,7 @@ class PerformanceLogCallback(BaseCallback):
                 total_return_pct=float(total_return_pct),
                 num_trades=len(self.pending_trades),
                 num_winning_trades=sum(1 for t in self.pending_trades if (t.get("pnl") or 0) > 0),
-                final_capital=info.get("portfolio_value"),
+                final_capital=final_capital,
                 markets_traded=[info.get("current_symbol")] if info.get("current_symbol") else None,
                 extra_metadata={'logged_at': datetime.utcnow().isoformat()}
             )
@@ -307,6 +308,82 @@ class CheckpointCallback(BaseCallback):
             logger.error(f"Failed to log checkpoint: {str(e)}")
         finally:
             session.close()
+
+
+class EarlyStoppingCallback(BaseCallback):
+    """
+    Evaluates the model periodically and stops training if performance stalls.
+    """
+
+    def __init__(
+        self,
+        training_run_id: int,
+        eval_frequency: int,
+        eval_episodes: int,
+        policy_type: str,
+        sequence_length: int,
+        metric_name: str = "sharpe_ratio",
+        patience: int = 3,
+        min_delta: float = 0.0,
+        save_path: str = "./models",
+        verbose: int = 0,
+    ):
+        super().__init__(verbose)
+        self.training_run_id = training_run_id
+        self.eval_frequency = max(int(eval_frequency), 1)
+        self.eval_episodes = max(int(eval_episodes), 1)
+        self.policy_type = policy_type
+        self.sequence_length = sequence_length
+        self.metric_name = metric_name
+        self.patience = max(int(patience), 1)
+        self.min_delta = float(min_delta)
+        self.save_path = Path(save_path)
+        self.save_path.mkdir(parents=True, exist_ok=True)
+
+        self.best_metric = -np.inf
+        self.patience_counter = 0
+
+    def _on_step(self) -> bool:
+        if self.n_calls % self.eval_frequency != 0:
+            return True
+
+        temp_path = self.save_path / f"early_stop_eval_run_{self.training_run_id}_step_{self.n_calls}"
+        self.model.save(str(temp_path))
+
+        evaluator = Evaluator(
+            model_path=str(temp_path),
+            policy_type=self.policy_type,
+            sequence_length=self.sequence_length,
+        )
+        metrics = evaluator.evaluate(num_episodes=self.eval_episodes, deterministic=True)
+        current_metric = float(metrics.get(self.metric_name, -np.inf))
+
+        if current_metric > self.best_metric + self.min_delta:
+            self.best_metric = current_metric
+            self.patience_counter = 0
+            best_path = self.save_path / f"best_model_run_{self.training_run_id}"
+            self.model.save(str(best_path))
+            logger.info(
+                "Early stopping: new best %s=%.4f at step %s",
+                self.metric_name,
+                current_metric,
+                self.n_calls,
+            )
+        else:
+            self.patience_counter += 1
+            logger.info(
+                "Early stopping: no improvement (%s=%s), patience %s/%s",
+                self.metric_name,
+                current_metric,
+                self.patience_counter,
+                self.patience,
+            )
+
+        if self.patience_counter >= self.patience:
+            logger.warning("Early stopping triggered at step %s", self.n_calls)
+            return False
+
+        return True
 
 
 class TensorBoardCallback(BaseCallback):

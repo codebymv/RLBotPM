@@ -1,0 +1,38 @@
+# Mean Reversion Strategy - Buy oversold, sell overbought
+strategy_type: "mean_reversion"
+
+environment:
+  initial_capital: 1000.0
+  max_steps: 500
+  transaction_cost: 0.001
+  reward_weights:
+    returns: 10.0
+    transaction_cost_penalty: 100.0
+    drawdown_penalty: 15.0
+    profitable_close_bonus: 2.0
+    range_adherence_bonus: 3.0
+    risk_violation_penalty: 5.0
+
+features:
+  lookback_periods: [20, 50, 200]
+  use_bollinger_bands: true
+  use_rsi: true
+  rsi_oversold: 30
+  rsi_overbought: 70
+
+entry_rules:
+  rsi_oversold_threshold: 30
+  price_below_lower_band: true
+  confirm_with_volume: false
+
+exit_rules:
+  use_fixed_targets: true
+  target_pct: 0.02
+  use_rsi_exit: true
+  rsi_exit_threshold: 50
+
+risk:
+  max_position_size_pct: 0.10
+  stop_loss_pct: 0.015
+  take_profit_pct: 0.025
+  max_hold_periods: 50

@@ -1,0 +1,34 @@
+# Momentum Strategy - Ride strong trends
+strategy_type: "momentum"
+
+environment:
+  initial_capital: 1000.0
+  max_steps: 500
+  transaction_cost: 0.001
+  reward_weights:
+    returns: 15.0
+    transaction_cost_penalty: 50.0
+    drawdown_penalty: 5.0
+    profitable_close_bonus: 1.0
+    momentum_bonus: 5.0
+    risk_violation_penalty: 2.0
+
+features:
+  lookback_periods: [5, 10, 20, 50]
+  use_momentum_indicators: true
+  momentum_threshold: 0.03
+
+entry_rules:
+  min_momentum: 0.03
+  confirm_with_volume: true
+  volume_multiplier: 1.5
+
+exit_rules:
+  use_trailing_stop: true
+  trailing_stop_pct: 0.02
+  momentum_reversal_exit: true
+
+risk:
+  max_position_size_pct: 0.15
+  stop_loss_pct: 0.03
+  take_profit_pct: 0.10

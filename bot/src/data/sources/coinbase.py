@@ -9,7 +9,9 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import List, Optional
+import time
 import requests
+from requests import exceptions as request_exceptions
 
 from .base import ExchangeAdapter, OHLCV, DataUnavailableError
 
@@ -22,10 +24,20 @@ class CoinbaseAdapter(ExchangeAdapter):
 
     def _get(self, path: str, params: Optional[dict] = None) -> dict | list:
         url = f"{self.base_url}/{path.lstrip('/')}"
-        resp = requests.get(url, params=params, timeout=15)
-        if resp.status_code != 200:
-            raise DataUnavailableError(f"Coinbase API error: {resp.status_code} {resp.text}")
-        return resp.json()
+        last_error: Optional[Exception] = None
+        for attempt in range(1, 6):
+            try:
+                resp = requests.get(url, params=params, timeout=15)
+                if resp.status_code == 200:
+                    return resp.json()
+                if resp.status_code in {429, 502, 503, 504}:
+                    time.sleep(2 * attempt)
+                    continue
+                raise DataUnavailableError(f"Coinbase API error: {resp.status_code} {resp.text}")
+            except (request_exceptions.ConnectionError, request_exceptions.Timeout) as exc:
+                last_error = exc
+                time.sleep(2 * attempt)
+        raise DataUnavailableError(f"Coinbase API request failed after retries: {last_error}")
 
     def get_symbols(self) -> List[str]:
         data = self._get("/products")

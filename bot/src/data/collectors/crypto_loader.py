@@ -8,6 +8,7 @@ Raises DataUnavailableError if data cannot be fetched.
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+import time
 from typing import Iterable, List, Optional
 
 import pandas as pd
@@ -15,6 +16,7 @@ import pandas as pd
 from ..database import CryptoSymbol, CryptoCandle, DatabaseSession
 from ..sources import get_adapter, DataUnavailableError
 from ...core.logger import get_logger
+from sqlalchemy.exc import OperationalError
 
 
 logger = get_logger(__name__)
@@ -29,12 +31,12 @@ class CryptoDataLoader:
         self.source_name = source
         self.adapter = get_adapter(source)
 
-    def sync_symbols(self) -> List[str]:
+    def sync_symbols(self, symbols: Optional[Iterable[str]] = None) -> List[str]:
         """
         Fetch symbols from source and store in DB.
         Returns list of symbols.
         """
-        symbols = self.adapter.get_symbols()
+        symbols = list(symbols) if symbols is not None else self.adapter.get_symbols()
         if not symbols:
             raise DataUnavailableError(f"{self.source_name} returned no symbols.")
 
@@ -74,57 +76,71 @@ class CryptoDataLoader:
         """
         total = 0
 
-        with DatabaseSession() as session:
-            for symbol in symbols:
-                ranges = _build_request_ranges(start, end, interval, limit)
-                if not ranges:
-                    raise DataUnavailableError(
-                        f"No request ranges computed for {symbol}"
-                    )
+        for symbol in symbols:
+            ranges = _build_request_ranges(start, end, interval, limit)
+            if not ranges:
+                raise DataUnavailableError(
+                    f"No request ranges computed for {symbol}"
+                )
 
-                for range_start, range_end, range_limit in ranges:
-                    existing = set(
-                        ts
-                        for (ts,) in session.query(CryptoCandle.timestamp)
-                        .filter_by(
-                            source=self.source_name,
-                            symbol=symbol,
-                            interval=interval,
-                        )
-                        .filter(CryptoCandle.timestamp >= range_start)
-                        .filter(CryptoCandle.timestamp <= range_end)
-                        .all()
-                    )
-                    candles = self.adapter.get_ohlcv(
-                        symbol=symbol,
-                        interval=interval,
-                        start=range_start,
-                        end=range_end,
-                        limit=range_limit,
-                    )
-                    if not candles:
-                        raise DataUnavailableError(
-                            f"No candles returned for {symbol} on {self.source_name}"
-                        )
-
-                    for candle in candles:
-                        if candle.timestamp in existing:
-                            continue
-                        session.add(
-                            CryptoCandle(
-                                source=self.source_name,
+            for range_start, range_end, range_limit in ranges:
+                for attempt in range(3):
+                    try:
+                        with DatabaseSession() as session:
+                            existing = set(
+                                ts
+                                for (ts,) in session.query(CryptoCandle.timestamp)
+                                .filter_by(
+                                    source=self.source_name,
+                                    symbol=symbol,
+                                    interval=interval,
+                                )
+                                .filter(CryptoCandle.timestamp >= range_start)
+                                .filter(CryptoCandle.timestamp <= range_end)
+                                .all()
+                            )
+                            candles = self.adapter.get_ohlcv(
                                 symbol=symbol,
                                 interval=interval,
-                                timestamp=candle.timestamp,
-                                open=candle.open,
-                                high=candle.high,
-                                low=candle.low,
-                                close=candle.close,
-                                volume=candle.volume,
+                                start=range_start,
+                                end=range_end,
+                                limit=range_limit,
                             )
+                            if not candles:
+                                raise DataUnavailableError(
+                                    f"No candles returned for {symbol} on {self.source_name}"
+                                )
+
+                            for candle in candles:
+                                if candle.timestamp in existing:
+                                    continue
+                                session.add(
+                                    CryptoCandle(
+                                        source=self.source_name,
+                                        symbol=symbol,
+                                        interval=interval,
+                                        timestamp=candle.timestamp,
+                                        open=candle.open,
+                                        high=candle.high,
+                                        low=candle.low,
+                                        close=candle.close,
+                                        volume=candle.volume,
+                                    )
+                                )
+                                existing.add(candle.timestamp)
+                            total += len(candles)
+                        break
+                    except OperationalError as exc:
+                        if attempt >= 2:
+                            raise
+                        logger.warning(
+                            "Database connection lost for %s (%s to %s), retrying (%s/3)",
+                            symbol,
+                            range_start,
+                            range_end,
+                            attempt + 2,
                         )
-                        existing.add(candle.timestamp)
-                    total += len(candles)
+                        time.sleep(2 * (attempt + 1))
 
         logger.info(
             f"Stored {total} candles from {self.source_name} ({interval})"

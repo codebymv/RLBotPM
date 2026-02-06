@@ -109,7 +109,8 @@ def run_walk_forward(
 
         train_env = CryptoTradingEnv(dataset=train_data, interval=interval)
         agent = PPOAgent(env=train_env, use_gpu=False)
-        agent.train(total_timesteps=train_episodes, log_interval=10)
+        total_timesteps = train_episodes * train_env.max_steps
+        agent.train(total_timesteps=total_timesteps, log_interval=10)
 
         metrics = _evaluate_agent(agent, test_data, interval, eval_episodes)
         results.append(

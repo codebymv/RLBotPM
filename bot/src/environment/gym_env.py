@@ -18,6 +18,7 @@ from pathlib import Path
 import yaml
 
 from ..risk.position_sizer import PositionSizer
+from ..risk.adaptive_breaker import AdaptiveCircuitBreaker
 
 from ..core.logger import get_logger
 from ..core.config import get_settings
@@ -36,25 +37,19 @@ class CryptoTradingEnv(gym.Env):
 
     # Action space constants
     ACTION_NO_ACTION = 0
-    ACTION_BUY_SMALL = 1
-    ACTION_BUY_MEDIUM = 2
-    ACTION_BUY_LARGE = 3
-    ACTION_SELL_SMALL = 4
-    ACTION_SELL_MEDIUM = 5
-    ACTION_SELL_LARGE = 6
-    ACTION_CLOSE_ALL = 7
+    ACTION_BUY = 1
+    ACTION_SELL_PARTIAL = 2
+    ACTION_SELL_ALL = 3
+    ACTION_CLOSE_ALL = 4
 
     MIN_POSITION_VALUE_FRACTION = 0.01
 
     ACTION_NAMES = {
         0: "NO_ACTION",
-        1: "BUY_SMALL",
-        2: "BUY_MEDIUM",
-        3: "BUY_LARGE",
-        4: "SELL_SMALL",
-        5: "SELL_MEDIUM",
-        6: "SELL_LARGE",
-        7: "CLOSE_ALL",
+        1: "BUY",
+        2: "SELL_PARTIAL",
+        3: "SELL_ALL",
+        4: "CLOSE_ALL",
     }
 
     def __init__(
@@ -87,8 +82,9 @@ class CryptoTradingEnv(gym.Env):
         self.sequence_length = max(1, int(sequence_length))
         self.reward_config = self._load_reward_config()
         self.risk_config = self._load_risk_config()
-        self.min_hold_steps = int(self.reward_config.get("min_hold_steps", 0))
-        self.max_hold_steps = int(self.reward_config.get("max_hold_steps", 48))
+        self.min_hold_steps = int(self.reward_config.get("min_hold_steps", 5))
+        self.max_hold_steps = int(self.reward_config.get("max_hold_steps", 100))
+        self.trade_cooldown_steps = int(self.reward_config.get("trade_cooldown_steps", 3))
         self.auto_exit_enabled = bool(self.reward_config.get("auto_exit_enabled", True))
         self.entry_signal_threshold = float(self.reward_config.get("entry_signal_threshold", 0.0))
         self.entry_volatility_cap = float(self.reward_config.get("entry_volatility_cap", 0.0))
@@ -118,7 +114,9 @@ class CryptoTradingEnv(gym.Env):
         kelly_fraction = float(sizing_config.get("kelly_fraction", 0.25))
         self.default_position_size_pct = float(sizing_config.get("default_position_size_pct", 0.05))
         self.min_trades_for_kelly = int(sizing_config.get("min_trades_for_kelly", 10))
+        self.base_kelly_fraction = kelly_fraction
         self.position_sizer = PositionSizer(kelly_fraction=kelly_fraction)
+        self.adaptive_breaker = AdaptiveCircuitBreaker()
 
         if dataset is None or dataset.empty:
             raise DataUnavailableError("Dataset is empty. Real OHLCV data required.")
@@ -131,8 +129,8 @@ class CryptoTradingEnv(gym.Env):
         self.dataset = dataset.copy()
         self._prepare_data()
 
-        # Action space: 8 discrete actions
-        self.action_space = spaces.Discrete(8)
+        # Action space: 5 discrete actions
+        self.action_space = spaces.Discrete(5)
 
         # Observation space: 42-dimensional continuous state
         # (28 original + 8 technical indicators + 3 position-level features + 3 trend context)
@@ -162,6 +160,7 @@ class CryptoTradingEnv(gym.Env):
         self.terminated = False
         self.position_hold_steps = 0
         self.flat_steps = 0
+        self.steps_since_last_close = self.trade_cooldown_steps  # Start ready to trade
 
         # Historical performance
         self.recent_trades: List[float] = []
@@ -196,6 +195,7 @@ class CryptoTradingEnv(gym.Env):
         self.terminated = False
         self.position_hold_steps = 0
         self.flat_steps = 0
+        self.steps_since_last_close = self.trade_cooldown_steps  # Start ready to trade
 
         # Select symbol and window
         self._select_episode_window()
@@ -229,17 +229,16 @@ class CryptoTradingEnv(gym.Env):
         invalid_action = False
         hold_steps_before_action = self.position_hold_steps
         if self.positions:
-            if action in [self.ACTION_BUY_SMALL, self.ACTION_BUY_MEDIUM, self.ACTION_BUY_LARGE]:
+            if action == self.ACTION_BUY:
                 invalid_action = True
             elif self.position_hold_steps < self.min_hold_steps and action in [
-                self.ACTION_SELL_SMALL,
-                self.ACTION_SELL_MEDIUM,
-                self.ACTION_SELL_LARGE,
+                self.ACTION_SELL_PARTIAL,
+                self.ACTION_SELL_ALL,
                 self.ACTION_CLOSE_ALL,
             ]:
                 invalid_action = True
         else:
-            if action in [self.ACTION_SELL_SMALL, self.ACTION_SELL_MEDIUM, self.ACTION_SELL_LARGE, self.ACTION_CLOSE_ALL]:
+            if action in [self.ACTION_SELL_PARTIAL, self.ACTION_SELL_ALL, self.ACTION_CLOSE_ALL]:
                 invalid_action = True
 
         if invalid_action:
@@ -273,6 +272,10 @@ class CryptoTradingEnv(gym.Env):
         # CRITICAL FIX: Increment position hold steps to enable manual exit learning
         if self.positions:
             self.position_hold_steps += 1
+
+        # Increment cooldown counter when flat
+        if not self.positions:
+            self.steps_since_last_close += 1
 
         terminated = self._check_termination()
         truncated = self.current_step >= self.max_steps
@@ -330,7 +333,8 @@ class CryptoTradingEnv(gym.Env):
             
             return g
 
-        df = df.groupby("symbol", group_keys=False).apply(compute_features)
+        df = df.groupby("symbol", group_keys=True).apply(compute_features, include_groups=False)
+        df = df.reset_index(level=0)  # Move 'symbol' from index to column
         df = df.dropna().reset_index(drop=True)
 
         if df.empty:
@@ -448,19 +452,13 @@ class CryptoTradingEnv(gym.Env):
             result["reason"] = "No action taken"
             return result
 
-        if action in [self.ACTION_BUY_SMALL, self.ACTION_BUY_MEDIUM, self.ACTION_BUY_LARGE]:
-            size_pct = {
-                self.ACTION_BUY_SMALL: 0.05,
-                self.ACTION_BUY_MEDIUM: 0.10,
-                self.ACTION_BUY_LARGE: 0.20,
-            }[action]
-            return self._execute_buy(size_pct, action)
+        if action == self.ACTION_BUY:
+            return self._execute_buy(1.0, action)
 
-        if action in [self.ACTION_SELL_SMALL, self.ACTION_SELL_MEDIUM, self.ACTION_SELL_LARGE, self.ACTION_CLOSE_ALL]:
+        if action in [self.ACTION_SELL_PARTIAL, self.ACTION_SELL_ALL, self.ACTION_CLOSE_ALL]:
             close_pct = {
-                self.ACTION_SELL_SMALL: 0.33,
-                self.ACTION_SELL_MEDIUM: 0.66,
-                self.ACTION_SELL_LARGE: 1.0,
+                self.ACTION_SELL_PARTIAL: 0.5,
+                self.ACTION_SELL_ALL: 1.0,
                 self.ACTION_CLOSE_ALL: 1.0,
             }[action]
             return self._execute_sell(close_pct, action)
@@ -474,11 +472,15 @@ class CryptoTradingEnv(gym.Env):
                 return [self.ACTION_NO_ACTION]
             return [
                 self.ACTION_NO_ACTION,
-                self.ACTION_SELL_SMALL,
-                self.ACTION_SELL_MEDIUM,
-                self.ACTION_SELL_LARGE,
+                self.ACTION_SELL_PARTIAL,
+                self.ACTION_SELL_ALL,
                 self.ACTION_CLOSE_ALL,
             ]
+
+        # Trade cooldown: prevent immediate re-entry after closing
+        if self.steps_since_last_close < self.trade_cooldown_steps:
+            return [self.ACTION_NO_ACTION]
+
         row = self._current_row()
         if self.entry_signal_threshold > 0:
             trend_strength = abs(float(row["return_24h"]))
@@ -508,46 +510,54 @@ class CryptoTradingEnv(gym.Env):
                 return [self.ACTION_NO_ACTION]
 
         return [
-            self.ACTION_BUY_SMALL,
-            self.ACTION_BUY_MEDIUM,
-            self.ACTION_BUY_LARGE,
+            self.ACTION_NO_ACTION,
+            self.ACTION_BUY,
         ]
+
+    def action_masks(self) -> np.ndarray:
+        """Return boolean mask of valid actions for MaskablePPO."""
+        mask = np.zeros(self.action_space.n, dtype=bool)
+        for action in self.get_valid_actions():
+            mask[action] = True
+        return mask
 
     def _load_reward_config(self) -> Dict[str, float]:
         default_config = {
             "base_penalty": 0.02,
+            "portfolio_step_scale": 10.0,
             "step_return_scale": 10.0,
             "transaction_cost_penalty": 100.0,
             "blocked_action_penalty": 0.5,
-            "invalid_action_penalty": 2.0,
-            "idle_base": 0.25,
-            "idle_step": 0.05,
-            "idle_cap": 2.0,
-            "idle_trend_threshold": 0.002,
-            "idle_trend_scale": 20.0,
-            "idle_trend_cap": 1.0,
-            "idle_extra_after_steps": 20,
-            "idle_extra_penalty": 0.5,
-            "opportunity_scale": 20.0,
-            "opportunity_cap": 0.5,
+            "invalid_action_penalty": 0.0,
+            "idle_base": 0.01,
+            "idle_step": 0.0,
+            "idle_cap": 0.01,
+            "idle_trend_threshold": 0.0,
+            "idle_trend_scale": 0.0,
+            "idle_trend_cap": 0.0,
+            "idle_extra_after_steps": 0,
+            "idle_extra_penalty": 0.0,
+            "opportunity_scale": 0.0,
+            "opportunity_cap": 0.0,
             "drawdown_threshold": 0.20,
             "drawdown_exp": 5.0,
             "drawdown_penalty_scale": 10.0,
             "sell_pnl_scale": 8.0,
-            "sell_profit_bonus": 1.0,
+            "sell_profit_bonus": 0.5,
+            "sell_profit_bonus_scale": 10.0,
             "sell_loss_bonus": 0.1,
             "sell_trend_threshold": -0.003,
             "sell_trend_scale": 5.0,
             "sell_trend_cap": 0.3,
-            "loss_aversion_scale": 0.0,
+            "loss_aversion_scale": 2.0,
             "pnl_cost_ratio_scale": 0.0,
             "pnl_cost_ratio_cap": 5.0,
-            "buy_bonus": 0.5,
-            "buy_trend_threshold": 0.003,
-            "buy_trend_scale": 8.0,
-            "buy_trend_cap": 0.6,
-            "buy_trend_penalty_scale": 2.0,
-            "buy_trend_penalty_cap": 0.2,
+            "buy_bonus": 0.0,
+            "buy_trend_threshold": 0.0,
+            "buy_trend_scale": 0.0,
+            "buy_trend_cap": 0.0,
+            "buy_trend_penalty_scale": 0.0,
+            "buy_trend_penalty_cap": 0.0,
             "signal_alignment_scale": 0.0,
             "signal_misalignment_scale": 0.0,
             "signal_alignment_cap": 0.5,
@@ -555,36 +565,49 @@ class CryptoTradingEnv(gym.Env):
             "hold_penalty_cap": 0.2,
             "max_positions_penalty": 1.0,
             "recent_trade_scale": 3.0,
-            "min_hold_steps": 0,
+            "min_hold_steps": 5,
+            "trade_cooldown_steps": 3,
+            "fee_penalty_scale": 3.0,
             "early_close_penalty": 0.0,
             "carry_bonus_scale": 2.0,
             "carry_bonus_cap": 0.2,
-            "stop_loss_pct": 0.01,
-            "take_profit_pct": 0.02,
+            "hold_pnl_step_scale": 5.0,
+            "auto_exit_penalty": 0.0,
+            "stop_loss_pct": 0.03,
+            "take_profit_pct": 0.05,
             "stop_loss_penalty": 1.0,
             "take_profit_bonus": 0.5,
             "unrealized_drawdown_scale": 5.0,
             "unrealized_drawdown_cap": 0.5,
             "auto_exit_enabled": True,
-            "max_hold_steps": 48,
+            "max_hold_steps": 100,
             "entry_signal_threshold": 0.0,
             "entry_volatility_cap": 0.0,
             "entry_momentum_ratio_threshold": 0.0,
+            "sharpe_bonus_scale": 2.0,
+            "sharpe_bonus_cap": 2.0,
+            "manual_exit_bonus": 0.1,
         }
 
+        reward_config_path = Path(__file__).resolve().parents[3] / "shared" / "config" / "reward_config.yaml"
         config_path = Path(__file__).resolve().parents[3] / "shared" / "config" / "model_config.yaml"
         try:
-            with config_path.open("r", encoding="utf-8") as handle:
-                data = yaml.safe_load(handle) or {}
+            if reward_config_path.exists():
+                with reward_config_path.open("r", encoding="utf-8") as handle:
+                    data = yaml.safe_load(handle) or {}
+            else:
+                with config_path.open("r", encoding="utf-8") as handle:
+                    data = yaml.safe_load(handle) or {}
         except FileNotFoundError:
-            logger.warning("Reward config not found at %s; using defaults.", config_path)
+            logger.warning("Reward config not found at %s; using defaults.", reward_config_path)
             data = {}
 
-        reward_overrides = data.get("environment", {}).get("reward_weights", {}) or {}
+        reward_overrides = data.get("reward_weights") or data.get("environment", {}).get("reward_weights", {}) or {}
         merged = default_config.copy()
         for key, value in reward_overrides.items():
             if value is not None:
                 merged[key] = value
+        merged["_version"] = str(data.get("version", "legacy"))
         return merged
 
     def _load_risk_config(self) -> Dict[str, Dict]:
@@ -622,11 +645,12 @@ class CryptoTradingEnv(gym.Env):
         row = self._current_row()
         current_price = float(row["close"])
         symbol = self.current_symbol
+        action_name = self.ACTION_NAMES.get(action, "BUY")
 
         if self.positions:
             return {
                 "action": action,
-                "action_name": f"BUY_{int(size_pct*100)}%",
+                "action_name": action_name,
                 "executed": False,
                 "reason": "Position already open",
                 "pnl": 0.0,
@@ -643,19 +667,14 @@ class CryptoTradingEnv(gym.Env):
             base_size = self.capital * self.default_position_size_pct
 
         base_size = max(base_size, self.min_position_value)
-        multiplier = {
-            self.ACTION_BUY_SMALL: 0.5,
-            self.ACTION_BUY_MEDIUM: 1.0,
-            self.ACTION_BUY_LARGE: 1.5,
-        }[action]
-        position_value = min(base_size * multiplier, self.capital * self.max_position_size_pct)
+        position_value = min(base_size * size_pct, self.capital * self.max_position_size_pct)
         position_value = max(position_value, self.min_position_value)
 
         raw_slippage = self._estimate_slippage_pct(position_value, row)
         if raw_slippage > self.max_slippage_pct:
             return {
                 "action": action,
-                "action_name": f"BUY_{int(size_pct*100)}%",
+                "action_name": action_name,
                 "executed": False,
                 "reason": "Slippage too high",
                 "pnl": 0.0,
@@ -667,7 +686,7 @@ class CryptoTradingEnv(gym.Env):
         if cost > self.capital:
             return {
                 "action": action,
-                "action_name": f"BUY_{int(size_pct*100)}%",
+                "action_name": action_name,
                 "executed": False,
                 "reason": "Insufficient capital",
                 "pnl": 0.0,
@@ -677,7 +696,7 @@ class CryptoTradingEnv(gym.Env):
         if len(self.positions) >= self.settings.MAX_OPEN_POSITIONS:
             return {
                 "action": action,
-                "action_name": f"BUY_{int(size_pct*100)}%",
+                "action_name": action_name,
                 "executed": False,
                 "reason": "Max positions reached",
                 "pnl": 0.0,
@@ -696,7 +715,7 @@ class CryptoTradingEnv(gym.Env):
 
         return {
             "action": action,
-            "action_name": f"BUY_{int(size_pct*100)}%",
+            "action_name": action_name,
             "executed": True,
             "reason": "Buy executed",
             "size": position_value,
@@ -708,10 +727,11 @@ class CryptoTradingEnv(gym.Env):
 
     def _execute_sell(self, close_pct: float, action: int) -> Dict:
         symbol = self.current_symbol
+        action_name = self.ACTION_NAMES.get(action, "SELL")
         if symbol not in self.positions:
             return {
                 "action": action,
-                "action_name": f"SELL_{int(close_pct*100)}%",
+                "action_name": action_name,
                 "executed": False,
                 "reason": "No position to close",
                 "pnl": 0.0,
@@ -729,7 +749,7 @@ class CryptoTradingEnv(gym.Env):
         if raw_slippage > self.max_slippage_pct:
             return {
                 "action": action,
-                "action_name": f"SELL_{int(close_pct*100)}%",
+                "action_name": action_name,
                 "executed": False,
                 "reason": "Slippage too high",
                 "pnl": 0.0,
@@ -745,22 +765,25 @@ class CryptoTradingEnv(gym.Env):
         if close_pct >= 0.99:
             del self.positions[symbol]
             self.position_hold_steps = 0
+            self.steps_since_last_close = 0  # Start cooldown
         else:
             position["size"] *= (1 - close_pct)
             if position["size"] < self.min_position_value:
                 del self.positions[symbol]
                 self.position_hold_steps = 0
+                self.steps_since_last_close = 0  # Start cooldown
 
         self.recent_trades.append(pnl)
-        if len(self.recent_trades) > 10:
+        if len(self.recent_trades) > 20:
             self.recent_trades.pop(0)
         if pnl > 0:
             self.win_count += 1
         self.trade_count += 1
+        self._update_adaptive_kelly(pnl)
 
         return {
             "action": action,
-            "action_name": f"SELL_{int(close_pct*100)}%",
+            "action_name": action_name,
             "executed": True,
             "reason": "Sell executed",
             "size": sell_size,
@@ -771,6 +794,14 @@ class CryptoTradingEnv(gym.Env):
             "entry_price": position["entry_price"],
             "price_change": price_change,
         }
+
+    def _update_adaptive_kelly(self, trade_pnl: float) -> None:
+        if self.initial_capital <= 0:
+            return
+        self.adaptive_breaker.update(trade_pnl / self.initial_capital)
+        adjusted_fraction = self.base_kelly_fraction * self.adaptive_breaker.current_multiplier
+        adjusted_fraction = min(max(adjusted_fraction, 0.15), 0.35)
+        self.position_sizer.set_kelly_fraction(adjusted_fraction)
 
     def _calculate_reward(self, trade_result: Dict, current_portfolio_value: float) -> float:
         """
@@ -790,15 +821,73 @@ class CryptoTradingEnv(gym.Env):
         - Current: +1.2 only for profitable manual exits
         """
         weights = self.reward_config
+        reward_version = str(weights.get("_version", "v2")).lower()
         reward = 0.0
 
         # Update drawdown tracking (for termination, not reward)
         self.peak_capital = max(self.peak_capital, current_portfolio_value)
         self.current_drawdown = (self.peak_capital - current_portfolio_value) / self.peak_capital
 
-        # 1. Portfolio feedback - reduced scaling for clearer outcome signals
+        # 1. Portfolio feedback - apply only on executed trades to reduce noise
         portfolio_change = (current_portfolio_value - self.prev_portfolio_value) / self.initial_capital
-        reward += portfolio_change * weights.get("portfolio_step_scale", 10.0)
+        if reward_version in {"v1", "legacy"}:
+            reward += portfolio_change * weights.get("portfolio_step_scale", 10.0)
+        elif trade_result.get("executed"):
+            reward += portfolio_change * weights.get("portfolio_step_scale", 10.0)
+
+        # 1a. Per-step unrealized P&L signal while holding
+        if self.positions and not trade_result.get("executed"):
+            hold_pnl_step_scale = float(weights.get("hold_pnl_step_scale", 0.0))
+            reward += portfolio_change * hold_pnl_step_scale
+
+        # 1b. Sharpe bonus - reward consistent returns over recent trades
+        sharpe_scale = float(weights.get("sharpe_bonus_scale", 2.0))
+        sharpe_cap = float(weights.get("sharpe_bonus_cap", 2.0))
+        if sharpe_scale > 0 and len(self.recent_trades) >= 5:
+            returns = np.array(self.recent_trades, dtype=np.float32) / max(self.initial_capital, 1e-9)
+            mean_return = float(np.mean(returns))
+            std_return = float(np.std(returns))
+            if std_return > 0:
+                if reward_version in {"v1", "legacy"}:
+                    sharpe = (mean_return / std_return) * np.sqrt(len(returns))
+                else:
+                    sharpe = mean_return / std_return
+                reward += max(-sharpe_cap, min(sharpe_cap, sharpe)) * sharpe_scale
+
+        if reward_version not in {"v1", "legacy"}:
+            row = self._current_row()
+            current_price = float(row["close"])
+
+            if trade_result.get("reason") == "Invalid action":
+                reward -= float(weights.get("invalid_action_penalty", 0.0))
+
+            if not self.positions and trade_result.get("reason") == "No action taken":
+                idle_base = float(weights.get("idle_base", 0.0))
+                idle_step = float(weights.get("idle_step", 0.0))
+                idle_cap = float(weights.get("idle_cap", 0.0))
+                idle_penalty = min(idle_cap, idle_base + idle_step * self.flat_steps)
+                reward -= idle_penalty
+
+            if self.positions and self.current_symbol in self.positions:
+                hold_steps = int(trade_result.get("hold_steps", self.position_hold_steps))
+                hold_step_penalty = float(weights.get("hold_step_penalty", 0.0))
+                hold_penalty_cap = float(weights.get("hold_penalty_cap", 0.0))
+                reward -= min(hold_penalty_cap, hold_step_penalty * hold_steps)
+
+                position = self.positions[self.current_symbol]
+                entry_price = float(position.get("entry_price", 0.0))
+                if entry_price > 0:
+                    unrealized_pct = (current_price - entry_price) / entry_price
+                    if unrealized_pct > 0:
+                        carry_bonus_scale = float(weights.get("carry_bonus_scale", 0.0))
+                        carry_bonus_cap = float(weights.get("carry_bonus_cap", 0.0))
+                        reward += min(carry_bonus_cap, unrealized_pct * carry_bonus_scale)
+
+        # 1c. Explicit fee penalty - make agent feel the cost of each trade
+        if trade_result.get("executed"):
+            trade_cost = float(trade_result.get("cost", 0.0))
+            fee_penalty_scale = float(weights.get("fee_penalty_scale", 3.0))
+            reward -= (trade_cost / self.initial_capital) * fee_penalty_scale
 
         # 2. EXIT-BASED REWARDS: Conditional on outcomes
         if trade_result.get("executed"):
@@ -807,7 +896,14 @@ class CryptoTradingEnv(gym.Env):
             if action_name.startswith(("SELL", "CLOSE")):
                 # OUTCOME LEARNING: Main PnL feedback
                 realized_pnl = float(trade_result.get("pnl", 0.0))
-                reward += realized_pnl / self.initial_capital
+                realized_pnl_pct = realized_pnl / self.initial_capital
+                reward += realized_pnl_pct
+                if reward_version not in {"v1", "legacy"}:
+                    loss_aversion_scale = float(weights.get("loss_aversion_scale", 0.0))
+                    loss_aversion_cap = float(weights.get("loss_aversion_cap", 0.5))
+                    if realized_pnl_pct < 0 and loss_aversion_scale > 0:
+                        loss_penalty = loss_aversion_scale * (abs(realized_pnl_pct) ** 2)
+                        reward -= min(loss_aversion_cap, loss_penalty)
                 
                 # Check if this is manual or auto-exit
                 exit_reason = trade_result.get("reason", "")
@@ -815,13 +911,32 @@ class CryptoTradingEnv(gym.Env):
                 
                 if is_auto_exit:
                     # Penalty for relying on auto-exit (failure to learn timing)
-                    reward -= weights.get("auto_exit_penalty", 0.5)
+                    auto_exit_penalty = float(weights.get("auto_exit_penalty", 0.5))
+                    if reward_version in {"v1", "legacy"}:
+                        reward -= auto_exit_penalty
+                    else:
+                        if realized_pnl_pct >= 0:
+                            target_pct = float(weights.get("take_profit_pct", 0.02))
+                            penalty_scale = min(1.0, abs(realized_pnl_pct) / max(target_pct, 1e-9))
+                            reward -= auto_exit_penalty * 0.25 * penalty_scale
+                        else:
+                            target_pct = float(weights.get("stop_loss_pct", 0.01))
+                            penalty_scale = min(1.0, abs(realized_pnl_pct) / max(target_pct, 1e-9))
+                            reward -= auto_exit_penalty * 0.5 * penalty_scale
                 else:
                     # CONDITIONAL MANUAL EXIT BONUS: Only for profitable exits
                     if realized_pnl > 0:
                         # Combined bonus: profit achievement + manual skill
-                        reward += weights.get("sell_profit_bonus", 0.5)
-                        reward += weights.get("manual_exit_bonus", 1.2)
+                        if reward_version in {"v1", "legacy"}:
+                            reward += weights.get("sell_profit_bonus", 0.5)
+                            reward += weights.get("manual_exit_bonus", 1.2)
+                        else:
+                            profit_bonus_scale = float(weights.get("sell_profit_bonus", 0.5))
+                            profit_bonus_multiplier = float(weights.get("sell_profit_bonus_scale", 10.0))
+                            profit_bonus = min(profit_bonus_scale, realized_pnl_pct * profit_bonus_multiplier)
+                            reward += max(0.0, profit_bonus)
+                            manual_exit_bonus = min(float(weights.get("manual_exit_bonus", 0.1)), 0.1)
+                            reward += manual_exit_bonus
                     # If manual but unprofitable: no bonus, no penalty
                     # Model learns: "Wait for profitable exit timing"
         
