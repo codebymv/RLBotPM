@@ -278,6 +278,10 @@ class CryptoTradingEnv(gym.Env):
 
         if terminated or truncated:
             self.terminated = True
+            # Episode-end net P&L bonus: directly ties reward to bottom-line profitability
+            episode_return = (current_portfolio_value - self.initial_capital) / self.initial_capital
+            episode_pnl_scale = float(self.reward_config.get("episode_pnl_bonus_scale", 10.0))
+            reward += episode_return * episode_pnl_scale
 
         return observation, reward, terminated, truncated, info
 
@@ -554,9 +558,10 @@ class CryptoTradingEnv(gym.Env):
             "trade_cooldown_steps": 3,
             "fee_penalty_scale": 3.0,
             "early_close_penalty": 0.0,
-            "carry_bonus_scale": 5.0,
-            "carry_bonus_cap": 0.5,
-            "hold_pnl_step_scale": 5.0,
+            "carry_bonus_scale": 2.0,
+            "carry_bonus_cap": 0.2,
+            "hold_pnl_step_scale": 2.0,
+            "episode_pnl_bonus_scale": 10.0,
             "auto_exit_penalty": 0.0,
             "stop_loss_pct": 0.03,
             "take_profit_pct": 0.05,
