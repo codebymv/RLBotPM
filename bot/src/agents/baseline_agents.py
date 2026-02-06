@@ -56,7 +56,7 @@ class RandomAgent(BaselineAgent):
     
     def __init__(self):
         super().__init__("Random")
-        self.action_space_size = 5
+        self.action_space_size = 3
     
     def predict(self, observation: np.ndarray) -> int:
         """Return random action"""
@@ -148,7 +148,7 @@ class MeanReversionAgent(BaselineAgent):
         else:
             # Price above mean -> Sell
             if deviation > self.threshold:
-                return 3  # ACTION_SELL_ALL
+                return 2  # ACTION_SELL
         
         return 0  # ACTION_NO_ACTION
     
@@ -197,7 +197,7 @@ class MomentumAgent(BaselineAgent):
         else:
             # Strong downward momentum -> Sell
             if momentum < -self.threshold or trend_direction < 0:
-                return 3  # ACTION_SELL_ALL
+                return 2  # ACTION_SELL
         
         return 0  # ACTION_NO_ACTION
 
@@ -247,11 +247,11 @@ class ConservativeAgent(BaselineAgent):
             
             # Take profits or cut losses quickly
             if price_change_24h < -0.05:  # 5% loss
-                return 3  # ACTION_SELL_ALL
+                return 2  # ACTION_SELL
             elif price_change_24h > 0.08:  # 8% profit
-                return 3  # ACTION_SELL_ALL
+                return 2  # ACTION_SELL
             elif self.holding_time > 20:  # Held too long
-                return 2  # ACTION_SELL_PARTIAL
+                return 2  # ACTION_SELL
         
         return 0  # ACTION_NO_ACTION
     

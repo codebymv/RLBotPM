@@ -46,8 +46,8 @@ reward_weights:
   trade_cooldown_steps: 3
   fee_penalty_scale: 3.0
   early_close_penalty: 0.0
-  carry_bonus_scale: 2.0
-  carry_bonus_cap: 0.2
+  carry_bonus_scale: 5.0
+  carry_bonus_cap: 0.5
   hold_pnl_step_scale: 5.0
   auto_exit_penalty: 0.0
   stop_loss_pct: 0.03

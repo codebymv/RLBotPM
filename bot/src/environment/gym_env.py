@@ -38,18 +38,14 @@ class CryptoTradingEnv(gym.Env):
     # Action space constants
     ACTION_NO_ACTION = 0
     ACTION_BUY = 1
-    ACTION_SELL_PARTIAL = 2
-    ACTION_SELL_ALL = 3
-    ACTION_CLOSE_ALL = 4
+    ACTION_SELL = 2
 
     MIN_POSITION_VALUE_FRACTION = 0.01
 
     ACTION_NAMES = {
         0: "NO_ACTION",
         1: "BUY",
-        2: "SELL_PARTIAL",
-        3: "SELL_ALL",
-        4: "CLOSE_ALL",
+        2: "SELL",
     }
 
     def __init__(
@@ -129,8 +125,8 @@ class CryptoTradingEnv(gym.Env):
         self.dataset = dataset.copy()
         self._prepare_data()
 
-        # Action space: 5 discrete actions
-        self.action_space = spaces.Discrete(5)
+        # Action space: 3 discrete actions
+        self.action_space = spaces.Discrete(3)
 
         # Observation space: 42-dimensional continuous state
         # (28 original + 8 technical indicators + 3 position-level features + 3 trend context)
@@ -224,21 +220,17 @@ class CryptoTradingEnv(gym.Env):
                     forced_exit = "AUTO_MAX_HOLD"
 
         if forced_exit:
-            action = self.ACTION_CLOSE_ALL
+            action = self.ACTION_SELL
 
         invalid_action = False
         hold_steps_before_action = self.position_hold_steps
         if self.positions:
             if action == self.ACTION_BUY:
                 invalid_action = True
-            elif self.position_hold_steps < self.min_hold_steps and action in [
-                self.ACTION_SELL_PARTIAL,
-                self.ACTION_SELL_ALL,
-                self.ACTION_CLOSE_ALL,
-            ]:
+            elif self.position_hold_steps < self.min_hold_steps and action == self.ACTION_SELL:
                 invalid_action = True
         else:
-            if action in [self.ACTION_SELL_PARTIAL, self.ACTION_SELL_ALL, self.ACTION_CLOSE_ALL]:
+            if action == self.ACTION_SELL:
                 invalid_action = True
 
         if invalid_action:
@@ -455,13 +447,8 @@ class CryptoTradingEnv(gym.Env):
         if action == self.ACTION_BUY:
             return self._execute_buy(1.0, action)
 
-        if action in [self.ACTION_SELL_PARTIAL, self.ACTION_SELL_ALL, self.ACTION_CLOSE_ALL]:
-            close_pct = {
-                self.ACTION_SELL_PARTIAL: 0.5,
-                self.ACTION_SELL_ALL: 1.0,
-                self.ACTION_CLOSE_ALL: 1.0,
-            }[action]
-            return self._execute_sell(close_pct, action)
+        if action == self.ACTION_SELL:
+            return self._execute_sell(1.0, action)
 
         return result
 
@@ -472,9 +459,7 @@ class CryptoTradingEnv(gym.Env):
                 return [self.ACTION_NO_ACTION]
             return [
                 self.ACTION_NO_ACTION,
-                self.ACTION_SELL_PARTIAL,
-                self.ACTION_SELL_ALL,
-                self.ACTION_CLOSE_ALL,
+                self.ACTION_SELL,
             ]
 
         # Trade cooldown: prevent immediate re-entry after closing
@@ -569,8 +554,8 @@ class CryptoTradingEnv(gym.Env):
             "trade_cooldown_steps": 3,
             "fee_penalty_scale": 3.0,
             "early_close_penalty": 0.0,
-            "carry_bonus_scale": 2.0,
-            "carry_bonus_cap": 0.2,
+            "carry_bonus_scale": 5.0,
+            "carry_bonus_cap": 0.5,
             "hold_pnl_step_scale": 5.0,
             "auto_exit_penalty": 0.0,
             "stop_loss_pct": 0.03,

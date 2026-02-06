@@ -34,7 +34,7 @@ ppo:
   
   # Entropy coefficient
   # Encourages exploration (higher = more random actions)
-  ent_coef: 0.01
+  ent_coef: 0.02
   
   # Value function coefficient
   # Weight of value loss in total loss
