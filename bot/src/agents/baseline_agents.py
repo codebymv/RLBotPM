@@ -48,12 +48,12 @@ class BaselineAgent(ABC):
 
 class RandomAgent(BaselineAgent):
     """
-    Random agent - takes random actions from the 7-action space.
+    Random agent - takes random actions from the 3-action space.
     """
     
     def __init__(self):
         super().__init__("Random")
-        self.action_space_size = 7
+        self.action_space_size = 3
     
     def predict(self, observation: np.ndarray) -> int:
         """Return random action"""
@@ -74,16 +74,15 @@ class BuyAndHoldAgent(BaselineAgent):
     
     def predict(self, observation: np.ndarray) -> int:
         """
-        Buy slot 0 at start, then hold.
+        Buy current symbol at start, then hold.
         
-        New 67-dim obs layout:
-        - obs[55]: slot 0 position size (>0 if position exists)
-        - obs[58]: slot 0 has_position flag
+        New 29-dim obs layout:
+        - obs[28]: has_position flag
         """
-        has_position = observation[58] > 0.5
+        has_position = observation[28] > 0.5
         
         if not has_position:
-            return 1  # ACTION_BUY_0
+            return 1  # ACTION_BUY
         else:
             return 0  # ACTION_NO_ACTION
     
@@ -108,15 +107,15 @@ class MeanReversionAgent(BaselineAgent):
     
     def predict(self, observation: np.ndarray) -> int:
         """
-        Buy low, sell high based on mean reversion (slot 0).
+        Buy low, sell high based on mean reversion.
         
-        New 67-dim obs layout:
-        - obs[0]: price deviation from MA24 (slot 0)
-        - obs[4]: return_24h (slot 0)
-        - obs[58]: slot 0 has_position flag
+        New 29-dim obs layout:
+        - obs[0]: price deviation from MA24
+        - obs[4]: return_24h
+        - obs[28]: has_position flag
         """
         price_deviation = observation[0]
-        has_position = observation[58] > 0.5
+        has_position = observation[28] > 0.5
         
         # Track price history
         self.price_history.append(price_deviation)
@@ -128,10 +127,10 @@ class MeanReversionAgent(BaselineAgent):
         
         if not has_position:
             if price_deviation < -self.threshold:
-                return 1  # ACTION_BUY_0
+                return 1  # ACTION_BUY
         else:
             if price_deviation > self.threshold:
-                return 4  # ACTION_SELL_0
+                return 2  # ACTION_SELL
         
         return 0  # ACTION_NO_ACTION
     
@@ -155,27 +154,27 @@ class MomentumAgent(BaselineAgent):
     
     def predict(self, observation: np.ndarray) -> int:
         """
-        Follow momentum on slot 0.
+        Follow momentum on current symbol.
         
-        New 67-dim obs layout:
-        - obs[3]: return_6h (slot 0)
-        - obs[4]: return_24h (slot 0)
-        - obs[8]: trend_direction (slot 0)
-        - obs[58]: slot 0 has_position flag
+        New 29-dim obs layout:
+        - obs[3]: return_6h
+        - obs[4]: return_24h
+        - obs[8]: trend_direction
+        - obs[28]: has_position flag
         """
         price_change_6h = observation[3]
         price_change_24h = observation[4]
         trend_direction = observation[8]
-        has_position = observation[58] > 0.5
+        has_position = observation[28] > 0.5
         
         momentum = (price_change_6h + price_change_24h) / 2.0
         
         if not has_position:
             if momentum > self.threshold and trend_direction > 0:
-                return 1  # ACTION_BUY_0
+                return 1  # ACTION_BUY
         else:
             if momentum < -self.threshold or trend_direction < 0:
-                return 4  # ACTION_SELL_0
+                return 2  # ACTION_SELL
         
         return 0  # ACTION_NO_ACTION
 
@@ -196,32 +195,32 @@ class ConservativeAgent(BaselineAgent):
     
     def predict(self, observation: np.ndarray) -> int:
         """
-        Conservative trading on slot 0.
+        Conservative trading on current symbol.
         
-        New 67-dim obs layout:
-        - obs[0]: price deviation from MA24 (slot 0)
-        - obs[4]: return_24h (slot 0)
-        - obs[5]: volatility_24h (slot 0)
-        - obs[58]: slot 0 has_position flag
+        New 29-dim obs layout:
+        - obs[0]: price deviation from MA24
+        - obs[4]: return_24h
+        - obs[5]: volatility_24h
+        - obs[28]: has_position flag
         """
         price_deviation = observation[0]
         price_change_24h = observation[4]
         volatility = observation[5]
-        has_position = observation[58] > 0.5
+        has_position = observation[28] > 0.5
         
         if not has_position:
             self.holding_time = 0
             if (volatility < 0.05 and 
                 price_change_24h > 0.03):
-                return 1  # ACTION_BUY_0
+                return 1  # ACTION_BUY
         else:
             self.holding_time += 1
             if price_change_24h < -0.05:
-                return 4  # ACTION_SELL_0
+                return 2  # ACTION_SELL
             elif price_change_24h > 0.08:
-                return 4  # ACTION_SELL_0
+                return 2  # ACTION_SELL
             elif self.holding_time > 20:
-                return 4  # ACTION_SELL_0
+                return 2  # ACTION_SELL
         
         return 0  # ACTION_NO_ACTION
     

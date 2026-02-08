@@ -1,9 +1,8 @@
 """
 Live RL Paper Trader - Runs the trained RL model on real-time Coinbase data.
 
-Scans ALL configured symbols each tick for trading opportunities.
-When flat, evaluates every symbol looking for BUY signals.
-When in a position, monitors only the held symbol for SELL/auto-exit.
+Rotates through configured symbols, evaluating one per tick.
+Auto-exits are checked across all open positions each tick.
 
 Usage (via CLI):
     python main.py rl-paper-trade --model models/best_model_run_75_step_674000 --duration 0
@@ -43,22 +42,18 @@ class LiveRLPaperTrader:
     """
     Live paper trading engine powered by the trained RL model.
 
-    Scans multiple symbols per tick for maximum opportunity coverage.
-    Holds one position at a time (matching training behavior).
+    Evaluates one symbol per tick (rotating).
+    Supports multiple concurrent positions (matching training behavior).
     """
 
     ACTION_NO_ACTION = 0
-    ACTION_BUY_0 = 1
-    ACTION_BUY_1 = 2
-    ACTION_BUY_2 = 3
-    ACTION_SELL_0 = 4
-    ACTION_SELL_1 = 5
-    ACTION_SELL_2 = 6
-    NUM_ACTIONS = 7
+    ACTION_BUY = 1
+    ACTION_SELL = 2
+    NUM_ACTIONS = 3
     ACTION_NAMES = {
         0: "NO_ACTION",
-        1: "BUY_0", 2: "BUY_1", 3: "BUY_2",
-        4: "SELL_0", 5: "SELL_1", 6: "SELL_2",
+        1: "BUY",
+        2: "SELL",
     }
 
     def __init__(
@@ -96,6 +91,11 @@ class LiveRLPaperTrader:
         self.trade_cooldown_steps = int(self.reward_config.get("trade_cooldown_steps", 3))
         self.stop_loss_pct = float(self.reward_config.get("stop_loss_pct", 0.03))
         self.take_profit_pct = float(self.reward_config.get("take_profit_pct", 0.05))
+        self.entry_signal_threshold = float(self.reward_config.get("entry_signal_threshold", 0.0))
+        self.entry_volatility_cap = float(self.reward_config.get("entry_volatility_cap", 0.0))
+        self.entry_momentum_ratio_threshold = float(
+            self.reward_config.get("entry_momentum_ratio_threshold", 0.0)
+        )
         self.default_position_size_pct = float(
             self.risk_config.get("position_sizing", {}).get("default_position_size_pct", 0.05)
         )
@@ -110,12 +110,14 @@ class LiveRLPaperTrader:
         self.max_slippage_pct = float(
             self.risk_config.get("market_requirements", {}).get("max_slippage_pct", 0.02)
         )
+        market_req = self.risk_config.get("market_requirements", {})
+        self.min_volume_24h = float(market_req.get("min_volume_24h", 0.0))
+        self.min_market_liquidity = float(market_req.get("min_market_liquidity", 0.0))
 
-        # Portfolio state  (one position at a time, matching training)
-        self.position: Optional[Dict] = None
-        self.held_symbol: Optional[str] = None
-        self.position_hold_steps = 0
-        self.steps_since_last_close = self.trade_cooldown_steps  # Ready to trade
+        # Portfolio state (multiple positions)
+        self.positions: Dict[str, Dict] = {}
+        self.symbol_cooldowns: Dict[str, int] = {symbol: self.trade_cooldown_steps for symbol in self.symbols}
+        self.current_symbol_index = 0
         self.flat_steps = 0
 
         # Performance tracking
@@ -248,76 +250,58 @@ class LiveRLPaperTrader:
     # Observation Builder  (mirrors CryptoTradingEnv._get_observation)
     # ------------------------------------------------------------------
 
-    def _build_observation(self, row: pd.Series, current_price: float) -> np.ndarray:
-        """Build 42-dim observation vector matching CryptoTradingEnv._get_observation()."""
-        obs = np.zeros(42, dtype=np.float32)
+    @staticmethod
+    def _clip_feature(value: float, limit: float = 5.0) -> float:
+        return float(np.clip(value, -limit, limit))
 
-        # --- Market features (0-11) ---
-        obs[0] = (current_price - float(row["ma_24"])) / (float(row["ma_24"]) + 1e-9)
-        obs[1] = float(row["hl_spread_pct"])
-        obs[2] = np.log1p(float(row["volume"])) / 10.0
-        obs[3] = float(row["return_1h"])
-        obs[4] = float(row["return_6h"])
-        obs[5] = float(row["return_24h"])
-        obs[6] = float(row["volatility_24h"])
-        obs[7] = float(row["ma_6"] / row["close"]) - 1.0
-        obs[8] = float(row["ma_24"] / row["close"]) - 1.0
-        obs[9] = float(row["ma_48"] / row["close"]) - 1.0
-        obs[10] = float(row["volume_ma_24"]) / max(float(row["volume"]), 1.0)
-        obs[11] = float(row["trend_direction"])
+    def _build_observation(self, symbol: str, row: pd.Series, current_price: float) -> np.ndarray:
+        """Build 29-dim observation vector matching CryptoTradingEnv._get_observation()."""
+        obs = np.zeros(29, dtype=np.float32)
 
-        # --- Portfolio features (12-19) ---
-        portfolio_value = self._get_portfolio_value(current_price)
-        obs[12] = self.capital / self.initial_capital
-        obs[13] = (1.0 if self.position else 0.0) / self.settings.MAX_OPEN_POSITIONS
-        obs[14] = portfolio_value / self.initial_capital
-        obs[15] = (portfolio_value - self.initial_capital) / self.initial_capital
-        obs[16] = sum(self.recent_trades) / self.initial_capital if self.recent_trades else 0.0
-        obs[17] = (self.position["size"] if self.position else 0.0) / self.initial_capital
-        obs[18] = self.win_count / max(self.trade_count, 1)
-        obs[19] = self.current_drawdown
-
-        # --- Time features (20-23) ---
-        ts = pd.to_datetime(row["timestamp"])
-        obs[20] = np.sin(2 * np.pi * ts.hour / 24)
-        obs[21] = np.cos(2 * np.pi * ts.hour / 24)
-        obs[22] = np.sin(2 * np.pi * ts.weekday() / 7)
-        obs[23] = np.cos(2 * np.pi * ts.weekday() / 7)
-
-        # --- Momentum ratios (24-27) ---
+        ma_24 = float(row["ma_24"])
         volatility = abs(float(row["volatility_24h"]))
-        obs[24] = float(row["return_6h"]) / (volatility + 1e-6)
-        obs[25] = float(row["return_1h"]) / (volatility + 1e-6)
-        obs[26] = float(row["return_24h"]) / (volatility + 1e-6)
-        obs[27] = float(row["price_zscore_24h"])
 
-        # --- Technical indicators (28-35) ---
-        obs[28] = float(row["rsi_14"])
-        obs[29] = float(row["macd_line"]) * 100.0
-        obs[30] = float(row["macd_signal"]) * 100.0
-        obs[31] = float(row["macd_hist"]) * 100.0
-        obs[32] = float(row["atr_14"]) * 10.0
-        obs[33] = float(row["bb_upper"]) - 1.0
-        obs[34] = float(row["bb_middle"]) - 1.0
-        obs[35] = float(row["bb_lower"]) - 1.0
+        # --- Market features (0-14) ---
+        obs[0] = self._clip_feature((current_price - ma_24) / (ma_24 + 1e-9))
+        obs[1] = self._clip_feature(float(row["hl_spread_pct"]))
+        obs[2] = self._clip_feature(float(row["return_1h"]))
+        obs[3] = self._clip_feature(float(row["return_6h"]))
+        obs[4] = self._clip_feature(float(row["return_24h"]))
+        obs[5] = self._clip_feature(float(row["volatility_24h"]))
+        obs[6] = self._clip_feature(float(row["ma_6"] / row["close"]) - 1.0)
+        obs[7] = self._clip_feature(float(row["ma_24"] / row["close"]) - 1.0)
+        obs[8] = self._clip_feature(float(row["trend_direction"]))
+        obs[9] = self._clip_feature(float(row["rsi_14"]) * 2.0 - 1.0)
+        obs[10] = self._clip_feature(float(row["macd_hist"]))
+        obs[11] = self._clip_feature(float(row["atr_14"]))
+        obs[12] = self._clip_feature(float(row["bb_upper"]) - 1.0)
+        obs[13] = self._clip_feature(float(row["bb_lower"]) - 1.0)
+        obs[14] = self._clip_feature(float(row["return_6h"]) / (volatility + 1e-6))
 
-        # --- Position-level features (36-38) ---
-        if self.position:
-            entry_price = self.position["entry_price"]
-            obs[36] = (current_price - entry_price) / entry_price if entry_price > 0 else 0.0
-            obs[37] = self.position_hold_steps / self.max_hold_steps
-            obs[38] = ((current_price - entry_price) / entry_price) / (volatility + 1e-6)
-        else:
-            obs[36] = 0.0
-            obs[37] = 0.0
-            obs[38] = 0.0
+        # --- Portfolio features (15-24) ---
+        portfolio_value = self._get_portfolio_value()
+        obs[15] = self._clip_feature(self.capital / self.initial_capital)
+        obs[16] = self._clip_feature(len(self.positions) / self.settings.MAX_OPEN_POSITIONS)
+        obs[17] = self._clip_feature(portfolio_value / self.initial_capital)
+        obs[18] = self._clip_feature((portfolio_value - self.initial_capital) / self.initial_capital)
+        obs[19] = self._clip_feature(sum(self.recent_trades) / self.initial_capital if self.recent_trades else 0.0)
+        obs[20] = self._clip_feature(self.win_count / max(self.trade_count, 1))
+        obs[21] = self._clip_feature(self.current_drawdown)
 
-        # --- Long-term trend context (39-41) ---
-        ma_200 = float(row["ma_200"])
-        obs[39] = (current_price - ma_200) / (ma_200 + 1e-9)
-        obs[40] = float(row["ma_200_slope"])
-        volume_ma_200 = float(row["volume_ma_200"])
-        obs[41] = float(row["volume"]) / max(volume_ma_200, 1.0)
+        ts = pd.to_datetime(row["timestamp"])
+        obs[22] = self._clip_feature(np.sin(2 * np.pi * ts.hour / 24))
+        obs[23] = self._clip_feature(np.cos(2 * np.pi * ts.hour / 24))
+        obs[24] = self._clip_feature(np.sin(2 * np.pi * ts.weekday() / 7))
+
+        # --- Position features for current symbol (25-28) ---
+        position = self.positions.get(symbol)
+        if position:
+            entry_price = position["entry_price"]
+            hold_steps = position.get("hold_steps", 0)
+            obs[25] = self._clip_feature(position["size"] / self.initial_capital)
+            obs[26] = self._clip_feature((current_price - entry_price) / (entry_price + 1e-9))
+            obs[27] = self._clip_feature(hold_steps / self.max_hold_steps)
+            obs[28] = 1.0
 
         return obs
 
@@ -325,25 +309,46 @@ class LiveRLPaperTrader:
     # Action Masking  (mirrors CryptoTradingEnv.action_masks)
     # ------------------------------------------------------------------
 
-    def _get_action_mask(self, evaluating_held_symbol: bool = False) -> np.ndarray:
-        """Get valid action mask for 7-action space.
-
-        Args:
-            evaluating_held_symbol: True when we're evaluating the symbol we hold.
-        """
+    def _get_action_mask(self, symbol: str, row: pd.Series) -> np.ndarray:
+        """Get valid action mask for 3-action space."""
         mask = np.zeros(self.NUM_ACTIONS, dtype=bool)
         mask[self.ACTION_NO_ACTION] = True
 
-        if self.position:
-            # Allow SELL on the slot that holds our position
-            if evaluating_held_symbol and self.position_hold_steps >= self.min_hold_steps:
-                held_slot = self.position.get("slot", 0)
-                mask[self.ACTION_SELL_0 + held_slot] = True
+        position = self.positions.get(symbol)
+        if position:
+            if position.get("hold_steps", 0) >= self.min_hold_steps:
+                mask[self.ACTION_SELL] = True
         else:
-            if self.steps_since_last_close >= self.trade_cooldown_steps:
-                # Allow BUY on any slot
-                for slot in range(3):
-                    mask[self.ACTION_BUY_0 + slot] = True
+            cooldown_steps = self.symbol_cooldowns.get(symbol, self.trade_cooldown_steps)
+            if len(self.positions) < self.settings.MAX_OPEN_POSITIONS and cooldown_steps >= self.trade_cooldown_steps:
+                if self.entry_signal_threshold > 0:
+                    trend_strength = abs(float(row["return_24h"]))
+                    if trend_strength < self.entry_signal_threshold:
+                        return mask
+
+                if self.entry_volatility_cap > 0:
+                    volatility = abs(float(row["volatility_24h"]))
+                    if volatility > self.entry_volatility_cap:
+                        return mask
+
+                if self.entry_momentum_ratio_threshold > 0:
+                    volatility = abs(float(row["volatility_24h"]))
+                    momentum_ratio = float(row["return_6h"]) / (volatility + 1e-6)
+                    if momentum_ratio < self.entry_momentum_ratio_threshold:
+                        return mask
+
+                if self.min_volume_24h > 0:
+                    volume_ma_24 = float(row["volume_ma_24"])
+                    if volume_ma_24 < self.min_volume_24h:
+                        return mask
+
+                if self.min_market_liquidity > 0:
+                    current_price = float(row["close"])
+                    volume_value = float(row["volume_ma_24"]) * current_price
+                    if volume_value < self.min_market_liquidity:
+                        return mask
+
+                mask[self.ACTION_BUY] = True
 
         return mask
 
@@ -351,18 +356,19 @@ class LiveRLPaperTrader:
     # Auto-Exit Logic
     # ------------------------------------------------------------------
 
-    def _check_auto_exit(self, current_price: float) -> Optional[str]:
+    def _check_auto_exit(self, position: Dict, current_price: float) -> Optional[str]:
         """Check stop-loss / take-profit / max-hold conditions."""
-        if not self.position:
+        entry_price = position.get("entry_price", 0.0)
+        if entry_price <= 0:
             return None
 
-        price_change = (current_price - self.position["entry_price"]) / self.position["entry_price"]
+        price_change = (current_price - entry_price) / entry_price
 
         if price_change <= -self.stop_loss_pct:
             return "AUTO_STOP_LOSS"
         elif price_change >= self.take_profit_pct:
             return "AUTO_TAKE_PROFIT"
-        elif self.position_hold_steps >= self.max_hold_steps:
+        elif position.get("hold_steps", 0) >= self.max_hold_steps:
             return "AUTO_MAX_HOLD"
 
         return None
@@ -371,15 +377,17 @@ class LiveRLPaperTrader:
     # Portfolio Tracking
     # ------------------------------------------------------------------
 
-    def _get_portfolio_value(self, current_price: float) -> float:
-        """Calculate total portfolio value including open position."""
+    def _get_portfolio_value(self) -> float:
+        """Calculate total portfolio value including open positions."""
         total = self.capital
-        if self.position:
-            entry_price = self.position["entry_price"]
-            if entry_price > 0:
-                total += self.position["size"] * (current_price / entry_price)
+        for position in self.positions.values():
+            entry_price = position.get("entry_price", 0.0)
+            last_price = position.get("last_price", entry_price)
+            size = position.get("size", 0.0)
+            if entry_price > 0 and last_price > 0:
+                total += size * (last_price / entry_price)
             else:
-                total += self.position["size"]
+                total += size
         return total
 
     # ------------------------------------------------------------------
@@ -388,27 +396,30 @@ class LiveRLPaperTrader:
 
     def _execute_buy(self, symbol: str, current_price: float) -> Dict:
         """Execute a paper buy order for a specific symbol."""
-        if self.position:
+        if symbol in self.positions:
             return {"executed": False, "reason": "Position already open"}
+        if len(self.positions) >= self.settings.MAX_OPEN_POSITIONS:
+            return {"executed": False, "reason": "Max positions reached"}
 
-        position_value = self.capital * self.default_position_size_pct
+        available_capital = self.capital
+        position_value = available_capital * self.default_position_size_pct
         cost_pct = self.base_transaction_cost + self.max_slippage_pct * 0.5
         total_cost = position_value * (1 + cost_pct)
 
-        if total_cost > self.capital:
+        if total_cost > available_capital:
             return {"executed": False, "reason": "Insufficient capital"}
 
         transaction_cost = position_value * cost_pct
         self.capital -= total_cost
 
-        self.position = {
+        self.positions[symbol] = {
             "size": position_value,
             "entry_price": current_price,
             "entry_time": datetime.utcnow().isoformat(),
             "entry_tick": self.tick_count,
+            "hold_steps": 0,
+            "last_price": current_price,
         }
-        self.held_symbol = symbol
-        self.position_hold_steps = 0
 
         return {
             "executed": True,
@@ -421,13 +432,12 @@ class LiveRLPaperTrader:
             "timestamp": datetime.utcnow().isoformat(),
         }
 
-    def _execute_sell(self, current_price: float, reason: str = "MODEL_DECISION") -> Dict:
-        """Execute a paper sell order for the held position."""
-        if not self.position:
+    def _execute_sell(self, symbol: str, current_price: float, reason: str = "MODEL_DECISION") -> Dict:
+        """Execute a paper sell order for a specific symbol."""
+        if symbol not in self.positions:
             return {"executed": False, "reason": "No position to close"}
 
-        position = self.position
-        symbol = self.held_symbol
+        position = self.positions[symbol]
         sell_size = position["size"]
         price_change = (current_price - position["entry_price"]) / position["entry_price"]
         pnl_before_costs = sell_size * price_change
@@ -456,16 +466,14 @@ class LiveRLPaperTrader:
             "pnl": round(pnl, 4),
             "pnl_pct": round(price_change * 100, 4),
             "cost": round(transaction_cost, 4),
-            "hold_steps": self.position_hold_steps,
+            "hold_steps": position.get("hold_steps", 0),
             "capital_after": round(self.capital, 2),
             "timestamp": datetime.utcnow().isoformat(),
         }
         self.trade_history.append(trade_record)
 
-        self.position = None
-        self.held_symbol = None
-        self.position_hold_steps = 0
-        self.steps_since_last_close = 0
+        del self.positions[symbol]
+        self.symbol_cooldowns[symbol] = 0
 
         return trade_record
 
@@ -488,9 +496,11 @@ class LiveRLPaperTrader:
             latest_row = featured_df.iloc[-1]
             current_price = float(latest_row["close"])
 
-            obs = self._build_observation(latest_row, current_price)
-            is_held = (self.held_symbol == symbol)
-            action_mask = self._get_action_mask(evaluating_held_symbol=is_held)
+            if symbol in self.positions:
+                self.positions[symbol]["last_price"] = current_price
+
+            obs = self._build_observation(symbol, latest_row, current_price)
+            action_mask = self._get_action_mask(symbol, latest_row)
 
             action_raw, _ = self.model.predict(
                 obs.reshape(1, -1),
@@ -522,129 +532,68 @@ class LiveRLPaperTrader:
 
     def tick(self) -> Dict:
         """
-        Process one trading tick across all symbols.
+        Process one trading tick on the current symbol.
 
-        When IN POSITION:
-          - Check held symbol for auto-exit
-          - Evaluate held symbol for SELL signal
-
-        When FLAT:
-          - Shuffle symbols for fairness
-          - Evaluate each until one triggers BUY
-          - If none trigger, report HOLD
-
-        Returns dict with full tick details.
+        - Auto-exit checks run across all open positions.
+        - The model acts only on the current symbol (rotating each tick).
         """
         self.tick_count += 1
-        scan_results: List[Dict] = []
+        forced_results: List[Dict] = []
 
-        # ------- IN POSITION: only check the held symbol -------
-        if self.position and self.held_symbol:
-            eval_result = self._evaluate_symbol(self.held_symbol)
-            if eval_result is None:
-                # Data fetch failed, skip this tick
-                self._update_tracking_no_price()
-                return {
-                    "tick": self.tick_count,
-                    "error": f"Failed to fetch data for held symbol {self.held_symbol}",
-                }
-
-            current_price = eval_result["price"]
-            symbol = eval_result["symbol"]
-            timestamp = eval_result["timestamp"]
-
-            # Check auto-exit
-            auto_exit = self._check_auto_exit(current_price)
-            if auto_exit:
-                trade_result = self._execute_sell(current_price, reason=auto_exit)
-                self._update_tracking(current_price)
-                result = self._build_tick_result(
-                    timestamp, symbol, current_price, "SELL (auto)", trade_result
-                )
-                self._log_decision(result)
-                return result
-
-            # Model decision
-            action = eval_result["action"]
-            trade_result = None
-            if action in (self.ACTION_SELL_0, self.ACTION_SELL_1, self.ACTION_SELL_2):
-                trade_result = self._execute_sell(current_price, reason="MODEL_DECISION")
-
-            self._update_tracking(current_price)
-            action_label = self.ACTION_NAMES.get(action, "?")
-            if trade_result and trade_result.get("executed"):
-                action_label = "SELL"
-            result = self._build_tick_result(
-                timestamp, symbol, current_price, action_label, trade_result
-            )
-            self._log_decision(result)
-            return result
-
-        # ------- FLAT: scan all symbols for BUY opportunity -------
-        order = list(range(len(self.symbols)))
-        np.random.shuffle(order)
-
-        buy_triggered = False
-        last_timestamp = ""
-        symbols_checked = 0
-
-        for idx in order:
-            symbol = self.symbols[idx]
-
-            # Skip symbols with repeated errors (retry every 10 ticks)
-            if self._symbol_errors.get(symbol, 0) >= 3:
-                if self.tick_count % 10 != 0:
-                    continue
-
-            eval_result = self._evaluate_symbol(symbol)
-            if eval_result is None:
+        # Auto-exit across all open positions
+        for symbol, position in list(self.positions.items()):
+            try:
+                current_price = self.coinbase.get_latest_price(symbol)
+            except Exception:
                 continue
-
-            symbols_checked += 1
-            last_timestamp = eval_result["timestamp"]
-            scan_results.append(eval_result)
-
-            if eval_result["action"] in (self.ACTION_BUY_0, self.ACTION_BUY_1, self.ACTION_BUY_2):
-                # Execute buy on this symbol
-                trade_result = self._execute_buy(symbol, eval_result["price"])
+            if current_price <= 0:
+                continue
+            position["last_price"] = current_price
+            auto_exit = self._check_auto_exit(position, current_price)
+            if auto_exit:
+                trade_result = self._execute_sell(symbol, current_price, reason=auto_exit)
                 if trade_result.get("executed"):
-                    self._update_tracking(eval_result["price"])
-                    result = self._build_tick_result(
-                        eval_result["timestamp"],
-                        symbol,
-                        eval_result["price"],
-                        "BUY",
-                        trade_result,
-                    )
-                    result["symbols_scanned"] = symbols_checked
-                    self._log_decision(result)
-                    return result
-                buy_triggered = True  # Tried but failed (e.g. insufficient capital)
+                    forced_results.append(trade_result)
 
-            # Small delay to respect Coinbase rate limits (~10 req/sec)
-            time.sleep(0.12)
+        # Evaluate current symbol only
+        if not self.symbols:
+            self._advance_time()
+            return {"tick": self.tick_count, "error": "No symbols configured"}
 
-        # No BUY triggered across all symbols
-        self._update_tracking_flat()
-        result = {
-            "tick": self.tick_count,
-            "timestamp": last_timestamp,
-            "symbol": "ALL",
-            "price": 0.0,
-            "action": "HOLD (scanned all)",
-            "auto_exit": None,
-            "trade": None,
-            "portfolio_value": round(self.capital, 2),
-            "capital": round(self.capital, 2),
-            "position": {"active": False, "hold_steps": 0, "unrealized_pnl_pct": None},
-            "total_return_pct": round(
-                (self.capital - self.initial_capital) / self.initial_capital * 100, 4
-            ),
-            "drawdown_pct": round(self.current_drawdown * 100, 4),
-            "trades_count": self.trade_count,
-            "win_rate": round(self.win_count / max(self.trade_count, 1) * 100, 1),
-            "symbols_scanned": symbols_checked,
-        }
+        current_symbol = self.symbols[self.current_symbol_index % len(self.symbols)]
+        eval_result = self._evaluate_symbol(current_symbol)
+        if eval_result is None:
+            self._advance_time()
+            self._update_tracking()
+            return {
+                "tick": self.tick_count,
+                "error": f"Failed to fetch data for symbol {current_symbol}",
+            }
+
+        action = eval_result["action"]
+        trade_result = None
+        if action == self.ACTION_BUY:
+            trade_result = self._execute_buy(current_symbol, eval_result["price"])
+        elif action == self.ACTION_SELL:
+            position = self.positions.get(current_symbol)
+            if position and position.get("hold_steps", 0) >= self.min_hold_steps:
+                trade_result = self._execute_sell(current_symbol, eval_result["price"], reason="MODEL_DECISION")
+
+        self._advance_time()
+        self._update_tracking()
+
+        action_label = self.ACTION_NAMES.get(action, "?")
+        if trade_result and trade_result.get("executed"):
+            action_label = trade_result.get("action", action_label)
+
+        result = self._build_tick_result(
+            eval_result["timestamp"],
+            current_symbol,
+            eval_result["price"],
+            action_label,
+            trade_result,
+            forced_results,
+        )
         self._log_decision(result)
         return result
 
@@ -659,8 +608,10 @@ class LiveRLPaperTrader:
         current_price: float,
         action_label: str,
         trade_result: Optional[Dict],
+        forced_exits: Optional[List[Dict]] = None,
     ) -> Dict:
-        portfolio_value = self._get_portfolio_value(current_price)
+        portfolio_value = self._get_portfolio_value()
+        position = self.positions.get(symbol)
         return {
             "tick": self.tick_count,
             "timestamp": timestamp,
@@ -668,22 +619,25 @@ class LiveRLPaperTrader:
             "price": current_price,
             "action": action_label,
             "auto_exit": None,
+            "forced_exits": forced_exits or [],
             "trade": trade_result if trade_result and trade_result.get("executed") else None,
             "portfolio_value": round(portfolio_value, 2),
             "capital": round(self.capital, 2),
             "position": {
-                "active": self.position is not None,
-                "symbol": self.held_symbol,
-                "hold_steps": self.position_hold_steps,
+                "active": position is not None,
+                "symbol": symbol if position else None,
+                "hold_steps": position.get("hold_steps", 0) if position else 0,
                 "unrealized_pnl_pct": round(
-                    (current_price - self.position["entry_price"])
-                    / self.position["entry_price"]
+                    (current_price - position["entry_price"])
+                    / position["entry_price"]
                     * 100,
                     3,
                 )
-                if self.position
+                if position and position.get("entry_price")
                 else None,
             },
+            "open_positions": list(self.positions.keys()),
+            "num_positions": len(self.positions),
             "total_return_pct": round(
                 (portfolio_value - self.initial_capital) / self.initial_capital * 100, 4
             ),
@@ -696,28 +650,30 @@ class LiveRLPaperTrader:
     # Tracking
     # ------------------------------------------------------------------
 
-    def _update_tracking(self, current_price: float):
-        portfolio_value = self._get_portfolio_value(current_price)
+    def _advance_time(self):
+        for position in self.positions.values():
+            position["hold_steps"] = position.get("hold_steps", 0) + 1
+
+        for symbol in self.symbols:
+            self.symbol_cooldowns[symbol] = self.symbol_cooldowns.get(symbol, self.trade_cooldown_steps) + 1
+
+        if self.positions:
+            self.flat_steps = 0
+        else:
+            self.flat_steps += 1
+
+        if self.symbols:
+            self.current_symbol_index = (self.current_symbol_index + 1) % len(self.symbols)
+
+    def _update_tracking(self):
+        portfolio_value = self._get_portfolio_value()
         self.peak_capital = max(self.peak_capital, portfolio_value)
         self.current_drawdown = (self.peak_capital - portfolio_value) / self.peak_capital
         self.prev_portfolio_value = portfolio_value
 
-        if self.position:
-            self.position_hold_steps += 1
-            self.flat_steps = 0
-        else:
-            self.steps_since_last_close += 1
-            self.flat_steps += 1
-
-    def _update_tracking_flat(self):
-        """Update tracking when flat (no price reference needed)."""
-        self.steps_since_last_close += 1
-        self.flat_steps += 1
-
     def _update_tracking_no_price(self):
         """Update tracking when we couldn't get price data."""
-        if self.position:
-            self.position_hold_steps += 1
+        self._advance_time()
 
     # ------------------------------------------------------------------
     # Logging
@@ -742,16 +698,7 @@ class LiveRLPaperTrader:
     # ------------------------------------------------------------------
 
     def get_metrics(self) -> Dict:
-        current_price = 0.0
-        if self.held_symbol:
-            try:
-                current_price = self.coinbase.get_latest_price(self.held_symbol)
-            except Exception:
-                pass
-        if current_price == 0.0 and self.decision_log:
-            current_price = self.decision_log[-1].get("price", 0)
-
-        portfolio_value = self._get_portfolio_value(current_price)
+        portfolio_value = self._get_portfolio_value()
         total_return = (portfolio_value - self.initial_capital) / self.initial_capital
 
         gross_profit = sum(t["pnl"] for t in self.trade_history if t.get("pnl", 0) > 0)
@@ -782,8 +729,8 @@ class LiveRLPaperTrader:
             "avg_win": round(avg_win, 4),
             "avg_loss": round(avg_loss, 4),
             "max_drawdown_pct": round(self.current_drawdown * 100, 4),
-            "held_symbol": self.held_symbol,
-            "open_position": self.position is not None,
+            "open_positions": list(self.positions.keys()),
+            "open_position": len(self.positions) > 0,
             "total_fees": round(sum(t.get("cost", 0) for t in self.trade_history), 4),
         }
 
@@ -911,7 +858,7 @@ class LiveRLPaperTrader:
         ret = result.get("total_return_pct", 0)
         dd = result.get("drawdown_pct", 0)
         pos = result.get("position", {})
-        scanned = result.get("symbols_scanned", "")
+        num_positions = result.get("num_positions", 0)
 
         status = "FLAT"
         if pos.get("active"):
@@ -921,11 +868,10 @@ class LiveRLPaperTrader:
             status = f"HOLDING {held} (step {pos.get('hold_steps', 0)}, {unr_str})"
 
         print(f"  [{result.get('timestamp', '')}]  Tick #{result.get('tick', 0)}")
-        if symbol == "ALL":
-            print(f"    Scanned {scanned}/{len(self.symbols)} symbols  |  Action: {action}")
-        else:
-            print(f"    {symbol}: ${price:,.2f}  |  Action: {action}")
-        print(f"    Portfolio: ${pv:,.2f}  |  Return: {ret:+.2f}%  |  Drawdown: {dd:.2f}%  |  {status}")
+        print(f"    {symbol}: ${price:,.2f}  |  Action: {action}")
+        print(
+            f"    Portfolio: ${pv:,.2f}  |  Return: {ret:+.2f}%  |  Drawdown: {dd:.2f}%  |  {status}  |  Positions: {num_positions}"
+        )
 
         trade = result.get("trade")
         if trade:
@@ -953,7 +899,8 @@ class LiveRLPaperTrader:
         print(f"  Avg Trade PnL:  ${metrics['avg_trade_pnl']:.4f}")
         print(f"  Max Drawdown:   {metrics['max_drawdown_pct']:.2f}%")
         print(f"  Total Fees:     ${metrics['total_fees']:.4f}")
-        print(f"  Open Position:  {metrics['held_symbol'] or 'None'}")
+        open_positions = metrics.get("open_positions", [])
+        print(f"  Open Positions: {', '.join(open_positions) if open_positions else 'None'}")
         print(f"{'=' * 65}\n")
 
     # ------------------------------------------------------------------

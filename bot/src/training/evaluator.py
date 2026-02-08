@@ -164,6 +164,12 @@ class Evaluator:
         in_position_ratio = float(total_position_steps / total_steps) if total_steps else 0.0
         turnover = float(total_trade_value / (self.settings.INITIAL_CAPITAL * num_episodes)) if num_episodes else 0.0
         profit_factor = (profit_wins / profit_losses) if profit_losses > 0 else 0.0
+        max_drawdown = float(np.max(episode_drawdowns)) if episode_drawdowns else 0.0
+        drawdown_guard = float(
+            getattr(self.env.unwrapped, "reward_config", {}).get("drawdown_threshold", 0.2)
+        )
+        if max_drawdown > drawdown_guard:
+            profit_factor = 0.0
         winning_trades = [pnl for pnl in trade_pnls if pnl > 0]
         losing_trades = [abs(pnl) for pnl in trade_pnls if pnl < 0]
         avg_win_size = float(np.mean(winning_trades)) if winning_trades else 0.0
@@ -177,7 +183,7 @@ class Evaluator:
             "sharpe_ratio": float(sharpe_ratio),
             "sortino_ratio": float(sortino_ratio),
             "cvar_95": float(cvar_95),
-            "max_drawdown": float(np.max(episode_drawdowns)) if episode_drawdowns else 0.0,
+            "max_drawdown": max_drawdown,
             "win_rate": float(np.mean(episode_win_rates)) if episode_win_rates else 0.0,
             "avg_trade_pnl": float(np.mean(trade_pnls)) if trade_pnls else 0.0,
             "avg_win_size": avg_win_size,
@@ -187,6 +193,7 @@ class Evaluator:
             "turnover": turnover,
             "total_fees": float(total_fees),
             "profit_factor": float(profit_factor),
+            "drawdown_guard": float(drawdown_guard),
             "fees_pct_of_gross_pnl": fees_pct_of_gross_pnl,
             "trades_per_episode": trades_per_episode,
             "flat_ratio": flat_ratio,

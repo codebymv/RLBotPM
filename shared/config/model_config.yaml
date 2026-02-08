@@ -34,7 +34,7 @@ ppo:
   
   # Entropy coefficient
   # Encourages exploration (higher = more random actions)
-  ent_coef: 0.02
+  ent_coef: 0.03
   
   # Value function coefficient
   # Weight of value loss in total loss
@@ -82,7 +82,7 @@ training:
     eval_episodes: 50
     patience: 8
     min_delta: 0.0
-    metric: "sharpe_ratio"
+    metric: "profit_factor"
 
 # Environment configuration
 environment:
