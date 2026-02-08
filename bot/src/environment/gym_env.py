@@ -35,17 +35,28 @@ class CryptoTradingEnv(gym.Env):
 
     metadata = {"render_modes": ["human"]}
 
-    # Action space constants
+    # Action space: 7 explicit actions for multi-asset portfolio
+    # Each slot corresponds to a fixed symbol (e.g., slot 0 = BTC, slot 1 = ETH, slot 2 = SOL)
     ACTION_NO_ACTION = 0
-    ACTION_BUY = 1
-    ACTION_SELL = 2
+    ACTION_BUY_0 = 1   # Buy symbol in slot 0
+    ACTION_BUY_1 = 2   # Buy symbol in slot 1
+    ACTION_BUY_2 = 3   # Buy symbol in slot 2
+    ACTION_SELL_0 = 4   # Sell position in slot 0
+    ACTION_SELL_1 = 5   # Sell position in slot 1
+    ACTION_SELL_2 = 6   # Sell position in slot 2
+
+    NUM_SLOTS = 3  # Number of asset slots (matches MAX_OPEN_POSITIONS)
 
     MIN_POSITION_VALUE_FRACTION = 0.01
 
     ACTION_NAMES = {
         0: "NO_ACTION",
-        1: "BUY",
-        2: "SELL",
+        1: "BUY_0",
+        2: "BUY_1",
+        3: "BUY_2",
+        4: "SELL_0",
+        5: "SELL_1",
+        6: "SELL_2",
     }
 
     def __init__(
@@ -125,26 +136,31 @@ class CryptoTradingEnv(gym.Env):
         self.dataset = dataset.copy()
         self._prepare_data()
 
-        # Action space: 3 discrete actions
-        self.action_space = spaces.Discrete(3)
+        # Action space: 7 discrete actions (NO_ACTION + 3 BUY + 3 SELL)
+        self.action_space = spaces.Discrete(7)
 
-        # Observation space: 57-dimensional continuous state
-        # Architecture: [market_features(42) + position_1(5) + position_2(5) + position_3(5)]
-        # This makes ALL position information visible regardless of current market view
-        # Solves the information blindness problem from symbol rotation
+        # Assign symbols to fixed slots for the entire training session
+        # This eliminates symbol rotation entirely - agent always sees all symbols
+        self.slot_symbols: List[str] = sorted(self.data_by_symbol.keys())[:self.NUM_SLOTS]
+        self.symbol_to_slot: Dict[str, int] = {s: i for i, s in enumerate(self.slot_symbols)}
+        logger.info(f"Fixed symbol slots: {self.slot_symbols}")
+
+        # Observation space: multi-asset simultaneous view
+        # Architecture: [slot_0_market(15) + slot_1_market(15) + slot_2_market(15) +
+        #               portfolio_global(10) + slot_0_position(4) + slot_1_position(4) + slot_2_position(4)]
+        # = 45 market + 10 portfolio + 12 position = 67 dimensions
+        # Agent sees ALL symbols at every step - no rotation needed
+        self.obs_dim = 67
         self.observation_space = spaces.Box(
             low=-10.0,
             high=10.0,
-            shape=(57,),  # 42 market + 15 position features (3 slots × 5 features)
+            shape=(self.obs_dim,),
             dtype=np.float32,
         )
 
-        # Symbol encoding for observation space
-        self._create_symbol_encoding()
-
         # Portfolio state
         self.capital = self.initial_capital
-        self.positions: Dict[str, Dict] = {}
+        self.positions: Dict[str, Dict] = {}  # Keyed by symbol
         self.trade_history: List[Dict] = []
 
         # Performance tracking
@@ -155,14 +171,8 @@ class CryptoTradingEnv(gym.Env):
 
         # Episode state
         self.current_step = 0
-        self.current_symbol: Optional[str] = None
         self.current_index = 0
-        self.episode_data: Optional[pd.DataFrame] = None
-        self.episode_symbols: List[str] = []  # Multi-symbol pool for episode
-        self.episode_data_pool: Dict[str, pd.DataFrame] = {}  # Data for each symbol in pool
-        self.symbol_rotation_index: int = 0  # Track rotation through symbol pool
-        self.steps_since_rotation: int = 0  # Track steps before next rotation
-        self.rotation_interval: int = 20  # Rotate every N steps (gives stable observation windows)
+        self.slot_data: Dict[str, pd.DataFrame] = {}  # Episode data per slot symbol
         self.terminated = False
         self.flat_steps = 0
         self.steps_since_last_close = self.trade_cooldown_steps  # Start ready to trade
@@ -209,148 +219,162 @@ class CryptoTradingEnv(gym.Env):
 
         return observation, info
 
+    def _get_slot_symbol(self, slot: int) -> Optional[str]:
+        """Get the symbol assigned to a given slot index."""
+        if 0 <= slot < len(self.slot_symbols):
+            return self.slot_symbols[slot]
+        return None
+
+    def _get_slot_price(self, slot: int) -> float:
+        """Get the current close price for a slot's symbol."""
+        symbol = self._get_slot_symbol(slot)
+        if symbol and symbol in self.slot_data:
+            data = self.slot_data[symbol]
+            if len(data) > self.current_index:
+                return float(data.iloc[self.current_index]["close"])
+        return 0.0
+
+    def _get_slot_row(self, slot: int) -> Optional[pd.Series]:
+        """Get the current data row for a slot's symbol."""
+        symbol = self._get_slot_symbol(slot)
+        if symbol and symbol in self.slot_data:
+            data = self.slot_data[symbol]
+            if len(data) > self.current_index:
+                return data.iloc[self.current_index]
+        return None
+
     def step(self, action: int) -> Tuple[np.ndarray, float, bool, bool, Dict]:
         if self.terminated:
             return self._get_observation(), 0.0, True, False, self._get_info()
 
-        forced_exit = None
-        target_symbol_for_sell = None
-        
-        # Multi-symbol forced exit check: Check ALL open positions
+        # --- Phase 1: Auto-exit check across ALL positions ---
+        forced_exits: List[Dict] = []
         if self.positions and self.auto_exit_enabled:
-            for symbol, position in self.positions.items():
-                # Get current price for this symbol's position
-                symbol_data = self.episode_data_pool.get(symbol)
-                if symbol_data is not None and len(symbol_data) > self.current_index:
-                    current_price = float(symbol_data.iloc[self.current_index]["close"])
-                    position_hold_time = position.get("hold_steps", 0)
-                    price_change = (current_price - position["entry_price"]) / position["entry_price"]
-                    
-                    if price_change <= -self.reward_config.get("stop_loss_pct", 0.01):
-                        forced_exit = "AUTO_STOP_LOSS"
-                        target_symbol_for_sell = symbol
-                        break
-                    elif price_change >= self.reward_config.get("take_profit_pct", 0.02):
-                        forced_exit = "AUTO_TAKE_PROFIT"
-                        target_symbol_for_sell = symbol
-                        break
-                    elif position_hold_time >= self.max_hold_steps:
-                        forced_exit = "AUTO_MAX_HOLD"
-                        target_symbol_for_sell = symbol
-                        break
+            for symbol, position in list(self.positions.items()):
+                slot = self.symbol_to_slot.get(symbol)
+                if slot is None:
+                    continue
+                current_price = self._get_slot_price(slot)
+                if current_price <= 0:
+                    continue
+                hold_steps = position.get("hold_steps", 0)
+                price_change = (current_price - position["entry_price"]) / position["entry_price"]
 
-        if forced_exit:
-            action = self.ACTION_SELL
+                if price_change <= -self.reward_config.get("stop_loss_pct", 0.01):
+                    forced_exits.append({"symbol": symbol, "slot": slot, "reason": "AUTO_STOP_LOSS"})
+                elif price_change >= self.reward_config.get("take_profit_pct", 0.02):
+                    forced_exits.append({"symbol": symbol, "slot": slot, "reason": "AUTO_TAKE_PROFIT"})
+                elif hold_steps >= self.max_hold_steps:
+                    forced_exits.append({"symbol": symbol, "slot": slot, "reason": "AUTO_MAX_HOLD"})
 
+        # Execute forced exits first (before agent action)
+        forced_results = []
+        for fe in forced_exits:
+            result = self._execute_sell_slot(fe["slot"])
+            result["reason"] = fe["reason"]
+            forced_results.append(result)
+
+        # --- Phase 2: Determine action type and target slot ---
+        action_name = self.ACTION_NAMES.get(action, "UNKNOWN")
         invalid_action = False
-        hold_steps_before_action = 0
-        
-        # Multi-symbol action validation
-        if action == self.ACTION_BUY:
-            # BUY: Check if current_symbol already has a position
-            if self.current_symbol in self.positions:
-                invalid_action = True
-            # Also check if we're at max positions across ALL symbols
-            elif len(self.positions) >= self.settings.MAX_OPEN_POSITIONS:
-                invalid_action = True
-        
-        elif action == self.ACTION_SELL:
-            # SELL: Pick best position to exit (or forced exit target)
-            if not self.positions:
-                invalid_action = True
-            else:
-                if target_symbol_for_sell:
-                    # Forced exit already determined target
-                    pass
-                else:
-                    # Smart selection: Pick position that most needs exiting
-                    # Priority: 1) Losses > stop loss, 2) Profits > take profit, 3) Longest held
-                    best_symbol = None
-                    best_priority = -999
-                    
-                    for symbol, position in self.positions.items():
-                        symbol_data = self.episode_data_pool.get(symbol)
-                        if symbol_data is None or len(symbol_data) <= self.current_index:
-                            continue
-                        
-                        current_price = float(symbol_data.iloc[self.current_index]["close"])
-                        price_change = (current_price - position["entry_price"]) / position["entry_price"]
-                        hold_steps = position.get("hold_steps", 0)
-                        
-                        # Calculate exit priority (always allow exit, no min_hold restriction)
-                        priority = 0
-                        if price_change <= -self.reward_config.get("stop_loss_pct", 0.01):
-                            priority = 1000 + abs(price_change) * 100  # Urgent: big loss
-                        elif price_change >= self.reward_config.get("take_profit_pct", 0.02):
-                            priority = 500 + price_change * 100  # Good: take profit
-                        else:
-                            priority = hold_steps  # Default: longest held (no min check)
-                        
-                        if priority > best_priority:
-                            best_priority = priority
-                            best_symbol = symbol
-                    
-                    if best_symbol:
-                        target_symbol_for_sell = best_symbol
-                        hold_steps_before_action = self.positions[best_symbol].get("hold_steps", 0)
-                        # Check min_hold only for reward penalty, not validity
-                        if hold_steps_before_action < self.min_hold_steps:
-                            # Still allow the SELL, but it may get penalized in reward
-                            pass
-                    else:
-                        invalid_action = True  # No eligible position to exit
-        
-        # Store original current_symbol
-        original_symbol = self.current_symbol
-        
-        # For SELL actions, temporarily switch to target symbol
-        if action == self.ACTION_SELL and target_symbol_for_sell and not invalid_action:
-            self.current_symbol = target_symbol_for_sell
-            self.episode_data = self.episode_data_pool[target_symbol_for_sell]
+        target_slot = -1
 
+        if action == self.ACTION_NO_ACTION:
+            target_slot = -1
+        elif action in (self.ACTION_BUY_0, self.ACTION_BUY_1, self.ACTION_BUY_2):
+            target_slot = action - 1  # BUY_0=1 -> slot 0, BUY_1=2 -> slot 1, BUY_2=3 -> slot 2
+            symbol = self._get_slot_symbol(target_slot)
+            if symbol is None:
+                invalid_action = True
+            elif symbol in self.positions:
+                invalid_action = True  # Already have position in this symbol
+            elif len(self.positions) >= self.settings.MAX_OPEN_POSITIONS:
+                invalid_action = True  # Max positions reached
+        elif action in (self.ACTION_SELL_0, self.ACTION_SELL_1, self.ACTION_SELL_2):
+            target_slot = action - 4  # SELL_0=4 -> slot 0, SELL_1=5 -> slot 1, SELL_2=6 -> slot 2
+            symbol = self._get_slot_symbol(target_slot)
+            if symbol is None or symbol not in self.positions:
+                invalid_action = True  # No position to sell
+        else:
+            invalid_action = True
+
+        # --- Phase 3: Execute agent's action ---
+        hold_steps_before_action = 0
         if invalid_action:
             trade_result = {
                 "action": action,
-                "action_name": "INVALID_ACTION",
+                "action_name": action_name,
                 "executed": False,
                 "reason": "Invalid action",
                 "pnl": 0.0,
                 "cost": 0.0,
             }
+        elif action == self.ACTION_NO_ACTION:
+            trade_result = {
+                "action": action,
+                "action_name": "NO_ACTION",
+                "executed": False,
+                "reason": "No action taken",
+                "pnl": 0.0,
+                "cost": 0.0,
+            }
+        elif action in (self.ACTION_BUY_0, self.ACTION_BUY_1, self.ACTION_BUY_2):
+            trade_result = self._execute_buy_slot(target_slot, action)
+        elif action in (self.ACTION_SELL_0, self.ACTION_SELL_1, self.ACTION_SELL_2):
+            symbol = self._get_slot_symbol(target_slot)
+            if symbol and symbol in self.positions:
+                hold_steps_before_action = self.positions[symbol].get("hold_steps", 0)
+            trade_result = self._execute_sell_slot(target_slot)
+            trade_result["action"] = action
+            trade_result["action_name"] = action_name
         else:
-            trade_result = self._execute_action(action)
+            trade_result = {
+                "action": action,
+                "action_name": "UNKNOWN",
+                "executed": False,
+                "reason": "Unknown action",
+                "pnl": 0.0,
+                "cost": 0.0,
+            }
 
         trade_result["hold_steps"] = hold_steps_before_action
-        if forced_exit:
-            trade_result["reason"] = forced_exit
 
-        if not self.positions and trade_result.get("reason") in {"No action taken", "Invalid action"}:
+        # Track flat steps
+        if not self.positions and not trade_result.get("executed"):
             self.flat_steps += 1
-        elif trade_result.get("executed") or self.positions:
+        else:
             self.flat_steps = 0
 
+        # --- Phase 4: Calculate reward ---
         current_portfolio_value = self._get_portfolio_value()
         reward = self._calculate_reward(trade_result, current_portfolio_value)
+
+        # Add penalty for forced exits
+        for fr in forced_results:
+            if fr.get("executed"):
+                pnl = float(fr.get("pnl", 0.0))
+                pnl_pct = pnl / self.initial_capital
+                auto_exit_penalty = float(self.reward_config.get("auto_exit_penalty", 0.5))
+                if pnl >= 0:
+                    reward -= auto_exit_penalty * 0.25
+                else:
+                    reward -= auto_exit_penalty * 0.5
+                reward += pnl_pct  # PnL feedback
+
         self.prev_portfolio_value = current_portfolio_value
 
+        # --- Phase 5: Advance state ---
         self.current_step += 1
         self.current_index += 1
 
-        # Multi-symbol rotation: Cycle through symbol pool each step
-        # With all position features visible (obs 42-56), agent maintains full portfolio awareness
-        # while being presented with different trading opportunities each step
-        self._rotate_symbol()
-        
-        # ENHANCEMENT: Increment hold steps for ALL open positions (multi-position tracking)
-        # Each position tracks its own hold duration independently
+        # Increment hold steps for ALL open positions
         for symbol, position in self.positions.items():
             position["hold_steps"] = position.get("hold_steps", 0) + 1
 
-        # Increment cooldown counter when completely flat
+        # Cooldown tracking
         if not self.positions:
             self.steps_since_last_close += 1
         else:
-            # Reset cooldown if we have any positions
             self.steps_since_last_close = 0
 
         terminated = self._check_termination()
@@ -359,10 +383,11 @@ class CryptoTradingEnv(gym.Env):
         observation = self._get_observation()
         info = self._get_info()
         info["trade_result"] = trade_result
+        if forced_results:
+            info["forced_exits"] = forced_results
 
         if terminated or truncated:
             self.terminated = True
-            # Episode-end net P&L bonus: directly ties reward to bottom-line profitability
             episode_return = (current_portfolio_value - self.initial_capital) / self.initial_capital
             episode_pnl_scale = float(self.reward_config.get("episode_pnl_bonus_scale", 10.0))
             reward += episode_return * episode_pnl_scale
@@ -481,36 +506,24 @@ class CryptoTradingEnv(gym.Env):
             "lower": lower / middle_ref,
         }
 
-    def _create_symbol_encoding(self) -> None:
-        """Create numeric encoding for symbols to use in observation space."""
-        # Sort symbols alphabetically for consistency
-        all_symbols = sorted(self.data_by_symbol.keys())
-        
-        # Create bidirectional mapping
-        self.symbol_to_id = {symbol: idx / len(all_symbols) for idx, symbol in enumerate(all_symbols)}
-        self.id_to_symbol = {idx: symbol for idx, symbol in enumerate(all_symbols)}
-        
-        logger.info(f"Created symbol encoding for {len(all_symbols)} symbols")
-
-    def _encode_symbol(self, symbol: str) -> float:
-        """Encode symbol string to normalized numeric value for observation."""
-        return self.symbol_to_id.get(symbol, 0.0)
-
     def _select_episode_window(self) -> None:
         """
-        Select multiple symbols with synchronized time windows for multi-asset portfolios.
+        Select a synchronized time window for all fixed slot symbols.
         
-        NEW ARCHITECTURE: Select 4-6 symbols per episode and align their time windows.
-        Agent can view ALL symbols simultaneously and decide which to trade.
-        This enables true portfolio diversification without information blindness.
+        All slot symbols share the same time window so the agent sees 
+        concurrent market data. No rotation - slots are fixed for the 
+        entire training session.
         """
-        max_available = max(len(data) for data in self.data_by_symbol.values())
-        if max_available <= 2:
-            raise DataUnavailableError("No symbols with sufficient data for episode.")
+        # Find maximum window that works for ALL slot symbols
+        min_length = float('inf')
+        for symbol in self.slot_symbols:
+            if symbol not in self.data_by_symbol:
+                raise DataUnavailableError(f"Slot symbol {symbol} not found in data.")
+            min_length = min(min_length, len(self.data_by_symbol[symbol]))
 
         required = self.max_steps + self.sequence_length + 1
-        if max_available <= required:
-            self.max_steps = max_available - self.sequence_length - 1
+        if min_length <= required:
+            self.max_steps = int(min_length) - self.sequence_length - 1
             logger.warning(
                 "Insufficient history for requested max_steps; "
                 f"reducing max_steps to {self.max_steps}."
@@ -518,156 +531,92 @@ class CryptoTradingEnv(gym.Env):
             if self.max_steps <= 0:
                 raise DataUnavailableError("Insufficient history for requested sequence length.")
 
-        valid_symbols = [
-            symbol
-            for symbol, data in self.data_by_symbol.items()
-            if len(data) > self.max_steps + self.sequence_length + 1
-        ]
-        if not valid_symbols:
-            raise DataUnavailableError("No symbols with sufficient data for episode.")
-
-        # Select 4-6 symbols for this episode (enables portfolio diversification)
-        num_symbols = min(np.random.randint(4, 7), len(valid_symbols))
-        self.episode_symbols = list(np.random.choice(valid_symbols, size=num_symbols, replace=False))
-        
-        # Pick a random start time that works for all selected symbols
-        # Find the latest start and earliest end across all symbols
-        max_start = 0
-        min_end = float('inf')
-        
-        for symbol in self.episode_symbols:
-            data = self.data_by_symbol[symbol]
-            max_start = max(max_start, 0)
-            min_end = min(min_end, len(data) - self.max_steps - 1)
-        
-        if min_end <= max_start:
-            # Fallback to single symbol if time alignment fails
-            self.episode_symbols = [np.random.choice(valid_symbols)]
-            symbol = self.episode_symbols[0]
-            data = self.data_by_symbol[symbol]
-            start_index = np.random.randint(0, len(data) - self.max_steps - 1)
-            self.episode_data_pool = {symbol: data.iloc[start_index : start_index + self.max_steps + 1]}
+        # Pick a random start index within the valid range
+        max_start = int(min_length) - self.max_steps - 1
+        if max_start <= 0:
+            start_index = 0
         else:
-            # Aligned time window across all symbols
-            start_index = np.random.randint(max_start, min_end)
-            self.episode_data_pool = {}
-            
-            for symbol in self.episode_symbols:
-                data = self.data_by_symbol[symbol]
-                self.episode_data_pool[symbol] = data.iloc[start_index : start_index + self.max_steps + 1]
-        
-        # Set initial current symbol (agent can trade any symbol in the pool)
-        self.current_symbol = self.episode_symbols[0]
-        self.episode_data = self.episode_data_pool[self.current_symbol]
+            start_index = np.random.randint(0, max_start)
+
+        # Slice synchronized windows for each slot symbol
+        self.slot_data = {}
+        for symbol in self.slot_symbols:
+            data = self.data_by_symbol[symbol]
+            self.slot_data[symbol] = data.iloc[start_index : start_index + self.max_steps + 1].reset_index(drop=True)
+
         self.current_index = 0
-        self.symbol_rotation_index = 0
-        self.steps_since_rotation = 0
 
-    def _rotate_symbol(self) -> None:
-        """
-        Rotate to next symbol in the episode pool (happens every N steps).
-        
-        REDUCED FREQUENCY: Rotates every 10 steps instead of every step to give
-        agent stable observation windows for learning. This reduces noise in the
-        learning signal while still exposing agent to multiple trading opportunities.
-        
-        With all position features visible (obs 42-56), agent maintains full
-        portfolio awareness even when viewing a different symbol.
-        """
-        if not self.episode_symbols or len(self.episode_symbols) <= 1:
-            return  # Single symbol episode, no rotation needed
-        
-        # Only rotate every N steps (default: 10)
-        self.steps_since_rotation += 1
-        if self.steps_since_rotation < self.rotation_interval:
-            return
-        
-        # Reset counter and rotate
-        self.steps_since_rotation = 0
-        self.symbol_rotation_index = (self.symbol_rotation_index + 1) % len(self.episode_symbols)
-        self.current_symbol = self.episode_symbols[self.symbol_rotation_index]
-        
-        # Update current episode data to match new symbol
-        self.episode_data = self.episode_data_pool[self.current_symbol]
-
-    def _current_row(self) -> pd.Series:
-        if self.episode_data is None:
-            raise DataUnavailableError("Episode data not initialized.")
-        return self.episode_data.iloc[self.current_index]
-
-    def _execute_action(self, action: int) -> Dict:
-        action_name = self.ACTION_NAMES.get(action, "UNKNOWN")
-        result = {
-            "action": action,
-            "action_name": action_name,
-            "executed": False,
-            "reason": None,
-            "pnl": 0.0,
-            "cost": 0.0,
-        }
-
-        if action == self.ACTION_NO_ACTION:
-            result["reason"] = "No action taken"
-            return result
-
-        if action == self.ACTION_BUY:
-            return self._execute_buy(1.0, action)
-
-        if action == self.ACTION_SELL:
-            return self._execute_sell(1.0, action)
-
-        return result
+    def _current_row(self, slot: int = 0) -> pd.Series:
+        """Get current data row for a slot (default slot 0 for general market reference)."""
+        symbol = self._get_slot_symbol(slot)
+        if symbol and symbol in self.slot_data:
+            data = self.slot_data[symbol]
+            if len(data) > self.current_index:
+                return data.iloc[self.current_index]
+        raise DataUnavailableError("Episode data not initialized.")
 
     def get_valid_actions(self) -> List[int]:
-        """Return valid actions given current position state."""
-        # ENHANCEMENT: Check if current symbol has a position for multi-position support
-        current_position = self.positions.get(self.current_symbol)
-        if current_position:
-            # Check minimum hold time for THIS position
-            hold_steps = current_position.get("hold_steps", 0)
-            if hold_steps < self.min_hold_steps:
-                return [self.ACTION_NO_ACTION]
-            return [
-                self.ACTION_NO_ACTION,
-                self.ACTION_SELL,
-            ]
+        """Return valid actions for the 7-action slot-based space."""
+        valid = [self.ACTION_NO_ACTION]
 
-        # Trade cooldown: prevent immediate re-entry after closing
-        if self.steps_since_last_close < self.trade_cooldown_steps:
-            return [self.ACTION_NO_ACTION]
+        # Check each slot for SELL validity
+        for slot in range(self.NUM_SLOTS):
+            symbol = self._get_slot_symbol(slot)
+            if symbol and symbol in self.positions:
+                position = self.positions[symbol]
+                hold_steps = position.get("hold_steps", 0)
+                if hold_steps >= self.min_hold_steps:
+                    valid.append(self.ACTION_SELL_0 + slot)  # SELL_0=4, SELL_1=5, SELL_2=6
 
-        row = self._current_row()
-        if self.entry_signal_threshold > 0:
-            trend_strength = abs(float(row["return_24h"]))
-            if trend_strength < self.entry_signal_threshold:
-                return [self.ACTION_NO_ACTION]
+        # Check each slot for BUY validity (only if under max positions and cooldown passed)
+        can_buy = (
+            len(self.positions) < self.settings.MAX_OPEN_POSITIONS
+            and self.steps_since_last_close >= self.trade_cooldown_steps
+        )
 
-        if self.entry_volatility_cap > 0:
-            volatility = abs(float(row["volatility_24h"]))
-            if volatility > self.entry_volatility_cap:
-                return [self.ACTION_NO_ACTION]
+        if can_buy:
+            for slot in range(self.NUM_SLOTS):
+                symbol = self._get_slot_symbol(slot)
+                if symbol is None:
+                    continue
+                if symbol in self.positions:
+                    continue  # Already have position in this slot
 
-        if self.entry_momentum_ratio_threshold > 0:
-            volatility = abs(float(row["volatility_24h"]))
-            momentum_ratio = float(row["return_6h"]) / (volatility + 1e-6)
-            if momentum_ratio < self.entry_momentum_ratio_threshold:
-                return [self.ACTION_NO_ACTION]
+                # Per-slot entry filters
+                row = self._get_slot_row(slot)
+                if row is None:
+                    continue
 
-        if self.min_volume_24h > 0:
-            volume_ma_24 = float(row["volume_ma_24"])
-            if volume_ma_24 < self.min_volume_24h:
-                return [self.ACTION_NO_ACTION]
+                if self.entry_signal_threshold > 0:
+                    trend_strength = abs(float(row["return_24h"]))
+                    if trend_strength < self.entry_signal_threshold:
+                        continue
 
-        if self.min_market_liquidity > 0:
-            current_price = float(row["close"])
-            volume_value = float(row["volume_ma_24"]) * current_price
-            if volume_value < self.min_market_liquidity:
-                return [self.ACTION_NO_ACTION]
+                if self.entry_volatility_cap > 0:
+                    volatility = abs(float(row["volatility_24h"]))
+                    if volatility > self.entry_volatility_cap:
+                        continue
 
-        return [
-            self.ACTION_NO_ACTION,
-            self.ACTION_BUY,
-        ]
+                if self.entry_momentum_ratio_threshold > 0:
+                    volatility = abs(float(row["volatility_24h"]))
+                    momentum_ratio = float(row["return_6h"]) / (volatility + 1e-6)
+                    if momentum_ratio < self.entry_momentum_ratio_threshold:
+                        continue
+
+                if self.min_volume_24h > 0:
+                    volume_ma_24 = float(row["volume_ma_24"])
+                    if volume_ma_24 < self.min_volume_24h:
+                        continue
+
+                if self.min_market_liquidity > 0:
+                    current_price = float(row["close"])
+                    volume_value = float(row["volume_ma_24"]) * current_price
+                    if volume_value < self.min_market_liquidity:
+                        continue
+
+                valid.append(self.ACTION_BUY_0 + slot)  # BUY_0=1, BUY_1=2, BUY_2=3
+
+        return valid
 
     def action_masks(self) -> np.ndarray:
         """Return boolean mask of valid actions for MaskablePPO."""
@@ -797,21 +746,33 @@ class CryptoTradingEnv(gym.Env):
         cost_pct += slippage_pct
         return cost_pct
 
-    def _execute_buy(self, size_pct: float, action: int) -> Dict:
-        row = self._current_row()
-        current_price = float(row["close"])
-        symbol = self.current_symbol
-        action_name = self.ACTION_NAMES.get(action, "BUY")
+    def _execute_buy_slot(self, slot: int, action: int) -> Dict:
+        """Execute a buy order for the symbol in the given slot."""
+        symbol = self._get_slot_symbol(slot)
+        row = self._get_slot_row(slot)
+        action_name = self.ACTION_NAMES.get(action, f"BUY_{slot}")
 
-        # ENHANCEMENT: Check if we already have a position in THIS symbol (multi-position support)
+        if symbol is None or row is None:
+            return {
+                "action": action, "action_name": action_name,
+                "executed": False, "reason": "Invalid slot",
+                "pnl": 0.0, "cost": 0.0,
+            }
+
+        current_price = float(row["close"])
+
         if symbol in self.positions:
             return {
-                "action": action,
-                "action_name": action_name,
-                "executed": False,
-                "reason": "Position already open in this symbol",
-                "pnl": 0.0,
-                "cost": 0.0,
+                "action": action, "action_name": action_name,
+                "executed": False, "reason": "Position already open in this symbol",
+                "pnl": 0.0, "cost": 0.0,
+            }
+
+        if len(self.positions) >= self.settings.MAX_OPEN_POSITIONS:
+            return {
+                "action": action, "action_name": action_name,
+                "executed": False, "reason": "Max positions reached",
+                "pnl": 0.0, "cost": 0.0,
             }
 
         if len(self.recent_trades) >= self.min_trades_for_kelly:
@@ -824,94 +785,77 @@ class CryptoTradingEnv(gym.Env):
             base_size = self.capital * self.default_position_size_pct
 
         base_size = max(base_size, self.min_position_value)
-        position_value = min(base_size * size_pct, self.capital * self.max_position_size_pct)
+        position_value = min(base_size, self.capital * self.max_position_size_pct)
         position_value = max(position_value, self.min_position_value)
 
         raw_slippage = self._estimate_slippage_pct(position_value, row)
         if raw_slippage > self.max_slippage_pct:
             return {
-                "action": action,
-                "action_name": action_name,
-                "executed": False,
-                "reason": "Slippage too high",
-                "pnl": 0.0,
-                "cost": 0.0,
+                "action": action, "action_name": action_name,
+                "executed": False, "reason": "Slippage too high",
+                "pnl": 0.0, "cost": 0.0,
             }
 
         cost_pct = self._get_trade_cost_pct(position_value, self._get_portfolio_value(), row)
         cost = position_value * (1 + cost_pct)
         if cost > self.capital:
             return {
-                "action": action,
-                "action_name": action_name,
-                "executed": False,
-                "reason": "Insufficient capital",
-                "pnl": 0.0,
-                "cost": 0.0,
-            }
-
-        if len(self.positions) >= self.settings.MAX_OPEN_POSITIONS:
-            return {
-                "action": action,
-                "action_name": action_name,
-                "executed": False,
-                "reason": "Max positions reached",
-                "pnl": 0.0,
-                "cost": 0.0,
+                "action": action, "action_name": action_name,
+                "executed": False, "reason": "Insufficient capital",
+                "pnl": 0.0, "cost": 0.0,
             }
 
         self.capital -= cost
         transaction_cost_paid = position_value * cost_pct
 
-        # ENHANCEMENT: Initialize position with hold_steps for multi-position tracking
         self.positions[symbol] = {
             "size": position_value,
             "entry_price": current_price,
             "timestamp": self.current_step,
-            "hold_steps": 0,  # Track hold duration per position
+            "hold_steps": 0,
+            "slot": slot,
         }
 
         return {
-            "action": action,
-            "action_name": action_name,
-            "executed": True,
-            "reason": "Buy executed",
-            "size": position_value,
-            "price": current_price,
-            "side": "buy",
-            "cost": transaction_cost_paid,
-            "pnl": 0.0,
+            "action": action, "action_name": action_name,
+            "executed": True, "reason": "Buy executed",
+            "size": position_value, "price": current_price,
+            "side": "buy", "cost": transaction_cost_paid, "pnl": 0.0,
+            "symbol": symbol,
         }
 
-    def _execute_sell(self, close_pct: float, action: int) -> Dict:
-        symbol = self.current_symbol
-        action_name = self.ACTION_NAMES.get(action, "SELL")
-        if symbol not in self.positions:
+    def _execute_sell_slot(self, slot: int) -> Dict:
+        """Execute a sell order for the position in the given slot."""
+        symbol = self._get_slot_symbol(slot)
+        action_name = f"SELL_{slot}"
+
+        if symbol is None or symbol not in self.positions:
             return {
-                "action": action,
-                "action_name": action_name,
-                "executed": False,
-                "reason": "No position to close",
-                "pnl": 0.0,
-                "cost": 0.0,
+                "action": self.ACTION_SELL_0 + slot, "action_name": action_name,
+                "executed": False, "reason": "No position to close",
+                "pnl": 0.0, "cost": 0.0,
             }
 
-        row = self._current_row()
+        row = self._get_slot_row(slot)
+        if row is None:
+            return {
+                "action": self.ACTION_SELL_0 + slot, "action_name": action_name,
+                "executed": False, "reason": "No data for slot",
+                "pnl": 0.0, "cost": 0.0,
+            }
+
         current_price = float(row["close"])
         position = self.positions[symbol]
-
-        sell_size = position["size"] * close_pct
+        sell_size = position["size"]
         price_change = (current_price - position["entry_price"]) / position["entry_price"]
         pnl_before_costs = sell_size * price_change
+
         raw_slippage = self._estimate_slippage_pct(sell_size, row)
         if raw_slippage > self.max_slippage_pct:
             return {
-                "action": action,
-                "action_name": action_name,
-                "executed": False,
-                "reason": "Slippage too high",
-                "pnl": 0.0,
-                "cost": 0.0,
+                "action": self.ACTION_SELL_0 + slot, "action_name": action_name,
+                "executed": False, "reason": "Slippage too high",
+                "pnl": 0.0, "cost": 0.0,
             }
 
         cost_pct = self._get_trade_cost_pct(sell_size, self._get_portfolio_value(), row)
@@ -919,15 +863,8 @@ class CryptoTradingEnv(gym.Env):
         pnl = pnl_before_costs - transaction_cost_paid
 
         self.capital += sell_size + pnl
-
-        if close_pct >= 0.99:
-            del self.positions[symbol]
-            self.steps_since_last_close = 0  # Start cooldown
-        else:
-            position["size"] *= (1 - close_pct)
-            if position["size"] < self.min_position_value:
-                del self.positions[symbol]
-                self.steps_since_last_close = 0  # Start cooldown
+        del self.positions[symbol]
+        self.steps_since_last_close = 0
 
         self.recent_trades.append(pnl)
         if len(self.recent_trades) > 20:
@@ -938,17 +875,12 @@ class CryptoTradingEnv(gym.Env):
         self._update_adaptive_kelly(pnl)
 
         return {
-            "action": action,
-            "action_name": action_name,
-            "executed": True,
-            "reason": "Sell executed",
-            "size": sell_size,
-            "price": current_price,
-            "side": "sell",
-            "pnl": pnl,
-            "cost": transaction_cost_paid,
-            "entry_price": position["entry_price"],
-            "price_change": price_change,
+            "action": self.ACTION_SELL_0 + slot, "action_name": action_name,
+            "executed": True, "reason": "Sell executed",
+            "size": sell_size, "price": current_price,
+            "side": "sell", "pnl": pnl, "cost": transaction_cost_paid,
+            "entry_price": position["entry_price"], "price_change": price_change,
+            "symbol": symbol,
         }
 
     def _update_adaptive_kelly(self, trade_pnl: float) -> None:
@@ -1024,21 +956,25 @@ class CryptoTradingEnv(gym.Env):
                 idle_penalty = min(idle_cap, idle_base + idle_step * self.flat_steps)
                 reward -= idle_penalty
 
-            if self.positions and self.current_symbol in self.positions:
-                position = self.positions[self.current_symbol]
-                # ENHANCEMENT: Use per-position hold_steps from trade_result or position dict
-                hold_steps = int(trade_result.get("hold_steps", position.get("hold_steps", 0)))
+            if self.positions:
+                # Apply hold penalty and carry bonus across ALL open positions
                 hold_step_penalty = float(weights.get("hold_step_penalty", 0.0))
                 hold_penalty_cap = float(weights.get("hold_penalty_cap", 0.0))
-                reward -= min(hold_penalty_cap, hold_step_penalty * hold_steps)
+                carry_bonus_scale = float(weights.get("carry_bonus_scale", 0.0))
+                carry_bonus_cap = float(weights.get("carry_bonus_cap", 0.0))
 
-                entry_price = float(position.get("entry_price", 0.0))
-                if entry_price > 0:
-                    unrealized_pct = (current_price - entry_price) / entry_price
-                    if unrealized_pct > 0:
-                        carry_bonus_scale = float(weights.get("carry_bonus_scale", 0.0))
-                        carry_bonus_cap = float(weights.get("carry_bonus_cap", 0.0))
-                        reward += min(carry_bonus_cap, unrealized_pct * carry_bonus_scale)
+                for symbol, position in self.positions.items():
+                    hold_steps = position.get("hold_steps", 0)
+                    reward -= min(hold_penalty_cap, hold_step_penalty * hold_steps) / max(len(self.positions), 1)
+
+                    slot = self.symbol_to_slot.get(symbol)
+                    if slot is not None:
+                        pos_price = self._get_slot_price(slot)
+                        entry_price = float(position.get("entry_price", 0.0))
+                        if entry_price > 0 and pos_price > 0:
+                            unrealized_pct = (pos_price - entry_price) / entry_price
+                            if unrealized_pct > 0:
+                                reward += min(carry_bonus_cap, unrealized_pct * carry_bonus_scale) / max(len(self.positions), 1)
 
         # 1c. Explicit fee penalty - make agent feel the cost of each trade
         if trade_result.get("executed"):
@@ -1107,146 +1043,80 @@ class CryptoTradingEnv(gym.Env):
         return False
 
     def _get_observation(self) -> np.ndarray:
-        row = self._current_row()
+        """
+        Build 67-dimensional observation: all 3 symbols visible simultaneously.
+        
+        Layout:
+          [0-14]  Slot 0 market features (15)
+          [15-29] Slot 1 market features (15)
+          [30-44] Slot 2 market features (15)
+          [45-54] Portfolio global features (10)
+          [55-58] Slot 0 position features (4)
+          [59-62] Slot 1 position features (4)
+          [63-66] Slot 2 position features (4)
+        """
+        obs = np.zeros(self.obs_dim, dtype=np.float32)
 
-        obs = np.zeros(57, dtype=np.float32)  # 42 market + 15 position features
+        # --- Per-slot market features (15 each × 3 slots = 45) ---
+        for slot in range(self.NUM_SLOTS):
+            base = slot * 15
+            row = self._get_slot_row(slot)
+            if row is None:
+                continue  # Leave zeros for missing slot data
 
-        # Get current price (used in multiple places)
-        current_price = float(row["close"])
+            close_price = float(row["close"])
+            ma_24 = float(row["ma_24"])
 
-        # Normalized price deviation from 24h MA (instead of raw price which clips)
-        obs[0] = (current_price - float(row["ma_24"])) / (float(row["ma_24"]) + 1e-9)
-        obs[1] = float(row["hl_spread_pct"])
-        obs[2] = np.log1p(float(row["volume"])) / 10.0
-        obs[3] = float(row["return_1h"])
-        obs[4] = float(row["return_6h"])
-        obs[5] = float(row["return_24h"])
-        obs[6] = float(row["volatility_24h"])
-        obs[7] = float(row["ma_6"] / row["close"]) - 1.0
-        obs[8] = float(row["ma_24"] / row["close"]) - 1.0
-        obs[9] = float(row["ma_48"] / row["close"]) - 1.0
-        obs[10] = float(row["volume_ma_24"]) / max(float(row["volume"]), 1.0)
-        obs[11] = float(row["trend_direction"])
+            obs[base + 0] = (close_price - ma_24) / (ma_24 + 1e-9)   # Price deviation from 24h MA
+            obs[base + 1] = float(row["hl_spread_pct"])                # High-low spread
+            obs[base + 2] = float(row["return_1h"])                    # 1h return
+            obs[base + 3] = float(row["return_6h"])                    # 6h return
+            obs[base + 4] = float(row["return_24h"])                   # 24h return
+            obs[base + 5] = float(row["volatility_24h"])               # 24h volatility
+            obs[base + 6] = float(row["ma_6"] / close_price) - 1.0    # MA6 deviation
+            obs[base + 7] = float(row["ma_24"] / close_price) - 1.0   # MA24 deviation
+            obs[base + 8] = float(row["trend_direction"])              # Trend direction
+            obs[base + 9] = float(row["rsi_14"])                       # RSI
+            obs[base + 10] = float(row["macd_hist"]) * 100.0           # MACD histogram
+            obs[base + 11] = float(row["atr_14"]) * 10.0              # ATR
+            obs[base + 12] = float(row["bb_upper"]) - 1.0             # BB upper deviation
+            obs[base + 13] = float(row["bb_lower"]) - 1.0             # BB lower deviation
+            # Momentum ratio
+            vol = abs(float(row["volatility_24h"]))
+            obs[base + 14] = float(row["return_6h"]) / (vol + 1e-6)
 
+        # --- Portfolio global features (10) at indices 45-54 ---
         portfolio_value = self._get_portfolio_value()
-        obs[12] = self.capital / self.initial_capital
-        obs[13] = len(self.positions) / self.settings.MAX_OPEN_POSITIONS
-        obs[14] = portfolio_value / self.initial_capital
-        obs[15] = (portfolio_value - self.initial_capital) / self.initial_capital
-        obs[16] = sum(self.recent_trades) / self.initial_capital if self.recent_trades else 0.0
-        obs[17] = self.positions.get(self.current_symbol, {}).get("size", 0.0) / self.initial_capital
-        obs[18] = self.win_count / max(self.trade_count, 1)
-        obs[19] = self.current_drawdown
+        obs[45] = self.capital / self.initial_capital                   # Cash ratio
+        obs[46] = len(self.positions) / self.settings.MAX_OPEN_POSITIONS  # Position fill ratio
+        obs[47] = portfolio_value / self.initial_capital                # Portfolio value ratio
+        obs[48] = (portfolio_value - self.initial_capital) / self.initial_capital  # Total return
+        obs[49] = sum(self.recent_trades) / self.initial_capital if self.recent_trades else 0.0  # Recent PnL
+        obs[50] = self.win_count / max(self.trade_count, 1)            # Win rate
+        obs[51] = self.current_drawdown                                 # Current drawdown
 
-        ts = pd.to_datetime(row["timestamp"])
-        obs[20] = np.sin(2 * np.pi * ts.hour / 24)
-        obs[21] = np.cos(2 * np.pi * ts.hour / 24)
-        obs[22] = np.sin(2 * np.pi * ts.weekday() / 7)
-        obs[23] = np.cos(2 * np.pi * ts.weekday() / 7)
-        volatility = abs(float(row["volatility_24h"]))
-        obs[24] = float(row["return_6h"]) / (volatility + 1e-6)
-        obs[25] = float(row["return_1h"]) / (volatility + 1e-6)
-        obs[26] = float(row["return_24h"]) / (volatility + 1e-6)
-        obs[27] = float(row["price_zscore_24h"])
+        # Time features from slot 0
+        row0 = self._get_slot_row(0)
+        if row0 is not None:
+            ts = pd.to_datetime(row0["timestamp"])
+            obs[52] = np.sin(2 * np.pi * ts.hour / 24)                # Hour sine
+            obs[53] = np.cos(2 * np.pi * ts.hour / 24)                # Hour cosine
+            obs[54] = np.sin(2 * np.pi * ts.weekday() / 7)            # Day sine
 
-        # Technical indicators (normalized)
-        obs[28] = float(row["rsi_14"])  # Already normalized to [0, 1]
-        obs[29] = float(row["macd_line"]) * 100.0  # Scale for visibility
-        obs[30] = float(row["macd_signal"]) * 100.0
-        obs[31] = float(row["macd_hist"]) * 100.0
-        obs[32] = float(row["atr_14"]) * 10.0  # Scale normalized ATR
-        obs[33] = float(row["bb_upper"]) - 1.0  # Deviation from middle
-        obs[34] = float(row["bb_middle"]) - 1.0
-        obs[35] = float(row["bb_lower"]) - 1.0
-
-        # Position-level features (critical for exit timing decisions)
-        if self.positions and self.current_symbol in self.positions:
-            position = self.positions[self.current_symbol]
-            entry_price = position["entry_price"]
-            hold_steps = position.get("hold_steps", 0)  # ENHANCEMENT: Per-position hold tracking
-            
-            # Feature 36: Unrealized P&L percentage (how much are we winning/losing?)
-            obs[36] = (current_price - entry_price) / entry_price if entry_price > 0 else 0.0
-            
-            # Feature 37: Hold duration normalized (how long have we been in this trade?)
-            obs[37] = hold_steps / self.max_hold_steps
-            
-            # Feature 38: Distance from entry relative to volatility (entry quality indicator)
-            volatility = abs(float(row["volatility_24h"]))
-            obs[38] = ((current_price - entry_price) / entry_price) / (volatility + 1e-6)
-        else:
-            # No position: set position features to neutral values
-            obs[36] = 0.0  # No unrealized P&L
-            obs[37] = 0.0  # No hold duration
-            obs[38] = 0.0  # No entry reference
-
-        # Run 48: Long-term trend context features (obs 39-41)
-        # These features help model understand market regime and avoid counter-trend trades
-        
-        # Feature 39: Distance to 200h MA (trend strength)
-        # Positive = price above long-term trend (bullish), Negative = price below (bearish)
-        ma_200 = float(row["ma_200"])
-        obs[39] = (current_price - ma_200) / (ma_200 + 1e-9)
-        
-        # Feature 40: 200h MA slope (trend direction)
-        # Positive = uptrend strengthening, Negative = downtrend or weakening
-        obs[40] = float(row["ma_200_slope"])
-        
-        # Feature 41: Volume surge detection
-        # >1.0 = volume spike (breakout/breakdown), <1.0 = low volume (consolidation)
-        volume_ma_200 = float(row["volume_ma_200"])
-        obs[41] = float(row["volume"]) / max(volume_ma_200, 1.0)
-
-        # Position slot features (obs 42-56): Make ALL positions visible
-        # This solves the information blindness from symbol rotation
-        # Each position slot gets 5 features: [symbol_id, size, entry_deviation, pnl_pct, hold_norm]
-        
-        # Get all positions sorted by symbol for consistency
-        position_list = sorted(self.positions.items(), key=lambda x: x[0])
-        
-        for slot in range(self.settings.MAX_OPEN_POSITIONS):  # 3 slots
-            base_idx = 42 + (slot * 5)
-            
-            if slot < len(position_list):
-                symbol, position = position_list[slot]
-                
-                # Feature 0: Symbol ID (encoded numeric identifier)
-                obs[base_idx] = self._encode_symbol(symbol)
-                
-                # Feature 1: Position size (normalized by capital)
-                obs[base_idx + 1] = position["size"] / self.initial_capital
-                
-                # Feature 2: Entry price deviation (relative to current price)
-                # Note: We use current symbol's row but position may be in different symbol
-                # This is intentional - shows price movement in general market
-                position_data = self.episode_data_pool.get(symbol)
-                if position_data is not None and len(position_data) > self.current_index:
-                    position_price = float(position_data.iloc[self.current_index]["close"])
-                    entry_price = position["entry_price"]
-                    obs[base_idx + 2] = (position_price - entry_price) / (entry_price + 1e-9)
-                else:
-                    obs[base_idx + 2] = 0.0
-                
-                # Feature 3: Unrealized P&L percentage
-                if position_data is not None and len(position_data) > self.current_index:
-                    position_price = float(position_data.iloc[self.current_index]["close"])
-                    entry_price = position["entry_price"]
-                    size = position["size"]
-                    unrealized_pnl = (position_price - entry_price) * size / entry_price
-                    obs[base_idx + 3] = unrealized_pnl / self.initial_capital
-                else:
-                    obs[base_idx + 3] = 0.0
-                
-                # Feature 4: Hold duration (normalized)
+        # --- Per-slot position features (4 each × 3 slots = 12) at indices 55-66 ---
+        for slot in range(self.NUM_SLOTS):
+            base = 55 + slot * 4
+            symbol = self._get_slot_symbol(slot)
+            if symbol and symbol in self.positions:
+                position = self.positions[symbol]
+                entry_price = position["entry_price"]
+                current_price = self._get_slot_price(slot)
                 hold_steps = position.get("hold_steps", 0)
-                obs[base_idx + 4] = hold_steps / self.max_hold_steps
-            else:
-                # Empty slot - all zeros
-                obs[base_idx] = 0.0      # No symbol
-                obs[base_idx + 1] = 0.0  # No size
-                obs[base_idx + 2] = 0.0  # No price deviation
-                obs[base_idx + 3] = 0.0  # No P&L
-                obs[base_idx + 4] = 0.0  # No hold time
+
+                obs[base + 0] = position["size"] / self.initial_capital                      # Position size
+                obs[base + 1] = (current_price - entry_price) / (entry_price + 1e-9)        # Unrealized PnL %
+                obs[base + 2] = hold_steps / self.max_hold_steps                              # Hold duration
+                obs[base + 3] = 1.0                                                           # Has position flag
 
         return obs
 
@@ -1260,35 +1130,40 @@ class CryptoTradingEnv(gym.Env):
             "total_trades": self.trade_count,
             "win_rate": self.win_count / max(self.trade_count, 1),
             "drawdown": self.current_drawdown,
-            "current_symbol": self.current_symbol,
+            "slot_symbols": self.slot_symbols,
+            "open_positions": list(self.positions.keys()),
         }
 
     def _get_portfolio_value(self) -> float:
+        """Calculate portfolio value using each position's own symbol price."""
         total = self.capital
-        row = self._current_row()
-        current_price = float(row["close"])
 
         for symbol, position in self.positions.items():
             entry_price = position["entry_price"]
             size = position["size"]
-            if entry_price > 0:
-                total += size * (current_price / entry_price)
+            slot = self.symbol_to_slot.get(symbol)
+            if slot is not None:
+                current_price = self._get_slot_price(slot)
+                if current_price > 0 and entry_price > 0:
+                    total += size * (current_price / entry_price)
+                else:
+                    total += size
             else:
                 total += size
 
         return total
 
     def render(self):
-        row = self._current_row()
+        row = self._current_row(0)
         portfolio_value = self._get_portfolio_value()
         returns = (portfolio_value - self.initial_capital) / self.initial_capital
 
         print(f"\nStep: {self.current_step}/{self.max_steps}")
-        print(f"Symbol: {self.current_symbol}")
-        print(f"Price: {row['close']:.4f}")
+        print(f"Slots: {self.slot_symbols}")
+        print(f"Price (slot 0): {row['close']:.4f}")
         print(f"Capital: ${self.capital:.2f}")
         print(f"Portfolio Value: ${portfolio_value:.2f} ({returns:+.2%})")
-        print(f"Open Positions: {len(self.positions)}/{self.settings.MAX_OPEN_POSITIONS}")
+        print(f"Open Positions: {len(self.positions)}/{self.settings.MAX_OPEN_POSITIONS} - {list(self.positions.keys())}")
         print(f"Drawdown: {self.current_drawdown:.2%}")
 
     def close(self):

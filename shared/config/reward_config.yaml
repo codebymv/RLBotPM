@@ -38,11 +38,11 @@ reward_weights:
   signal_alignment_scale: 0.0
   signal_misalignment_scale: 0.0
   signal_alignment_cap: 0.5
-  hold_step_penalty: 0.005
+  hold_step_penalty: 0.002
   hold_penalty_cap: 0.2
   max_positions_penalty: 1.0
   recent_trade_scale: 3.0
-  min_hold_steps: 5
+  min_hold_steps: 3
   trade_cooldown_steps: 3
   fee_penalty_scale: 3.0
   early_close_penalty: 0.0

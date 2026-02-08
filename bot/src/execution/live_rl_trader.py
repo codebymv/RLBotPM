@@ -48,9 +48,18 @@ class LiveRLPaperTrader:
     """
 
     ACTION_NO_ACTION = 0
-    ACTION_BUY = 1
-    ACTION_SELL = 2
-    ACTION_NAMES = {0: "HOLD", 1: "BUY", 2: "SELL"}
+    ACTION_BUY_0 = 1
+    ACTION_BUY_1 = 2
+    ACTION_BUY_2 = 3
+    ACTION_SELL_0 = 4
+    ACTION_SELL_1 = 5
+    ACTION_SELL_2 = 6
+    NUM_ACTIONS = 7
+    ACTION_NAMES = {
+        0: "NO_ACTION",
+        1: "BUY_0", 2: "BUY_1", 3: "BUY_2",
+        4: "SELL_0", 5: "SELL_1", 6: "SELL_2",
+    }
 
     def __init__(
         self,
@@ -317,21 +326,24 @@ class LiveRLPaperTrader:
     # ------------------------------------------------------------------
 
     def _get_action_mask(self, evaluating_held_symbol: bool = False) -> np.ndarray:
-        """Get valid action mask.
+        """Get valid action mask for 7-action space.
 
         Args:
             evaluating_held_symbol: True when we're evaluating the symbol we hold.
         """
-        mask = np.zeros(3, dtype=bool)
+        mask = np.zeros(self.NUM_ACTIONS, dtype=bool)
         mask[self.ACTION_NO_ACTION] = True
 
         if self.position:
-            # We only allow SELL when checking the held symbol
+            # Allow SELL on the slot that holds our position
             if evaluating_held_symbol and self.position_hold_steps >= self.min_hold_steps:
-                mask[self.ACTION_SELL] = True
+                held_slot = self.position.get("slot", 0)
+                mask[self.ACTION_SELL_0 + held_slot] = True
         else:
             if self.steps_since_last_close >= self.trade_cooldown_steps:
-                mask[self.ACTION_BUY] = True
+                # Allow BUY on any slot
+                for slot in range(3):
+                    mask[self.ACTION_BUY_0 + slot] = True
 
         return mask
 
@@ -555,7 +567,7 @@ class LiveRLPaperTrader:
             # Model decision
             action = eval_result["action"]
             trade_result = None
-            if action == self.ACTION_SELL:
+            if action in (self.ACTION_SELL_0, self.ACTION_SELL_1, self.ACTION_SELL_2):
                 trade_result = self._execute_sell(current_price, reason="MODEL_DECISION")
 
             self._update_tracking(current_price)
@@ -592,7 +604,7 @@ class LiveRLPaperTrader:
             last_timestamp = eval_result["timestamp"]
             scan_results.append(eval_result)
 
-            if eval_result["action"] == self.ACTION_BUY:
+            if eval_result["action"] in (self.ACTION_BUY_0, self.ACTION_BUY_1, self.ACTION_BUY_2):
                 # Execute buy on this symbol
                 trade_result = self._execute_buy(symbol, eval_result["price"])
                 if trade_result.get("executed"):

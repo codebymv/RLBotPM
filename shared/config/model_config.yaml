@@ -80,7 +80,7 @@ training:
   # Early stopping configuration
   early_stopping:
     eval_episodes: 50
-    patience: 3
+    patience: 8
     min_delta: 0.0
     metric: "sharpe_ratio"
 
