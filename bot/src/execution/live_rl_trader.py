@@ -33,6 +33,8 @@ from ..data.sources.coinbase import CoinbaseAdapter
 from ..environment.gym_env import CryptoTradingEnv, _interval_to_steps
 from ..core.logger import get_logger
 from ..core.config import get_settings
+from ..risk.position_sizer import PositionSizer
+from ..risk.adaptive_breaker import AdaptiveCircuitBreaker
 
 
 logger = get_logger(__name__)
@@ -96,11 +98,12 @@ class LiveRLPaperTrader:
         self.entry_momentum_ratio_threshold = float(
             self.reward_config.get("entry_momentum_ratio_threshold", 0.0)
         )
-        self.default_position_size_pct = float(
-            self.risk_config.get("position_sizing", {}).get("default_position_size_pct", 0.05)
-        )
-        # Override for paper trading: use 20% position sizing for meaningful results
-        self.default_position_size_pct = 0.20
+        position_sizing = self.risk_config.get("position_sizing", {})
+        self.default_position_size_pct = float(position_sizing.get("default_position_size_pct", 0.12))
+        self.min_trades_for_kelly = int(position_sizing.get("min_trades_for_kelly", 10))
+        self.base_kelly_fraction = float(position_sizing.get("kelly_fraction", 0.25))
+        self.position_sizer = PositionSizer(kelly_fraction=self.base_kelly_fraction)
+        self.adaptive_breaker = AdaptiveCircuitBreaker()
 
         # Transaction costs
         tx_costs = self.risk_config.get("transaction_costs", {})
@@ -110,6 +113,12 @@ class LiveRLPaperTrader:
         self.max_slippage_pct = float(
             self.risk_config.get("market_requirements", {}).get("max_slippage_pct", 0.02)
         )
+        self.slippage_model = str(tx_costs.get("slippage_model", "volume_based"))
+        self.large_order_penalty_threshold = float(tx_costs.get("large_order_penalty_threshold", 0.15))
+        self.large_order_penalty_pct = float(tx_costs.get("large_order_penalty_pct", 0.0005))
+        position_limits = self.risk_config.get("position_limits", {})
+        self.max_position_size_pct = float(position_limits.get("max_position_size_pct", 0.20))
+        self.min_position_size_pct = float(position_limits.get("min_position_size_pct", 0.01))
         market_req = self.risk_config.get("market_requirements", {})
         self.min_volume_24h = float(market_req.get("min_volume_24h", 0.0))
         self.min_market_liquidity = float(market_req.get("min_market_liquidity", 0.0))
@@ -394,7 +403,35 @@ class LiveRLPaperTrader:
     # Trade Execution
     # ------------------------------------------------------------------
 
-    def _execute_buy(self, symbol: str, current_price: float) -> Dict:
+    def _estimate_slippage_pct(self, order_value: float, row: Optional[pd.Series]) -> float:
+        if row is None:
+            return self.max_slippage_pct * 0.5
+        if self.slippage_model == "volume_based":
+            volume_ma_24 = float(row.get("volume_ma_24", 0.0))
+            current_price = float(row.get("close", 0.0))
+            volume_value = max(volume_ma_24 * current_price, 1e-9)
+            return (order_value / volume_value) * self.max_slippage_pct
+        return self.max_slippage_pct * 0.5
+
+    def _get_trade_cost_pct(self, order_value: float, portfolio_value: float, row: Optional[pd.Series]) -> float:
+        cost_pct = self.base_transaction_cost
+        if portfolio_value > 0:
+            order_pct = order_value / portfolio_value
+            if order_pct > self.large_order_penalty_threshold:
+                cost_pct += self.large_order_penalty_pct
+        slippage_pct = min(self.max_slippage_pct, self._estimate_slippage_pct(order_value, row))
+        cost_pct += slippage_pct
+        return cost_pct
+
+    def _update_adaptive_kelly(self, trade_pnl: float) -> None:
+        if self.initial_capital <= 0:
+            return
+        self.adaptive_breaker.update(trade_pnl / self.initial_capital)
+        adjusted_fraction = self.base_kelly_fraction * self.adaptive_breaker.current_multiplier
+        adjusted_fraction = min(max(adjusted_fraction, 0.15), 0.35)
+        self.position_sizer.set_kelly_fraction(adjusted_fraction)
+
+    def _execute_buy(self, symbol: str, current_price: float, row: Optional[pd.Series]) -> Dict:
         """Execute a paper buy order for a specific symbol."""
         if symbol in self.positions:
             return {"executed": False, "reason": "Position already open"}
@@ -402,8 +439,27 @@ class LiveRLPaperTrader:
             return {"executed": False, "reason": "Max positions reached"}
 
         available_capital = self.capital
-        position_value = available_capital * self.default_position_size_pct
-        cost_pct = self.base_transaction_cost + self.max_slippage_pct * 0.5
+        if available_capital <= 0:
+            return {"executed": False, "reason": "Insufficient capital"}
+
+        if len(self.recent_trades) >= self.min_trades_for_kelly:
+            sizing = self.position_sizer.calculate_from_recent_trades(
+                capital=available_capital,
+                recent_trades=self.recent_trades,
+            )
+            base_size = sizing.get("suggested_size", available_capital * self.default_position_size_pct)
+        else:
+            base_size = available_capital * self.default_position_size_pct
+
+        min_position_value = available_capital * self.min_position_size_pct
+        position_value = max(base_size, min_position_value)
+        position_value = min(position_value, available_capital * self.max_position_size_pct)
+
+        raw_slippage = self._estimate_slippage_pct(position_value, row)
+        if raw_slippage > self.max_slippage_pct:
+            return {"executed": False, "reason": "Slippage too high"}
+
+        cost_pct = self._get_trade_cost_pct(position_value, self._get_portfolio_value(), row)
         total_cost = position_value * (1 + cost_pct)
 
         if total_cost > available_capital:
@@ -419,6 +475,7 @@ class LiveRLPaperTrader:
             "entry_tick": self.tick_count,
             "hold_steps": 0,
             "last_price": current_price,
+            "last_row": row,
         }
 
         return {
@@ -432,7 +489,13 @@ class LiveRLPaperTrader:
             "timestamp": datetime.utcnow().isoformat(),
         }
 
-    def _execute_sell(self, symbol: str, current_price: float, reason: str = "MODEL_DECISION") -> Dict:
+    def _execute_sell(
+        self,
+        symbol: str,
+        current_price: float,
+        reason: str = "MODEL_DECISION",
+        row: Optional[pd.Series] = None,
+    ) -> Dict:
         """Execute a paper sell order for a specific symbol."""
         if symbol not in self.positions:
             return {"executed": False, "reason": "No position to close"}
@@ -442,7 +505,7 @@ class LiveRLPaperTrader:
         price_change = (current_price - position["entry_price"]) / position["entry_price"]
         pnl_before_costs = sell_size * price_change
 
-        cost_pct = self.base_transaction_cost + self.max_slippage_pct * 0.5
+        cost_pct = self._get_trade_cost_pct(sell_size, self._get_portfolio_value(), row)
         transaction_cost = sell_size * cost_pct
         pnl = pnl_before_costs - transaction_cost
 
@@ -454,6 +517,7 @@ class LiveRLPaperTrader:
         if pnl > 0:
             self.win_count += 1
         self.trade_count += 1
+        self._update_adaptive_kelly(pnl)
 
         trade_record = {
             "executed": True,
@@ -498,6 +562,7 @@ class LiveRLPaperTrader:
 
             if symbol in self.positions:
                 self.positions[symbol]["last_price"] = current_price
+                self.positions[symbol]["last_row"] = latest_row
 
             obs = self._build_observation(symbol, latest_row, current_price)
             action_mask = self._get_action_mask(symbol, latest_row)
@@ -517,6 +582,7 @@ class LiveRLPaperTrader:
                 "price": current_price,
                 "action": action,
                 "timestamp": str(latest_row["timestamp"]),
+                "row": latest_row,
             }
 
         except Exception as e:
@@ -551,7 +617,12 @@ class LiveRLPaperTrader:
             position["last_price"] = current_price
             auto_exit = self._check_auto_exit(position, current_price)
             if auto_exit:
-                trade_result = self._execute_sell(symbol, current_price, reason=auto_exit)
+                trade_result = self._execute_sell(
+                    symbol,
+                    current_price,
+                    reason=auto_exit,
+                    row=position.get("last_row"),
+                )
                 if trade_result.get("executed"):
                     forced_results.append(trade_result)
 
@@ -573,11 +644,20 @@ class LiveRLPaperTrader:
         action = eval_result["action"]
         trade_result = None
         if action == self.ACTION_BUY:
-            trade_result = self._execute_buy(current_symbol, eval_result["price"])
+            trade_result = self._execute_buy(
+                current_symbol,
+                eval_result["price"],
+                eval_result.get("row"),
+            )
         elif action == self.ACTION_SELL:
             position = self.positions.get(current_symbol)
             if position and position.get("hold_steps", 0) >= self.min_hold_steps:
-                trade_result = self._execute_sell(current_symbol, eval_result["price"], reason="MODEL_DECISION")
+                trade_result = self._execute_sell(
+                    current_symbol,
+                    eval_result["price"],
+                    reason="MODEL_DECISION",
+                    row=eval_result.get("row"),
+                )
 
         self._advance_time()
         self._update_tracking()
