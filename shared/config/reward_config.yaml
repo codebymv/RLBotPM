@@ -6,9 +6,9 @@ reward_weights:
   transaction_cost_penalty: 100.0
   blocked_action_penalty: 0.5
   invalid_action_penalty: 0.0
-  idle_base: 0.005
+  idle_base: 0.008
   idle_step: 0.0
-  idle_cap: 0.01
+  idle_cap: 0.015
   idle_trend_threshold: 0.0
   idle_trend_scale: 0.0
   idle_trend_cap: 0.0
@@ -59,9 +59,9 @@ reward_weights:
   unrealized_drawdown_cap: 0.5
   auto_exit_enabled: true
   max_hold_steps: 100
-  entry_signal_threshold: 0.003
+  entry_signal_threshold: 0.0025
   entry_volatility_cap: 0.0
-  entry_momentum_ratio_threshold: 0.4
+  entry_momentum_ratio_threshold: 0.35
   sharpe_bonus_scale: 2.0
   sharpe_bonus_cap: 2.0
   manual_exit_bonus: 0.25
