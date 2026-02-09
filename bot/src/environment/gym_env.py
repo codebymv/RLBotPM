@@ -356,6 +356,28 @@ class CryptoTradingEnv(gym.Env):
 
         if terminated or truncated:
             self.terminated = True
+
+            # --- Force-close all open positions at episode end ---
+            # This eliminates the unrealized PnL drag and ensures
+            # accurate episode return calculation.
+            end_of_episode_results = []
+            for symbol in list(self.positions.keys()):
+                close_result = self._execute_sell_symbol(symbol)
+                close_result["reason"] = "EPISODE_END_CLOSE"
+                end_of_episode_results.append(close_result)
+                if close_result.get("executed"):
+                    pnl = float(close_result.get("pnl", 0.0))
+                    pnl_pct = pnl / self.initial_capital
+                    # Small penalty for not manually closing before end
+                    end_close_penalty = float(self.reward_config.get("auto_exit_penalty", 0.5)) * 0.25
+                    reward -= end_close_penalty
+                    reward += pnl_pct  # PnL feedback
+
+            if end_of_episode_results:
+                info["episode_end_closes"] = end_of_episode_results
+
+            # Recalculate portfolio value after force-closing everything
+            current_portfolio_value = self._get_portfolio_value()
             episode_return = (current_portfolio_value - self.initial_capital) / self.initial_capital
             episode_pnl_scale = float(self.reward_config.get("episode_pnl_bonus_scale", 10.0))
             reward += episode_return * episode_pnl_scale
@@ -1094,7 +1116,11 @@ class CryptoTradingEnv(gym.Env):
         }
 
     def _get_portfolio_value(self) -> float:
-        """Calculate portfolio value using each position's own symbol price."""
+        """Calculate portfolio value using each position's own symbol price.
+        
+        Deducts estimated sell-side costs from open position values
+        to avoid overstating portfolio value.
+        """
         total = self.capital
 
         for symbol, position in self.positions.items():
@@ -1102,9 +1128,12 @@ class CryptoTradingEnv(gym.Env):
             size = position["size"]
             current_price = self._get_symbol_price(symbol)
             if current_price > 0 and entry_price > 0:
-                total += size * (current_price / entry_price)
+                mtm_value = size * (current_price / entry_price)
             else:
-                total += size
+                mtm_value = size
+            # Deduct estimated sell-side transaction cost
+            estimated_sell_cost = mtm_value * self.base_transaction_cost
+            total += mtm_value - estimated_sell_cost
 
         return total
 

@@ -77,8 +77,12 @@ class Evaluator:
         hold_streaks: List[int] = []
         total_trade_value = 0.0
         total_fees = 0.0
+        total_buy_fees = 0.0
+        total_sell_fees = 0.0
         profit_wins = 0.0
         profit_losses = 0.0
+        episode_end_closes_count = 0
+        unmatched_positions = 0
 
         if seeds is None:
             seeds = list(range(num_episodes))
@@ -129,9 +133,13 @@ class Evaluator:
 
                     size = float(trade_result.get("size", 0.0))
                     total_trade_value += size
-                    total_fees += float(trade_result.get("cost", 0.0))
+                    cost = float(trade_result.get("cost", 0.0))
+                    total_fees += cost
 
-                    if action_name.startswith("SELL") or action_name.startswith("CLOSE"):
+                    if action_name.startswith("BUY"):
+                        total_buy_fees += cost
+                    elif action_name.startswith(("SELL", "CLOSE")):
+                        total_sell_fees += cost
                         pnl = float(trade_result.get("pnl", 0.0))
                         trade_pnls.append(pnl)
                         if pnl > 0:
@@ -148,6 +156,26 @@ class Evaluator:
 
             if position_streak:
                 hold_streaks.append(position_streak)
+
+            # Track episode-end force-closes
+            ep_end_closes = info.get("episode_end_closes", [])
+            for ec in ep_end_closes:
+                if ec.get("executed"):
+                    episode_end_closes_count += 1
+                    pnl = float(ec.get("pnl", 0.0))
+                    cost = float(ec.get("cost", 0.0))
+                    trade_pnls.append(pnl)
+                    total_fees += cost
+                    total_sell_fees += cost
+                    total_trade_value += float(ec.get("size", 0.0))
+                    if pnl > 0:
+                        profit_wins += pnl
+                    elif pnl < 0:
+                        profit_losses += abs(pnl)
+                    auto_exits["EPISODE_END_CLOSE"] = auto_exits.get("EPISODE_END_CLOSE", 0) + 1
+
+            # Count unmatched positions (buys that were force-closed at end)
+            unmatched_positions += len(ep_end_closes)
 
             portfolio_value = float(info.get("portfolio_value", self.settings.INITIAL_CAPITAL))
             total_return = (portfolio_value - self.settings.INITIAL_CAPITAL) / self.settings.INITIAL_CAPITAL
@@ -203,6 +231,10 @@ class Evaluator:
             "action_counts": action_counts,
             "executed_counts": executed_counts,
             "block_reasons": block_reasons,
+            "total_buy_fees": float(total_buy_fees),
+            "total_sell_fees": float(total_sell_fees),
+            "episode_end_closes": episode_end_closes_count,
+            "unmatched_positions_per_ep": float(unmatched_positions / num_episodes) if num_episodes else 0.0,
         }
 
     def _compute_sharpe_ratio(self, returns: List[float]) -> float:

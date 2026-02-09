@@ -168,6 +168,11 @@ def _evaluate_agent(
         episode_drawdowns.append(max_drawdown)
         episode_win_rates.append(float(info.get("win_rate", 0.0)))
 
+        # Capture episode-end force-close PnLs
+        for ec in info.get("episode_end_closes", []):
+            if ec.get("executed"):
+                trade_pnls.append(float(ec.get("pnl", 0.0)))
+
     sharpe_ratio = _compute_sharpe_ratio(episode_returns)
 
     return {
