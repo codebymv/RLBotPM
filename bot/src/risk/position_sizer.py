@@ -156,11 +156,11 @@ class PositionSizer:
             # Not enough history, use conservative default
             logger.debug("Insufficient trade history, using conservative sizing")
             return {
-                'suggested_size': capital * 0.12,  # 12% default (increased for profitability)
+                'suggested_size': capital * 0.15,  # 15% default (increased for profitability)
                 'kelly_percentage': 0.0,
                 'fractional_kelly': 0.0,
                 'max_size': capital * self.settings.MAX_POSITION_SIZE_PCT,
-                'size_pct_of_capital': 0.12
+                'size_pct_of_capital': 0.15
             }
         
         # Calculate win probability and average win/loss

@@ -5,8 +5,9 @@ ppo:
   # Policy type: MlpPolicy or MlpLstmPolicy
   policy_type: "MlpPolicy"
   # Learning rate - how fast the agent learns
-  # 3e-4 is the standard value that works well across many problems
-  learning_rate: 0.0003
+  # 1e-5 for fine-tuning (preserves learned behavior)
+  # 3e-4 is standard for training from scratch
+  learning_rate: 0.00001
   
   # Number of steps to collect per environment before updating
   # Higher = more stable but slower learning

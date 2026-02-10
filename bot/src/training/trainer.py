@@ -61,6 +61,9 @@ class Trainer:
         if overrides:
             self._apply_overrides(overrides)
         
+        # Checkpoint path for resuming training
+        self._checkpoint_path = None
+        
         # Initialize database
         init_db()
         
@@ -147,7 +150,8 @@ class Trainer:
                 max_grad_norm=ppo_config.get("max_grad_norm", 0.5),
                 use_gpu=training_config.get("use_gpu", True),
                 tensorboard_log=tensorboard_log,
-                verbose=training_config.get("verbose", 1)
+                verbose=training_config.get("verbose", 1),
+                checkpoint_path=self._checkpoint_path
             )
             
             # Create callbacks
@@ -192,9 +196,8 @@ class Trainer:
         Args:
             checkpoint_path: Path to checkpoint file
         """
-        logger.info(f"Loading checkpoint: {checkpoint_path}")
-        # TODO: Implement checkpoint loading
-        raise NotImplementedError("Checkpoint loading not yet implemented")
+        logger.info(f"Setting checkpoint for resume: {checkpoint_path}")
+        self._checkpoint_path = checkpoint_path
     
     def _create_callbacks(
         self,

@@ -70,7 +70,8 @@ class PPOAgent:
         max_grad_norm: float = 0.5,
         use_gpu: bool = True,
         tensorboard_log: Optional[str] = "./logs/tensorboard",
-        verbose: int = 1
+        verbose: int = 1,
+        checkpoint_path: Optional[str] = None
     ):
         """
         Initialize PPO agent
@@ -111,7 +112,58 @@ class PPOAgent:
             self.device = "cpu"
             logger.info("Using CPU for training")
         
-        if self.is_recurrent:
+        # Load from checkpoint if provided, otherwise create new model
+        if checkpoint_path:
+            logger.info(f"Fine-tuning from checkpoint: {checkpoint_path}")
+            # Create fresh model first (with fresh optimizer state)
+            if self.is_recurrent:
+                self.model = RecurrentPPO(
+                    policy=self.policy_type,
+                    env=self.env,
+                    learning_rate=learning_rate,
+                    n_steps=n_steps,
+                    batch_size=batch_size,
+                    n_epochs=n_epochs,
+                    gamma=gamma,
+                    gae_lambda=gae_lambda,
+                    clip_range=clip_range,
+                    ent_coef=ent_coef,
+                    vf_coef=vf_coef,
+                    max_grad_norm=max_grad_norm,
+                    verbose=verbose,
+                    device=self.device,
+                    tensorboard_log=tensorboard_log,
+                    policy_kwargs=self.policy_kwargs,
+                )
+                # Load old model and copy policy weights only
+                old_model = RecurrentPPO.load(checkpoint_path, device=self.device)
+                self.model.policy.load_state_dict(old_model.policy.state_dict())
+                del old_model
+            else:
+                self.model = MaskablePPO(
+                    policy=self.policy_type,
+                    env=self.env,
+                    learning_rate=learning_rate,
+                    n_steps=n_steps,
+                    batch_size=batch_size,
+                    n_epochs=n_epochs,
+                    gamma=gamma,
+                    gae_lambda=gae_lambda,
+                    clip_range=clip_range,
+                    ent_coef=ent_coef,
+                    vf_coef=vf_coef,
+                    max_grad_norm=max_grad_norm,
+                    verbose=verbose,
+                    device=self.device,
+                    tensorboard_log=tensorboard_log,
+                    policy_kwargs=self.policy_kwargs,
+                )
+                # Load old model and copy policy weights only (avoids corrupted optimizer state)
+                old_model = MaskablePPO.load(checkpoint_path, device=self.device)
+                self.model.policy.load_state_dict(old_model.policy.state_dict())
+                del old_model
+            logger.info(f"Policy weights loaded from checkpoint, fresh optimizer initialized")
+        elif self.is_recurrent:
             self.model = RecurrentPPO(
                 policy=self.policy_type,
                 env=self.env,

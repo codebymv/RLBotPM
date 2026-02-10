@@ -17,7 +17,7 @@ loss_limits:
 # Position limits
 position_limits:
   # Maximum size of any single position
-  max_position_size_pct: 0.20  # 20% of capital
+  max_position_size_pct: 0.15  # 15% of capital
   
   # Maximum number of concurrent positions
   max_open_positions: 3
