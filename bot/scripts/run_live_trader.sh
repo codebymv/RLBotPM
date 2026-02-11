@@ -4,19 +4,20 @@
 # Runs indefinitely with auto-restart on crash
 #
 # Usage:
-#   ./run_live_trader.sh              # Run in foreground
-#   nohup ./run_live_trader.sh &      # Run in background (survives terminal close)
-#   ./run_live_trader.sh 2>&1 | tee live_trading.log  # With logging
+#   ./bot/scripts/run_live_trader.sh              # Run in foreground
+#   nohup ./bot/scripts/run_live_trader.sh &      # Run in background
+#   ./bot/scripts/run_live_trader.sh 2>&1 | tee live_trading.log  # With logging
 #
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR/bot"
+BOT_DIR="$SCRIPT_DIR/.."
+cd "$BOT_DIR"
 
-# Load environment
-if [ -f "$SCRIPT_DIR/.env" ]; then
-    export $(grep -v '^#' "$SCRIPT_DIR/.env" | xargs)
+# Load environment from project root
+if [ -f "$BOT_DIR/../.env" ]; then
+    export $(grep -v '^#' "$BOT_DIR/../.env" | xargs)
 fi
 
 # Configuration
