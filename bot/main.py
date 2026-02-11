@@ -659,6 +659,369 @@ def info():
     console.print(f"  Max Open Positions: {settings.MAX_OPEN_POSITIONS}")
 
 
+# =============================================================================
+# Kalshi Prediction Markets Commands
+# =============================================================================
+
+@cli.group()
+def kalshi():
+    """Kalshi prediction markets trading commands"""
+    pass
+
+
+@kalshi.command()
+@click.option('--live', is_flag=True, help='Check production API instead of demo')
+def status(live):
+    """Check Kalshi API connection and account status"""
+    mode = "PRODUCTION" if live else "DEMO"
+    console.print(f"\n[bold cyan]Checking Kalshi API Status ({mode})...[/bold cyan]")
+    
+    from src.data.sources.kalshi import KalshiAdapter
+    from src.execution.kalshi_client import KalshiExecutionClient
+    
+    # Check if credentials are set
+    api_key = os.getenv("KALSHI_API_KEY")
+    api_secret = os.getenv("KALSHI_API_SECRET")
+    
+    if not api_key or not api_secret:
+        console.print("\n[yellow]Warning:[/yellow] KALSHI_API_KEY and KALSHI_API_SECRET not set")
+        console.print("  Set these environment variables to enable trading")
+        return
+    
+    use_demo = not live
+    
+    # Test adapter (read-only operations)
+    try:
+        adapter = KalshiAdapter(demo=use_demo)
+        health = adapter.healthcheck()
+        
+        console.print(f"\n[bold]Adapter Health:[/bold]")
+        console.print(f"  Status: {'[green]OK[/green]' if health['ok'] else '[red]ERROR[/red]'}")
+        console.print(f"  Demo Mode: {health.get('demo', True)}")
+        console.print(f"  Markets Available: {health.get('markets', 0)}")
+        console.print(f"  RSA Key Loaded: {health.get('authenticated', False)}")
+        
+    except Exception as e:
+        console.print(f"\n[red]Adapter Error:[/red] {e}")
+    
+    # Test execution client
+    try:
+        client = KalshiExecutionClient(demo=use_demo)
+        health = client.healthcheck()
+        
+        console.print(f"\n[bold]Execution Client:[/bold]")
+        console.print(f"  Status: {'[green]OK[/green]' if health['ok'] else '[red]ERROR[/red]'}")
+        console.print(f"  RSA Key Loaded: {health.get('authenticated', False)}")
+        console.print(f"  Available Balance: ${health.get('balance_available', 0):.2f}")
+        console.print(f"  Portfolio Value: ${health.get('balance_total', 0):.2f}")
+        if health.get('error'):
+            console.print(f"  [yellow]Note:[/yellow] {health.get('error', '')[:100]}")
+        
+    except Exception as e:
+        console.print(f"\n[red]Client Error:[/red] {e}")
+
+
+@kalshi.command()
+@click.option('--asset', default='BTC', help='Crypto asset to filter (BTC, ETH)')
+@click.option('--limit', default=20, help='Max markets to show')
+@click.option('--live/--demo', default=True, help='Use production or demo API')
+def markets(asset, limit, live):
+    """List available Kalshi crypto markets"""
+    console.print(f"\n[bold cyan]Fetching Kalshi {asset} Markets...[/bold cyan]")
+    
+    from src.data.sources.kalshi import KalshiAdapter
+    
+    try:
+        adapter = KalshiAdapter(demo=not live)
+        crypto_markets = adapter.get_crypto_markets(asset=asset)
+        
+        if not crypto_markets:
+            console.print(f"\n[yellow]No {asset} markets found[/yellow]")
+            return
+        
+        console.print(f"\n[bold]Found {len(crypto_markets)} {asset} Markets:[/bold]\n")
+        
+        for i, market in enumerate(crypto_markets[:limit]):
+            yes_pct = market.yes_price
+            spread = market.yes_ask - market.yes_bid
+            
+            console.print(f"[bold]{market.ticker}[/bold]")
+            console.print(f"  {market.title}")
+            console.print(f"  YES: {yes_pct:.0f}c | Spread: {spread:.1f}c | Volume: {market.volume}")
+            console.print(f"  Status: {market.status} | Expires: {market.expiration_time}")
+            console.print()
+            
+    except Exception as e:
+        console.print(f"\n[red]Error:[/red] {e}")
+
+
+@kalshi.command()
+def positions():
+    """Show current Kalshi positions"""
+    console.print("\n[bold cyan]Fetching Kalshi Positions...[/bold cyan]")
+    
+    from src.execution.kalshi_client import KalshiExecutionClient
+    
+    try:
+        client = KalshiExecutionClient(demo=True)
+        positions = client.get_positions()
+        
+        if not positions:
+            console.print("\n[dim]No open positions[/dim]")
+            return
+        
+        console.print(f"\n[bold]Open Positions ({len(positions)}):[/bold]\n")
+        
+        total_exposure = 0
+        total_pnl = 0
+        
+        for pos in positions:
+            side = "YES" if pos.position > 0 else "NO"
+            contracts = abs(pos.position)
+            
+            console.print(f"[bold]{pos.ticker}[/bold]")
+            console.print(f"  {contracts} {side} contracts")
+            console.print(f"  Exposure: ${pos.market_exposure:.2f}")
+            console.print(f"  Realized P&L: ${pos.realized_pnl:.2f}")
+            console.print()
+            
+            total_exposure += pos.market_exposure
+            total_pnl += pos.realized_pnl
+        
+        console.print(f"[bold]Totals:[/bold]")
+        console.print(f"  Total Exposure: ${total_exposure:.2f}")
+        console.print(f"  Total Realized P&L: ${total_pnl:.2f}")
+        
+    except Exception as e:
+        console.print(f"\n[red]Error:[/red] {e}")
+
+
+@kalshi.command()
+@click.argument('ticker')
+@click.option('--side', type=click.Choice(['yes', 'no']), required=True, help='YES or NO')
+@click.option('--contracts', default=10, help='Number of contracts')
+@click.option('--price', default=None, type=int, help='Limit price in cents (1-99). Omit for market order')
+@click.option('--demo/--live', default=True, help='Use demo or live API')
+def buy(ticker, side, contracts, price, demo):
+    """Place a buy order on Kalshi"""
+    mode = "DEMO" if demo else "LIVE"
+    console.print(f"\n[bold cyan]Placing {mode} Order...[/bold cyan]")
+    
+    if not demo:
+        if not click.confirm("\n[bold red]WARNING: This is a LIVE order with real money. Continue?[/bold red]"):
+            console.print("Order cancelled")
+            return
+    
+    from src.execution.kalshi_client import KalshiExecutionClient, OrderSide
+    
+    try:
+        client = KalshiExecutionClient(demo=demo)
+        order_side = OrderSide.YES if side == 'yes' else OrderSide.NO
+        
+        if price:
+            order = client.place_limit_order(
+                ticker=ticker.upper(),
+                side=order_side,
+                price=price,
+                contracts=contracts,
+            )
+            order_type = f"limit @ {price}c"
+        else:
+            order = client.place_market_order(
+                ticker=ticker.upper(),
+                side=order_side,
+                contracts=contracts,
+            )
+            order_type = "market"
+        
+        if order:
+            console.print(f"\n[bold green]Order Placed![/bold green]")
+            console.print(f"  Order ID: {order.order_id}")
+            console.print(f"  Market: {order.ticker}")
+            console.print(f"  Side: {order.side.value.upper()}")
+            console.print(f"  Type: {order_type}")
+            console.print(f"  Contracts: {order.contracts}")
+            console.print(f"  Status: {order.status.value}")
+        else:
+            console.print("\n[red]Order failed[/red]")
+            
+    except Exception as e:
+        console.print(f"\n[red]Error:[/red] {e}")
+
+
+@kalshi.command()
+@click.argument('ticker')
+@click.option('--contracts', default=None, type=int, help='Contracts to sell (all if omitted)')
+@click.option('--demo/--live', default=True, help='Use demo or live API')
+def sell(ticker, contracts, demo):
+    """Sell (close) a Kalshi position"""
+    mode = "DEMO" if demo else "LIVE"
+    console.print(f"\n[bold cyan]Closing {mode} Position...[/bold cyan]")
+    
+    if not demo:
+        if not click.confirm("\n[bold red]WARNING: This is a LIVE trade. Continue?[/bold red]"):
+            console.print("Cancelled")
+            return
+    
+    from src.execution.kalshi_client import KalshiExecutionClient
+    
+    try:
+        client = KalshiExecutionClient(demo=demo)
+        order = client.sell_position(ticker=ticker.upper(), contracts=contracts, use_market=True)
+        
+        if order:
+            console.print(f"\n[bold green]Position Closed![/bold green]")
+            console.print(f"  Order ID: {order.order_id}")
+            console.print(f"  Contracts: {order.contracts}")
+            console.print(f"  Fill Price: {order.price}c")
+        else:
+            console.print("\n[yellow]No position to close[/yellow]")
+            
+    except Exception as e:
+        console.print(f"\n[red]Error:[/red] {e}")
+
+
+@kalshi.command()
+@click.option('--min-edge', default=0.10, help='Minimum edge to show (0.10 = 10%)')
+@click.option('--limit', default=20, help='Max opportunities to show')
+@click.option('--category', default=None, help='Filter by category (elections, economics, fed)')
+def scan(min_edge, limit, category):
+    """Scan all markets for trading opportunities"""
+    console.print(f"\n[bold cyan]Scanning Kalshi Markets for Opportunities...[/bold cyan]")
+    console.print(f"[dim]Min edge: {min_edge:.0%} | Limit: {limit}[/dim]\n")
+    
+    from src.data.sources.kalshi import KalshiAdapter
+    from src.strategies.kalshi_signals import KalshiSignalAggregator, MarketCategory
+    
+    try:
+        adapter = KalshiAdapter(demo=False)  # Use production for real data
+        aggregator = KalshiSignalAggregator()
+        
+        # Fetch all open markets
+        console.print("[dim]Fetching markets...[/dim]")
+        all_markets = adapter.get_markets(status="open", limit=500)
+        
+        if not all_markets:
+            console.print("[yellow]No markets found[/yellow]")
+            return
+        
+        console.print(f"[dim]Analyzing {len(all_markets)} markets...[/dim]\n")
+        
+        # Convert to dict format for analyzer
+        market_dicts = [
+            {
+                "ticker": m.ticker,
+                "title": m.title,
+                "category": m.category,
+                "yes_price": m.yes_price,
+                "volume": m.volume,
+            }
+            for m in all_markets
+        ]
+        
+        # Filter by category if specified
+        if category:
+            cat_enum = MarketCategory(category.lower())
+            market_dicts = [
+                m for m in market_dicts
+                if aggregator.categorize_market(m) == cat_enum
+            ]
+            console.print(f"[dim]Filtered to {len(market_dicts)} {category} markets[/dim]\n")
+        
+        # Find opportunities
+        opportunities = aggregator.find_opportunities(market_dicts, min_edge=min_edge)
+        
+        if not opportunities:
+            console.print("[yellow]No opportunities found with sufficient edge[/yellow]")
+            console.print(f"[dim]Try lowering --min-edge below {min_edge:.0%}[/dim]")
+            return
+        
+        console.print(f"[bold green]Found {len(opportunities)} opportunities:[/bold green]\n")
+        
+        for i, opp in enumerate(opportunities[:limit]):
+            edge_color = "green" if opp.edge > 0 else "red"
+            action_color = "green" if opp.recommendation == "BUY_YES" else "yellow" if opp.recommendation == "BUY_NO" else "dim"
+            
+            console.print(f"[bold]{i+1}. {opp.ticker}[/bold]")
+            console.print(f"   {opp.title[:80]}...")
+            console.print(f"   Market: {opp.market_price:.0%} | Model: {opp.our_probability:.0%} | [{edge_color}]Edge: {opp.edge:+.1%}[/{edge_color}]")
+            console.print(f"   [{action_color}]{opp.recommendation}[/{action_color}] | Confidence: {opp.confidence:.0%} | Size: {opp.position_size_pct:.1%}")
+            if opp.signals:
+                signals_str = ", ".join(f"{s.source}:{s.probability:.0%}" for s in opp.signals[:3])
+                console.print(f"   [dim]Signals: {signals_str}[/dim]")
+            console.print()
+        
+    except Exception as e:
+        console.print(f"\n[red]Error:[/red] {e}")
+        import traceback
+        traceback.print_exc()
+
+
+@kalshi.command()
+@click.argument('ticker')
+def analyze(ticker):
+    """Deep analysis of a specific market"""
+    console.print(f"\n[bold cyan]Analyzing {ticker}...[/bold cyan]\n")
+    
+    from src.data.sources.kalshi import KalshiAdapter
+    from src.strategies.kalshi_signals import KalshiSignalAggregator
+    
+    try:
+        adapter = KalshiAdapter(demo=False)
+        aggregator = KalshiSignalAggregator()
+        
+        # Get market details
+        market = adapter.get_market(ticker.upper())
+        
+        console.print(f"[bold]{market.title}[/bold]")
+        console.print(f"Ticker: {market.ticker}")
+        console.print(f"Status: {market.status}")
+        console.print(f"Expires: {market.expiration_time}")
+        console.print(f"Volume: {market.volume} | Open Interest: {market.open_interest}")
+        console.print()
+        
+        console.print("[bold]Current Prices:[/bold]")
+        console.print(f"  YES: {market.yes_price:.0f}c (bid: {market.yes_bid:.0f}, ask: {market.yes_ask:.0f})")
+        console.print(f"  NO:  {market.no_price:.0f}c")
+        console.print(f"  Spread: {market.yes_ask - market.yes_bid:.1f}c")
+        console.print()
+        
+        # Run analysis
+        market_dict = {
+            "ticker": market.ticker,
+            "title": market.title,
+            "category": market.category,
+            "yes_price": market.yes_price,
+            "volume": market.volume,
+        }
+        
+        analysis = aggregator.analyze_market(market_dict)
+        
+        console.print("[bold]Model Analysis:[/bold]")
+        console.print(f"  Category: {aggregator.categorize_market(market_dict).value}")
+        console.print(f"  Market Probability: {analysis.market_price:.1%}")
+        console.print(f"  Model Probability:  {analysis.our_probability:.1%}")
+        console.print(f"  Edge: {analysis.edge:+.1%}")
+        console.print(f"  Confidence: {analysis.confidence:.1%}")
+        console.print()
+        
+        console.print("[bold]Signals:[/bold]")
+        if analysis.signals:
+            for signal in analysis.signals:
+                console.print(f"  {signal.source}: {signal.probability:.1%} (conf: {signal.confidence:.1%})")
+        else:
+            console.print("  [dim]No external signals available[/dim]")
+        console.print()
+        
+        rec_color = "green" if "YES" in analysis.recommendation else "yellow" if "NO" in analysis.recommendation else "dim"
+        console.print(f"[bold]Recommendation:[/bold] [{rec_color}]{analysis.recommendation}[/{rec_color}]")
+        console.print(f"[bold]Position Size:[/bold] {analysis.position_size_pct:.1%} of portfolio")
+        console.print(f"\n[dim]{analysis.reasoning}[/dim]")
+        
+    except Exception as e:
+        console.print(f"\n[red]Error:[/red] {e}")
+
+
 @cli.command()
 def test_env():
     """Test the Gym environment setup"""

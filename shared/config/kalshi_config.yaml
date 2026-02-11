@@ -1,0 +1,102 @@
+# Kalshi Prediction Markets Configuration
+# =========================================
+
+api:
+  # Use demo endpoint for paper trading, production for live
+  demo_mode: true  # Set to false for live trading
+  
+  # Endpoints
+  production_url: "https://trading-api.kalshi.com/trade-api/v2"
+  demo_url: "https://demo-api.kalshi.co/trade-api/v2"
+  
+  # Request settings
+  timeout_seconds: 15
+  max_retries: 3
+  retry_delay_seconds: 1
+
+markets:
+  # Focus markets for initial strategy
+  primary_focus:
+    - series: "BTCUSD"       # Bitcoin price ranges
+      priority: 1
+      reason: "Leverage existing crypto analysis"
+    - series: "ETHUSD"       # Ethereum price ranges  
+      priority: 2
+      reason: "Secondary crypto exposure"
+  
+  secondary_focus:
+    - category: "Fed"        # FOMC rate decisions
+      priority: 3
+    - category: "Economics"  # CPI, jobs data
+      priority: 4
+  
+  # Market filters
+  filters:
+    min_volume: 100          # Skip illiquid markets
+    min_open_interest: 50    # At least some positions exist
+    max_spread_cents: 10     # Skip wide markets (>10 cent spread)
+    min_time_to_expiry_hours: 2  # Avoid last-minute volatility
+    max_time_to_expiry_days: 30  # Don't bet too far out
+
+trading:
+  # Position sizing (aligned with risk_config.yaml)
+  position_sizing:
+    method: "fixed_percent"  # fixed_percent, half_kelly, quarter_kelly
+    fixed_percent: 0.01      # 1% of balance per trade
+    max_position_percent: 0.05  # Max 5% in single market
+    max_total_exposure: 0.25    # Max 25% total exposure
+  
+  # Edge requirements
+  min_edge_threshold: 0.10   # Only trade if model prob differs by >10%
+  confidence_threshold: 0.70 # Model confidence required
+  
+  # Order types
+  default_order_type: "limit"  # limit or market
+  limit_offset_cents: 1        # Place limit 1 cent better than market
+  order_expiry_seconds: 300    # Cancel unfilled orders after 5 min
+  
+  # Risk limits
+  max_daily_trades: 20         # Prevent overtrading
+  max_daily_loss_percent: 0.05 # Stop trading if down 5% in a day
+  max_concurrent_positions: 10 # Diversify
+
+strategy:
+  # Signal sources for crypto markets
+  crypto_signals:
+    # Use existing PPO model prediction
+    use_ppo_signal: true
+    ppo_model_path: "models/run_118/best_model.zip"
+    
+    # Additional signals
+    momentum_lookback_hours: 24
+    volume_spike_threshold: 2.0  # 2x average volume
+    
+  # How to map crypto predictions to Kalshi bets
+  signal_mapping:
+    # If PPO says BUY (bullish), bet YES on "BTC above X"
+    # If PPO says SELL (bearish), bet YES on "BTC below X"
+    bullish_action: "yes_on_higher_ranges"
+    bearish_action: "yes_on_lower_ranges"
+    neutral_threshold: 0.1  # Hold if signal strength < 10%
+
+  # Time-based adjustments
+  time_decay:
+    enable: true
+    # Reduce position size as expiry approaches
+    decay_start_hours: 6
+    min_size_multiplier: 0.5
+
+logging:
+  # Trade logging
+  log_all_trades: true
+  log_signals: true
+  log_orderbook: false  # Verbose, enable for debugging
+  
+  # Performance tracking
+  track_pnl: true
+  track_win_rate: true
+  snapshot_interval_minutes: 60
+
+# Environment variables required:
+# - KALSHI_API_KEY: Your Kalshi email/login
+# - KALSHI_API_SECRET: Your Kalshi password

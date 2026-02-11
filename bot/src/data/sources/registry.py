@@ -9,11 +9,13 @@ from typing import Dict, Type
 from .base import ExchangeAdapter, DataUnavailableError
 from .coinbase import CoinbaseAdapter
 from .kraken import KrakenAdapter
+from .kalshi import KalshiAdapter
 
 
 _REGISTRY: Dict[str, Type[ExchangeAdapter]] = {
     "coinbase": CoinbaseAdapter,
     "kraken": KrakenAdapter,
+    "kalshi": KalshiAdapter,
 }
 
 
