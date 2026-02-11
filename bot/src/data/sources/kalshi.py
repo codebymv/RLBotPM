@@ -17,12 +17,16 @@ import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, TYPE_CHECKING
 
 import requests
+import pandas as pd
 
 from .base import ExchangeAdapter, DataUnavailableError, OHLCV
 from ...core.logger import get_logger
+
+if TYPE_CHECKING:
+    from sqlalchemy.orm import Session
 
 logger = get_logger(__name__)
 
@@ -430,3 +434,174 @@ class KalshiAdapter(ExchangeAdapter):
                 "ok": False,
                 "error": str(e),
             }
+
+    # --- Historical data pipeline for RL training ---
+
+    def fetch_and_normalize_history(
+        self,
+        ticker: str,
+        limit: int = 500,
+        min_ts: Optional[int] = None,
+        max_ts: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Fetch price history for a market and normalize to a consistent schema.
+
+        Returns list of dicts with: ticker, timestamp, yes_price (0-1), volume, open_interest.
+        Does not include outcome or close_time; those are set when backfilling from market metadata.
+        """
+        candles = self.get_market_history(
+            ticker, limit=limit, min_ts=min_ts, max_ts=max_ts
+        )
+        return [
+            {
+                "ticker": ticker,
+                "timestamp": c.timestamp,
+                "yes_price": c.yes_price,
+                "volume": c.volume,
+                "open_interest": c.open_interest,
+            }
+            for c in candles
+        ]
+
+
+def backfill_kalshi_market_to_db(
+    adapter: KalshiAdapter,
+    session: "Session",
+    ticker: str,
+    limit: int = 500,
+    close_time: Optional[datetime] = None,
+    outcome: Optional[int] = None,
+) -> int:
+    """
+    Fetch history for a Kalshi market and persist to the database.
+
+    Args:
+        adapter: KalshiAdapter instance.
+        session: SQLAlchemy session.
+        ticker: Market ticker.
+        limit: Max history points to fetch.
+        close_time: Market expiration (fetched from get_market if None).
+        outcome: 1=YES, 0=NO (fetched from get_market.result if None for settled markets).
+
+    Returns:
+        Number of rows inserted.
+    """
+    from ...data.database import KalshiMarketHistory
+
+    try:
+        market = adapter.get_market(ticker)
+    except DataUnavailableError:
+        logger.warning(f"Could not fetch market {ticker}, skipping metadata")
+        market = None
+
+    if close_time is None and market is not None:
+        close_time = market.close_time
+    if outcome is None and market is not None and market.result:
+        outcome = 1 if market.result.lower() == "yes" else 0
+
+    rows = adapter.fetch_and_normalize_history(ticker, limit=limit)
+    if not rows:
+        return 0
+
+    # Dedupe by (ticker, timestamp)
+    existing = {
+        (r.ticker, r.timestamp)
+        for r in session.query(KalshiMarketHistory).filter(
+            KalshiMarketHistory.ticker == ticker
+        ).all()
+    }
+    to_insert = []
+    for r in rows:
+        ts = r["timestamp"]
+        if (ticker, ts) in existing:
+            continue
+        existing.add((ticker, ts))
+        rec = KalshiMarketHistory(
+            ticker=ticker,
+            timestamp=ts,
+            yes_price=r["yes_price"],
+            volume=r.get("volume", 0),
+            open_interest=r.get("open_interest", 0),
+            outcome=outcome,
+            close_time=close_time,
+        )
+        to_insert.append(rec)
+
+    session.add_all(to_insert)
+    return len(to_insert)
+
+
+def load_kalshi_dataset_from_db(
+    session: "Session",
+    tickers: Optional[List[str]] = None,
+    min_rows_per_market: int = 50,
+    spread_estimate: float = 0.02,
+) -> pd.DataFrame:
+    """
+    Load Kalshi market history from the database into a DataFrame for KalshiTradingEnv.
+
+    Columns produced: ticker, timestamp, yes_price, no_price, yes_bid, yes_ask,
+    volume, time_to_expiry, outcome, signal.
+    """
+    from ...data.database import KalshiMarketHistory
+
+    q = session.query(KalshiMarketHistory).order_by(
+        KalshiMarketHistory.ticker, KalshiMarketHistory.timestamp
+    )
+    if tickers is not None:
+        q = q.filter(KalshiMarketHistory.ticker.in_(tickers))
+    rows = q.all()
+
+    if not rows:
+        return pd.DataFrame()
+
+    # Build per-ticker DataFrames and filter by min_rows_per_market
+    by_ticker: Dict[str, List[Dict]] = {}
+    for r in rows:
+        by_ticker.setdefault(r.ticker, []).append(
+            {
+                "ticker": r.ticker,
+                "timestamp": r.timestamp,
+                "yes_price": r.yes_price,
+                "volume": r.volume or 0,
+                "open_interest": r.open_interest or 0,
+                "outcome": r.outcome,
+                "close_time": r.close_time,
+            }
+        )
+
+    def _to_ts(dt: Optional[datetime]) -> float:
+        if dt is None:
+            return 0.0
+        if hasattr(dt, "timestamp"):
+            return dt.timestamp()
+        delta = dt - datetime(1970, 1, 1, tzinfo=timezone.utc)
+        return delta.total_seconds()
+
+    records = []
+    for ticker, list_ in by_ticker.items():
+        if len(list_) < min_rows_per_market:
+            continue
+        for rec in list_:
+            ts = rec["timestamp"]
+            close = rec["close_time"]
+            ts_sec = _to_ts(ts) if ts else 0.0
+            close_ts = _to_ts(close) if close else ts_sec + 86400 * 7
+            time_to_expiry = max(0.0, (close_ts - ts_sec) / (86400 * 30))  # normalize to ~0-1 (30d max)
+            yes_price = rec["yes_price"]
+            half = spread_estimate / 2
+            records.append({
+                "ticker": ticker,
+                "timestamp": ts,
+                "yes_price": yes_price,
+                "no_price": 1.0 - yes_price,
+                "yes_bid": yes_price - half,
+                "yes_ask": yes_price + half,
+                "volume": rec["volume"],
+                "time_to_expiry": min(1.0, time_to_expiry),
+                "outcome": rec["outcome"],
+                "signal": 0.0,
+            })
+
+    return pd.DataFrame(records)

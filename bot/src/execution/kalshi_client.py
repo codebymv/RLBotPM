@@ -13,14 +13,17 @@ import base64
 import os
 import time
 import uuid
+import yaml
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 
 import requests
 
 from ..core.logger import get_logger
+from ..risk.circuit_breaker import CircuitBreaker
 
 logger = get_logger(__name__)
 
@@ -133,7 +136,69 @@ class KalshiExecutionClient:
         self._open_orders: Dict[str, KalshiOrder] = {}
         self._filled_orders: List[KalshiOrder] = []
         
+        # Risk: circuit breaker and Kalshi-specific rules
+        self._circuit_breaker = CircuitBreaker()
+        self._risk_config = self._load_risk_config()
+        self._kalshi_config = self._load_kalshi_config()
+        
         logger.info(f"KalshiExecutionClient initialized (demo={demo})")
+    
+    def _load_risk_config(self) -> Dict:
+        cfg_path = Path(__file__).parents[2] / "shared" / "config" / "risk_config.yaml"
+        if cfg_path.exists():
+            with open(cfg_path) as f:
+                return yaml.safe_load(f) or {}
+        return {}
+    
+    def _load_kalshi_config(self) -> Dict:
+        cfg_path = Path(__file__).parents[2] / "shared" / "config" / "kalshi_config.yaml"
+        if cfg_path.exists():
+            with open(cfg_path) as f:
+                return yaml.safe_load(f) or {}
+        return {}
+    
+    def _can_place_kalshi_order(
+        self,
+        ticker: str,
+        close_time_utc: Optional[datetime] = None,
+    ) -> Tuple[bool, Optional[str]]:
+        """
+        Enforce circuit breaker and Kalshi-specific risk rules before placing an order.
+        Returns (True, None) if allowed, (False, reason) if blocked.
+        """
+        if not self._circuit_breaker.can_trade():
+            return False, "Circuit breaker: trading paused"
+        
+        no_trade_seconds = (
+            self._risk_config.get("market_requirements", {})
+            .get("no_trade_window_before_resolution", 7200)
+        )
+        if no_trade_seconds and close_time_utc:
+            now = datetime.now(timezone.utc)
+            if close_time_utc.tzinfo is None:
+                close_time_utc = close_time_utc.replace(tzinfo=timezone.utc)
+            sec_to_close = (close_time_utc - now).total_seconds()
+            if 0 < sec_to_close <= no_trade_seconds:
+                return False, f"Within no-trade window ({sec_to_close:.0f}s before resolution)"
+        
+        trading = self._kalshi_config.get("trading", {})
+        max_positions = trading.get("max_concurrent_positions", 10)
+        positions = self.get_positions()
+        if len(positions) >= max_positions:
+            return False, f"Max concurrent positions ({max_positions}) reached"
+        
+        max_exposure_pct = (
+            self._kalshi_config.get("trading", {})
+            .get("position_sizing", {})
+            .get("max_total_exposure", 0.25)
+        )
+        if max_exposure_pct > 0:
+            avail, total = self.get_balance()
+            total_exposure = sum(p.market_exposure for p in positions)
+            if total > 0 and (total_exposure / total) >= max_exposure_pct:
+                return False, f"Max total exposure ({max_exposure_pct:.0%}) reached"
+        
+        return True, None
     
     # ------------------------------------------------------------------
     # Authentication
@@ -288,6 +353,11 @@ class KalshiExecutionClient:
         Returns:
             KalshiOrder if successful, None otherwise
         """
+        allowed, reason = self._can_place_kalshi_order(ticker, close_time_utc=None)
+        if not allowed:
+            logger.warning(f"Kalshi order blocked: {reason}")
+            return None
+        
         # Validate price
         price = max(1, min(99, price))
         
@@ -350,6 +420,11 @@ class KalshiExecutionClient:
         Returns:
             KalshiOrder if successful, None otherwise
         """
+        allowed, reason = self._can_place_kalshi_order(ticker, close_time_utc=None)
+        if not allowed:
+            logger.warning(f"Kalshi order blocked: {reason}")
+            return None
+        
         client_order_id = str(uuid.uuid4())
         
         body = {

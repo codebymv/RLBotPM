@@ -18,13 +18,16 @@ from gymnasium import spaces
 import numpy as np
 import pandas as pd
 from datetime import datetime, timezone
-from typing import Dict, Tuple, Optional, List, Any
+from typing import Dict, Tuple, Optional, List, Any, TYPE_CHECKING
 from pathlib import Path
 import yaml
 
 from ..core.logger import get_logger
 from ..core.config import get_settings
 from ..data.sources.base import DataUnavailableError
+
+if TYPE_CHECKING:
+    from sqlalchemy.orm import Session
 
 logger = get_logger(__name__)
 
@@ -166,6 +169,25 @@ class KalshiTradingEnv(gym.Env):
         self.price_history: List[float] = []
         
         logger.info(f"KalshiTradingEnv initialized with {len(self.dataset)} records")
+
+    @classmethod
+    def from_db(
+        cls,
+        session: "Session",
+        tickers: Optional[List[str]] = None,
+        min_rows_per_market: int = 50,
+        **env_kwargs: Any,
+    ) -> "KalshiTradingEnv":
+        """Build env from Kalshi market history in the database."""
+        from ..data.sources.kalshi import load_kalshi_dataset_from_db
+        dataset = load_kalshi_dataset_from_db(
+            session, tickers=tickers, min_rows_per_market=min_rows_per_market
+        )
+        if dataset is None or dataset.empty:
+            raise DataUnavailableError(
+                "No Kalshi history in DB. Run: python main.py kalshi backfill"
+            )
+        return cls(dataset=dataset, **env_kwargs)
     
     def _load_kalshi_config(self) -> Dict:
         """Load Kalshi configuration."""

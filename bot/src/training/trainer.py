@@ -21,6 +21,11 @@ from ..environment import (
     CryptoTradingEnv,
     SequenceStackWrapper,
 )
+from ..environment.strategy_envs import (
+    MomentumTradingEnv,
+    MeanReversionTradingEnv,
+    BreakoutTradingEnv,
+)
 from ..agents import PPOAgent
 from ..data import TrainingRun, init_db, get_db_session, CryptoSymbol
 from ..data.collectors import CryptoDataLoader, MultiSourceLoader
@@ -110,8 +115,9 @@ class Trainer:
             # Load real dataset (fail fast if unavailable)
             dataset = self._load_dataset(min_rows=min_rows, arbitrage_enabled=arbitrage_enabled)
 
-            # Create environment
-            base_env = CryptoTradingEnv(
+            # Create environment (strategy-specific or default crypto)
+            strategy = (env_config.get("strategy") or "crypto").strip().lower()
+            env_kwargs = dict(
                 dataset=dataset,
                 interval=self.settings.DATA_INTERVAL,
                 initial_capital=initial_capital,
@@ -120,6 +126,17 @@ class Trainer:
                 sequence_length=env_sequence_length,
                 arbitrage_enabled=arbitrage_enabled,
             )
+            if strategy == "momentum":
+                base_env = MomentumTradingEnv(**env_kwargs)
+                logger.info("Using MomentumTradingEnv")
+            elif strategy == "mean_reversion":
+                base_env = MeanReversionTradingEnv(**env_kwargs)
+                logger.info("Using MeanReversionTradingEnv")
+            elif strategy == "breakout":
+                base_env = BreakoutTradingEnv(**env_kwargs)
+                logger.info("Using BreakoutTradingEnv")
+            else:
+                base_env = CryptoTradingEnv(**env_kwargs)
 
             env = base_env
             if use_sequence_stack:

@@ -881,6 +881,30 @@ def sell(ticker, contracts, demo):
         console.print(f"\n[red]Error:[/red] {e}")
 
 
+def _get_kalshi_ppo_obs():
+    """Build current crypto observation for PPO signal (optional). Returns None if unavailable."""
+    try:
+        from src.core.config import get_settings
+        from src.data.collectors.crypto_loader import CryptoDataLoader
+        settings = get_settings()
+        loader = CryptoDataLoader(source=settings.DATA_SOURCE)
+        symbols = [s.strip() for s in (settings.DATA_SYMBOLS or "BTC-USD").split(",") if s.strip()]
+        if not symbols:
+            return None
+        from datetime import datetime, timedelta
+        end = datetime.utcnow()
+        start = end - timedelta(days=min(7, getattr(settings, "REQUIRE_HISTORICAL_DAYS", 7)))
+        dataset = loader.load_dataset(symbols=symbols, interval=settings.DATA_INTERVAL, start=start, end=end)
+        if dataset is None or dataset.empty:
+            return None
+        from src.environment.gym_env import CryptoTradingEnv
+        env = CryptoTradingEnv(dataset=dataset, interval=settings.DATA_INTERVAL)
+        obs, _ = env.reset()
+        return obs
+    except Exception:
+        return None
+
+
 @kalshi.command()
 @click.option('--min-edge', default=0.10, help='Minimum edge to show (0.10 = 10%)')
 @click.option('--limit', default=20, help='Max opportunities to show')
@@ -890,12 +914,27 @@ def scan(min_edge, limit, category):
     console.print(f"\n[bold cyan]Scanning Kalshi Markets for Opportunities...[/bold cyan]")
     console.print(f"[dim]Min edge: {min_edge:.0%} | Limit: {limit}[/dim]\n")
     
+    from pathlib import Path
+    import yaml
     from src.data.sources.kalshi import KalshiAdapter
     from src.strategies.kalshi_signals import KalshiSignalAggregator, MarketCategory
     
+    kalshi_cfg = {}
+    cfg_path = Path(__file__).parent.parent / "shared" / "config" / "kalshi_config.yaml"
+    if cfg_path.exists():
+        with open(cfg_path) as f:
+            kalshi_cfg = yaml.safe_load(f) or {}
+    crypto_cfg = kalshi_cfg.get("strategy", {}).get("crypto_signals", {})
+    use_ppo = bool(crypto_cfg.get("use_ppo_signal", False))
+    ppo_path = crypto_cfg.get("ppo_model_path") or None
+    
     try:
         adapter = KalshiAdapter(demo=False)  # Use production for real data
-        aggregator = KalshiSignalAggregator()
+        aggregator = KalshiSignalAggregator(
+            use_ppo_signal=use_ppo,
+            ppo_model_path=ppo_path,
+            get_ppo_obs=_get_kalshi_ppo_obs if use_ppo else None,
+        )
         
         # Fetch all open markets
         console.print("[dim]Fetching markets...[/dim]")
@@ -1020,6 +1059,56 @@ def analyze(ticker):
         
     except Exception as e:
         console.print(f"\n[red]Error:[/red] {e}")
+
+
+@kalshi.command()
+@click.option('--tickers', default=None, help='Comma-separated tickers to backfill (default: fetch open crypto markets)')
+@click.option('--limit', default=500, help='Max history points per market')
+@click.option('--demo/--live', default=True, help='Use demo or live API')
+@click.option('--dry-run', is_flag=True, help='Fetch and report only, do not write to DB')
+def backfill(tickers, limit, demo, dry_run):
+    """Backfill Kalshi market history to DB for RL training"""
+    from src.data.sources.kalshi import KalshiAdapter, backfill_kalshi_market_to_db
+    from src.data.database import init_db, DatabaseSession
+
+    console.print("\n[bold cyan]Kalshi history backfill[/bold cyan]")
+    if dry_run:
+        console.print("[yellow]Dry run: no DB writes[/yellow]\n")
+
+    init_db()
+    adapter = KalshiAdapter(demo=demo)
+
+    if tickers:
+        ticker_list = [t.strip().upper() for t in tickers.split(",") if t.strip()]
+    else:
+        try:
+            markets = adapter.get_crypto_markets("BTC") + adapter.get_crypto_markets("ETH")
+            ticker_list = list({m.ticker for m in markets})[:30]
+        except Exception as e:
+            console.print(f"[red]Failed to list markets: {e}[/red]")
+            return
+        if not ticker_list:
+            console.print("[yellow]No markets to backfill. Use --tickers TICKER1,TICKER2[/yellow]")
+            return
+
+    console.print(f"Markets: {len(ticker_list)}")
+    total = 0
+    for ticker in ticker_list:
+        if dry_run:
+            rows = adapter.fetch_and_normalize_history(ticker, limit=limit)
+            n = len(rows)
+            console.print(f"  {ticker}: {n} rows (dry run)")
+            total += n
+            continue
+        try:
+            with DatabaseSession() as session:
+                n = backfill_kalshi_market_to_db(adapter, session, ticker, limit=limit)
+            if n > 0:
+                console.print(f"  {ticker}: +{n} rows")
+            total += n
+        except Exception as e:
+            console.print(f"  [red]{ticker}: {e}[/red]")
+    console.print(f"\n[bold]Total: {total} rows[/bold]")
 
 
 @cli.command()

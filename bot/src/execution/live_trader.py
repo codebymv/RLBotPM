@@ -34,11 +34,18 @@ from ..core.config import get_settings
 
 logger = get_logger(__name__)
 
+# Project root: bot/ is two levels up from this file (execution/)
+_BOT_ROOT = Path(__file__).resolve().parents[2]
+_PROJECT_ROOT = _BOT_ROOT.parent
 
-def load_env_file(env_path: str = "/workspaces/RLBotPM/.env"):
-    """Load environment variables from .env file."""
-    if os.path.exists(env_path):
-        with open(env_path, 'r') as f:
+
+def load_env_file(env_path: Optional[str] = None):
+    """Load environment variables from .env file. Uses project .env if path not set."""
+    path = env_path or os.environ.get("ENV_FILE") or str(_PROJECT_ROOT / ".env")
+    if not path:
+        return
+    if os.path.exists(path):
+        with open(path, 'r') as f:
             for line in f:
                 line = line.strip()
                 if line and not line.startswith('#') and '=' in line:
@@ -131,9 +138,15 @@ class LiveTrader:
         logger.info(f"  Daily Loss Limit: {daily_loss_limit_pct*100:.0f}%")
     
     def _load_configs(self):
-        """Load reward and risk configs."""
-        reward_path = Path("/workspaces/RLBotPM/shared/config/reward_config.yaml")
-        risk_path = Path("/workspaces/RLBotPM/shared/config/risk_config.yaml")
+        """Load reward and risk configs from shared config (project-relative)."""
+        shared_config = _PROJECT_ROOT / "shared" / "config"
+        reward_path = shared_config / "reward_config.yaml"
+        risk_path = shared_config / "risk_config.yaml"
+        
+        if not reward_path.exists():
+            raise FileNotFoundError(f"Reward config not found: {reward_path}")
+        if not risk_path.exists():
+            raise FileNotFoundError(f"Risk config not found: {risk_path}")
         
         with open(reward_path) as f:
             self.reward_config = yaml.safe_load(f)

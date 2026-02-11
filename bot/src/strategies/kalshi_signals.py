@@ -16,12 +16,16 @@ import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Tuple, Any, Callable, TYPE_CHECKING
 from enum import Enum
 
 import requests
+import numpy as np
 
 from ..core.logger import get_logger
+
+if TYPE_CHECKING:
+    from ..execution.kalshi_rl_bridge import KalshiRLBridge
 
 logger = get_logger(__name__)
 
@@ -278,6 +282,50 @@ class LineMovementSignal(SignalSource):
         return None
 
 
+class PPOSignalSource(SignalSource):
+    """
+    Signal source that uses the crypto PPO model for Kalshi crypto markets.
+
+    Requires a KalshiRLBridge and an optional get_obs callable. When get_obs
+    is set and returns an observation, the PPO recommendation is converted
+    to a probability signal (BUY_YES -> high prob, BUY_NO -> low prob).
+    """
+
+    def __init__(
+        self,
+        bridge: "KalshiRLBridge",
+        get_obs: Optional[Callable[[], Optional[np.ndarray]]] = None,
+    ):
+        self.bridge = bridge
+        self.get_obs = get_obs
+
+    def supports_category(self, category: MarketCategory) -> bool:
+        return category == MarketCategory.CRYPTO
+
+    def get_signal(self, market: Dict) -> Optional[Signal]:
+        if self.get_obs is None:
+            return None
+        try:
+            obs = self.get_obs()
+            if obs is None:
+                return None
+            recommendation, confidence = self.bridge.recommend_from_observation(obs)
+            if recommendation == "HOLD":
+                return None
+            # Map BUY_YES -> probability 0.7, BUY_NO -> 0.3 (market-relative)
+            probability = 0.7 if recommendation == "BUY_YES" else 0.3
+            return Signal(
+                source="ppo",
+                probability=probability,
+                confidence=confidence,
+                timestamp=datetime.now(timezone.utc),
+                metadata={"recommendation": recommendation},
+            )
+        except Exception as e:
+            logger.debug(f"PPO signal error: {e}")
+            return None
+
+
 class KalshiSignalAggregator:
     """
     Combines multiple signal sources to generate trading recommendations.
@@ -287,11 +335,17 @@ class KalshiSignalAggregator:
     - Polls: Good for elections
     - Nowcasts: Good for economic data
     - Line movement: Detects smart money
+    - PPO: Crypto RL model for crypto prediction markets (when use_ppo_signal and get_obs set)
     
     We weight each signal by confidence and source reliability.
     """
     
-    def __init__(self):
+    def __init__(
+        self,
+        use_ppo_signal: bool = False,
+        ppo_model_path: Optional[str] = None,
+        get_ppo_obs: Optional[Callable[[], Optional[np.ndarray]]] = None,
+    ):
         self.sources: List[SignalSource] = [
             PolymarketSignal(),
             FedWatchSignal(),
@@ -300,6 +354,13 @@ class KalshiSignalAggregator:
             LineMovementSignal(),
         ]
         
+        if use_ppo_signal and ppo_model_path and get_ppo_obs:
+            from ..execution.kalshi_rl_bridge import KalshiRLBridge
+            bridge = KalshiRLBridge(ppo_model_path=ppo_model_path)
+            if bridge.load_model():
+                self.sources.append(PPOSignalSource(bridge, get_obs=get_ppo_obs))
+                logger.info("KalshiSignalAggregator: PPO signal source enabled")
+        
         # Source reliability weights (learned over time)
         self.source_weights = {
             "polymarket": 0.8,  # Cross-market arbitrage is strong
@@ -307,6 +368,7 @@ class KalshiSignalAggregator:
             "polls": 0.6,      # Polls have error
             "nowcast": 0.7,    # Models are decent
             "line_movement": 0.4,  # Noisy but useful
+            "ppo": 0.75,       # RL model for crypto
         }
         
         # Minimum edge to trade

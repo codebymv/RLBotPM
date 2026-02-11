@@ -87,6 +87,9 @@ training:
 
 # Environment configuration
 environment:
+  # Strategy env: crypto (default), momentum, mean_reversion, breakout
+  strategy: "crypto"
+  
   # Initial capital for backtesting
   initial_capital: 1000.0
   

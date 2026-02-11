@@ -9,6 +9,7 @@ from .database import (
     ModelCheckpoint,
     CryptoSymbol,
     CryptoCandle,
+    KalshiMarketHistory,
     get_db_session,
     init_db,
     DatabaseSession
@@ -23,6 +24,7 @@ __all__ = [
     "ModelCheckpoint",
     "CryptoSymbol",
     "CryptoCandle",
+    "KalshiMarketHistory",
     "get_db_session",
     "init_db",
     "DatabaseSession"

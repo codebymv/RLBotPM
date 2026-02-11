@@ -211,6 +211,26 @@ class CryptoCandle(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
+class KalshiMarketHistory(Base):
+    """
+    Stores Kalshi market price history for RL training.
+
+    Schema aligned with KalshiTradingEnv: ticker, timestamp, yes_price,
+    volume, outcome (1=YES, 0=NO, null if not settled), close_time for time_to_expiry.
+    """
+    __tablename__ = "kalshi_market_history"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ticker = Column(String(255), nullable=False, index=True)
+    timestamp = Column(DateTime, nullable=False, index=True)
+    yes_price = Column(Float, nullable=False)  # 0-1 probability
+    volume = Column(Float, default=0)
+    open_interest = Column(Integer, default=0)
+    outcome = Column(Integer, nullable=True)  # 1=YES, 0=NO, null if not settled
+    close_time = Column(DateTime, nullable=True)  # market expiration for time_to_expiry
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 # Database engine and session factory
 def get_engine():
     """Create database engine from settings"""
