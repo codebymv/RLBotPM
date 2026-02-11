@@ -9,8 +9,9 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 import time
-from typing import Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional
 
+import numpy as np
 import pandas as pd
 
 from ..database import CryptoSymbol, CryptoCandle, DatabaseSession
@@ -235,3 +236,241 @@ def _interval_to_seconds(interval: str) -> int:
     if interval not in mapping:
         raise DataUnavailableError(f"Unsupported interval: {interval}")
     return mapping[interval]
+
+
+class MultiSourceLoader:
+    """
+    Loads and aligns OHLCV data from multiple exchanges for arbitrage analysis.
+    
+    Fetches same symbols from multiple sources and aligns by timestamp,
+    computing cross-exchange spread features.
+    """
+
+    def __init__(self, sources: List[str]):
+        """
+        Initialize multi-source loader.
+        
+        Args:
+            sources: List of exchange names (e.g., ["coinbase", "kraken"])
+        """
+        if len(sources) < 2:
+            raise DataUnavailableError("MultiSourceLoader requires at least 2 sources for arbitrage")
+        
+        self.sources = sources
+        self.loaders = {source: CryptoDataLoader(source) for source in sources}
+        self.primary_source = sources[0]  # Primary exchange for execution
+        logger.info(f"MultiSourceLoader initialized with sources: {sources}")
+
+    def sync_all_symbols(self, symbols: Optional[Iterable[str]] = None) -> Dict[str, List[str]]:
+        """
+        Sync symbols across all exchanges.
+        
+        Returns dict of source -> symbols available.
+        """
+        result = {}
+        for source, loader in self.loaders.items():
+            try:
+                result[source] = loader.sync_symbols(symbols)
+            except DataUnavailableError as e:
+                logger.warning(f"Failed to sync symbols from {source}: {e}")
+                result[source] = []
+        return result
+
+    def collect_all_ohlcv(
+        self,
+        symbols: Iterable[str],
+        interval: str,
+        start: Optional[datetime] = None,
+        end: Optional[datetime] = None,
+        limit: Optional[int] = None,
+    ) -> Dict[str, int]:
+        """
+        Collect OHLCV data from all sources.
+        
+        Returns dict of source -> candles_stored.
+        """
+        result = {}
+        for source, loader in self.loaders.items():
+            try:
+                result[source] = loader.collect_ohlcv(symbols, interval, start, end, limit)
+            except DataUnavailableError as e:
+                logger.warning(f"Failed to collect from {source}: {e}")
+                result[source] = 0
+        return result
+
+    def load_aligned_dataset(
+        self,
+        symbols: Iterable[str],
+        interval: str,
+        start: Optional[datetime] = None,
+        end: Optional[datetime] = None,
+    ) -> pd.DataFrame:
+        """
+        Load and align data from all sources, computing spread features.
+        
+        Returns DataFrame with columns:
+            symbol, timestamp, open, high, low, close, volume (from primary)
+            + spread features: price_diff_pct, spread_zscore, spread_ma_ratio, etc.
+        """
+        symbols_list = list(symbols)
+        dfs = {}
+        
+        # Load from each source
+        for source, loader in self.loaders.items():
+            try:
+                df = loader.load_dataset(symbols_list, interval, start, end)
+                df = df.rename(columns={
+                    "close": f"close_{source}",
+                    "open": f"open_{source}",
+                    "high": f"high_{source}",
+                    "low": f"low_{source}",
+                    "volume": f"volume_{source}",
+                })
+                dfs[source] = df
+            except DataUnavailableError as e:
+                logger.warning(f"No data from {source}: {e}")
+        
+        if not dfs:
+            raise DataUnavailableError("No data available from any source")
+        
+        if len(dfs) < 2:
+            logger.warning("Only one source has data - spread features will be zero")
+            # Return primary with zero spreads
+            primary_df = list(dfs.values())[0]
+            primary_source = list(dfs.keys())[0]
+            return self._add_zero_spread_features(primary_df, primary_source)
+        
+        # Merge on symbol + timestamp
+        merged = self._merge_sources(dfs, symbols_list)
+        
+        # Compute spread features
+        merged = self._compute_spread_features(merged)
+        
+        return merged
+
+    def _merge_sources(self, dfs: Dict[str, pd.DataFrame], symbols: List[str]) -> pd.DataFrame:
+        """Merge dataframes from multiple sources by symbol and timestamp."""
+        
+        # Start with primary source
+        primary_df = dfs[self.primary_source].copy()
+        primary_df["timestamp"] = pd.to_datetime(primary_df["timestamp"])
+        
+        # Rename primary columns back to standard names
+        primary_df = primary_df.rename(columns={
+            f"close_{self.primary_source}": "close",
+            f"open_{self.primary_source}": "open",
+            f"high_{self.primary_source}": "high",
+            f"low_{self.primary_source}": "low",
+            f"volume_{self.primary_source}": "volume",
+        })
+        
+        # Keep track of other source prices
+        for source, df in dfs.items():
+            if source == self.primary_source:
+                continue
+                
+            df = df.copy()
+            df["timestamp"] = pd.to_datetime(df["timestamp"])
+            
+            # Select only price columns from secondary sources
+            price_cols = [f"close_{source}", f"high_{source}", f"low_{source}"]
+            df_subset = df[["symbol", "timestamp"] + [c for c in price_cols if c in df.columns]]
+            
+            # Merge on symbol + timestamp (inner join to keep only aligned rows)
+            primary_df = primary_df.merge(
+                df_subset,
+                on=["symbol", "timestamp"],
+                how="inner"
+            )
+        
+        logger.info(f"Merged {len(primary_df)} aligned rows across {len(dfs)} sources")
+        return primary_df
+
+    def _compute_spread_features(self, df: pd.DataFrame, lookback: int = 24) -> pd.DataFrame:
+        """
+        Compute cross-exchange spread features.
+        
+        Features added:
+            - price_diff_pct: (primary - secondary) / avg_price
+            - spread_zscore: standardized spread deviation
+            - spread_ma_ratio: current_spread / rolling_mean_spread
+            - spread_direction: sign of spread change
+        """
+        df = df.copy()
+        
+        # Find secondary source columns
+        secondary_close_cols = [c for c in df.columns if c.startswith("close_") and c != f"close_{self.primary_source}"]
+        
+        if not secondary_close_cols:
+            return self._add_zero_spread_features(df, self.primary_source)
+        
+        # Use first secondary source for spread calculation
+        secondary_col = secondary_close_cols[0]
+        secondary_source = secondary_col.replace("close_", "")
+        
+        # Store symbol mapping before groupby (groupby drops the key column from groups)
+        symbol_col = df["symbol"].copy()
+        
+        def compute_symbol_spreads(group: pd.DataFrame) -> pd.DataFrame:
+            g = group.copy()
+            
+            primary_price = g["close"]
+            secondary_price = g[secondary_col]
+            avg_price = (primary_price + secondary_price) / 2
+            
+            # Raw spread as percentage
+            g["price_diff_pct"] = (primary_price - secondary_price) / (avg_price + 1e-9)
+            
+            # Rolling stats for spread
+            spread_ma = g["price_diff_pct"].rolling(lookback, min_periods=1).mean()
+            spread_std = g["price_diff_pct"].rolling(lookback, min_periods=1).std().fillna(1e-6)
+            
+            # Z-score of spread (how unusual is current spread)
+            g["spread_zscore"] = (g["price_diff_pct"] - spread_ma) / (spread_std + 1e-9)
+            
+            # Ratio of current spread to rolling mean
+            g["spread_ma_ratio"] = g["price_diff_pct"] / (spread_ma.abs() + 1e-6)
+            
+            # Direction of spread change
+            g["spread_direction"] = np.sign(g["price_diff_pct"].diff())
+            
+            return g
+        
+        df = df.groupby("symbol", group_keys=False).apply(compute_symbol_spreads)
+        
+        # Restore symbol column (groupby drops it from groups)
+        df["symbol"] = symbol_col.values
+        
+        # Fill NaN from rolling calcs
+        spread_cols = ["price_diff_pct", "spread_zscore", "spread_ma_ratio", "spread_direction"]
+        for col in spread_cols:
+            df[col] = df[col].fillna(0.0)
+        
+        # Store secondary source name for reference
+        df["secondary_source"] = secondary_source
+        
+        logger.info(f"Computed spread features: primary={self.primary_source}, secondary={secondary_source}")
+        return df
+
+    def _add_zero_spread_features(self, df: pd.DataFrame, source: str) -> pd.DataFrame:
+        """Add zero-valued spread features when only one source available."""
+        df = df.copy()
+        
+        # Rename columns back to standard
+        rename_map = {
+            f"close_{source}": "close",
+            f"open_{source}": "open", 
+            f"high_{source}": "high",
+            f"low_{source}": "low",
+            f"volume_{source}": "volume",
+        }
+        df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
+        
+        # Add zero spread features
+        df["price_diff_pct"] = 0.0
+        df["spread_zscore"] = 0.0
+        df["spread_ma_ratio"] = 0.0
+        df["spread_direction"] = 0.0
+        df["secondary_source"] = None
+        
+        return df

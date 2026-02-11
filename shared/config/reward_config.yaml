@@ -65,3 +65,12 @@ reward_weights:
   sharpe_bonus_scale: 2.0
   sharpe_bonus_cap: 2.0
   manual_exit_bonus: 0.25
+  
+  # Entry filters - DISABLED to allow model freedom to learn
+  # (Run 118 succeeded without these gates)
+  entry_signal_threshold: 0.0      # Was 0.003 - blocked calm markets
+  entry_volatility_cap: 0.0        # Disabled
+  entry_momentum_ratio_threshold: 0.0  # Was 0.4 - too restrictive
+  
+  # Arbitrage settings - spread features in obs only, no reward shaping
+  arbitrage_spread_bonus: 0.0  # Disabled - let model learn naturally

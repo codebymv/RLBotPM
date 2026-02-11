@@ -9,9 +9,32 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import List, Optional
+import time
 import requests
 
 from .base import ExchangeAdapter, OHLCV, DataUnavailableError
+
+
+# Standard symbol -> Kraken symbol mapping
+# Kraken uses XBT for Bitcoin and different pair formats
+SYMBOL_MAP = {
+    "BTC-USD": "XBTUSD",
+    "BTC-EUR": "XBTEUR",
+    "BTC-GBP": "XBTGBP",
+    "ETH-USD": "ETHUSD",
+    "ETH-EUR": "ETHEUR",
+    "ETH-BTC": "ETHXBT",
+    "SOL-USD": "SOLUSD",
+    "SOL-EUR": "SOLEUR",
+    "DOGE-USD": "XDGUSD",
+    "XRP-USD": "XRPUSD",
+    "LTC-USD": "LTCUSD",
+    "ADA-USD": "ADAUSD",
+    "DOT-USD": "DOTUSD",
+    "LINK-USD": "LINKUSD",
+    "AVAX-USD": "AVAXUSD",
+    "MATIC-USD": "MATICUSD",
+}
 
 
 class KrakenAdapter(ExchangeAdapter):
@@ -20,15 +43,41 @@ class KrakenAdapter(ExchangeAdapter):
     def __init__(self, base_url: str = "https://api.kraken.com/0/public"):
         self.base_url = base_url.rstrip("/")
 
-    def _get(self, path: str, params: Optional[dict] = None) -> dict:
+    def _to_kraken_symbol(self, symbol: str) -> str:
+        """Convert standard symbol format (BTC-USD) to Kraken format (XBTUSD)."""
+        # Check explicit mapping first
+        if symbol in SYMBOL_MAP:
+            return SYMBOL_MAP[symbol]
+        # Try removing hyphen as fallback
+        return symbol.replace("-", "")
+
+    def _get(self, path: str, params: Optional[dict] = None, max_retries: int = 5) -> dict:
         url = f"{self.base_url}/{path.lstrip('/')}"
-        resp = requests.get(url, params=params, timeout=15)
-        if resp.status_code != 200:
-            raise DataUnavailableError(f"Kraken API error: {resp.status_code} {resp.text}")
-        data = resp.json()
-        if data.get("error"):
-            raise DataUnavailableError(f"Kraken API error: {data['error']}")
-        return data.get("result", {})
+        
+        for attempt in range(max_retries):
+            try:
+                resp = requests.get(url, params=params, timeout=15)
+                if resp.status_code != 200:
+                    raise DataUnavailableError(f"Kraken API error: {resp.status_code} {resp.text}")
+                data = resp.json()
+                if data.get("error"):
+                    errors = data['error']
+                    # Check for rate limit error
+                    if any("Too many requests" in str(e) for e in errors):
+                        if attempt < max_retries - 1:
+                            wait_time = (2 ** attempt) * 2  # 2, 4, 8, 16, 32 seconds
+                            time.sleep(wait_time)
+                            continue
+                    raise DataUnavailableError(f"Kraken API error: {errors}")
+                return data.get("result", {})
+            except requests.exceptions.RequestException as e:
+                if attempt < max_retries - 1:
+                    wait_time = (2 ** attempt) * 2
+                    time.sleep(wait_time)
+                    continue
+                raise DataUnavailableError(f"Kraken request failed: {e}")
+        
+        raise DataUnavailableError("Kraken API max retries exceeded")
 
     def get_symbols(self) -> List[str]:
         data = self._get("/AssetPairs")
@@ -37,7 +86,8 @@ class KrakenAdapter(ExchangeAdapter):
         return list(data.keys())
 
     def get_latest_price(self, symbol: str) -> float:
-        data = self._get("/Ticker", params={"pair": symbol})
+        kraken_symbol = self._to_kraken_symbol(symbol)
+        data = self._get("/Ticker", params={"pair": kraken_symbol})
         if not data:
             raise DataUnavailableError(f"Kraken ticker missing for {symbol}.")
         pair_data = next(iter(data.values()))
@@ -54,8 +104,9 @@ class KrakenAdapter(ExchangeAdapter):
         end: Optional[datetime] = None,
         limit: Optional[int] = None,
     ) -> List[OHLCV]:
+        kraken_symbol = self._to_kraken_symbol(symbol)
         interval_minutes = _interval_to_minutes(interval)
-        params: dict = {"pair": symbol, "interval": interval_minutes}
+        params: dict = {"pair": kraken_symbol, "interval": interval_minutes}
         if start:
             params["since"] = int(start.timestamp())
         data = self._get("/OHLC", params=params)

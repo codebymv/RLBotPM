@@ -81,14 +81,25 @@ def train(episodes, checkpoint, config, policy, sequence_length, checkpoint_freq
 @click.option('--stochastic', is_flag=True, help='Use stochastic actions for evaluation')
 @click.option('--policy', default="MlpPolicy", help='Policy type (MlpPolicy or MlpLstmPolicy)')
 @click.option('--sequence-length', default=1, type=int, help='Sequence length for frame stacking')
-def evaluate(model, episodes, stochastic, policy, sequence_length):
+@click.option('--arbitrage', is_flag=True, help='Enable arbitrage mode (33-dim obs)')
+def evaluate(model, episodes, stochastic, policy, sequence_length, arbitrage):
     """Evaluate a trained model on test data"""
     console.print(f"\n[bold cyan]Evaluating model:[/bold cyan] {model}")
     
     from src.training.evaluator import Evaluator
+    from src.core.config import get_settings
+    
+    # Auto-detect arbitrage mode from settings if not explicitly set
+    settings = get_settings()
+    use_arbitrage = arbitrage or settings.ARBITRAGE_ENABLED
     
     try:
-        evaluator = Evaluator(model_path=model, policy_type=policy, sequence_length=sequence_length)
+        evaluator = Evaluator(
+            model_path=model, 
+            policy_type=policy, 
+            sequence_length=sequence_length,
+            arbitrage_enabled=use_arbitrage
+        )
         results = evaluator.evaluate(num_episodes=episodes, deterministic=not stochastic)
         
         # Display results
@@ -440,6 +451,73 @@ def collect_data(source, symbols, interval, days):
         )
 
         console.print("\n[bold green]OK[/bold green] Data collection completed!")
+
+    except DataUnavailableError as e:
+        console.print(f"\n[bold red]Data Error:[/bold red] {str(e)}")
+        raise
+    except Exception as e:
+        console.print(f"\n[bold red]Error:[/bold red] {str(e)}")
+        raise
+
+
+@cli.command("collect-multi")
+@click.option('--sources', default="coinbase,kraken", help='Comma-separated exchanges (e.g., coinbase,kraken)')
+@click.option('--symbols', required=True, help='Comma-separated symbols (e.g., BTC-USD,ETH-USD)')
+@click.option('--interval', default="1h", help='Candle interval (e.g., 1m,5m,1h,1d)')
+@click.option('--days', default=30, help='Number of days of history to collect')
+def collect_multi(sources, symbols, interval, days):
+    """Collect OHLCV data from multiple exchanges for arbitrage analysis"""
+    source_list = [s.strip() for s in sources.split(",") if s.strip()]
+    console.print(
+        f"\n[bold cyan]Collecting multi-exchange data:[/bold cyan]"
+        f"\n  Sources: {source_list}"
+        f"\n  Interval: {interval}"
+        f"\n  Days: {days}"
+    )
+
+    from src.data.collectors.crypto_loader import CryptoDataLoader, MultiSourceLoader
+    from src.data.sources.base import DataUnavailableError
+
+    try:
+        symbol_list = [s.strip() for s in symbols.split(",") if s.strip()]
+        
+        # Collect from each source
+        for source in source_list:
+            console.print(f"\n[cyan]Collecting from {source}...[/cyan]")
+            loader = CryptoDataLoader(source=source)
+            loader.sync_symbols(symbol_list)
+
+            end = datetime.utcnow()
+            start = end - timedelta(days=days)
+
+            count = loader.collect_ohlcv(
+                symbols=symbol_list,
+                interval=interval,
+                start=start,
+                end=end
+            )
+            console.print(f"  Stored {count} candles from {source}")
+
+        # Verify alignment
+        if len(source_list) >= 2:
+            console.print("\n[cyan]Verifying cross-exchange alignment...[/cyan]")
+            multi_loader = MultiSourceLoader(sources=source_list)
+            end = datetime.utcnow()
+            start = end - timedelta(days=days)
+            
+            aligned = multi_loader.load_aligned_dataset(
+                symbols=symbol_list,
+                interval=interval,
+                start=start,
+                end=end
+            )
+            console.print(f"  Aligned rows: {len(aligned)}")
+            console.print(f"  Spread columns: {[c for c in aligned.columns if 'spread' in c or 'diff' in c]}")
+
+        console.print("\n[bold green]OK[/bold green] Multi-exchange data collection completed!")
+        console.print("\n[dim]To enable arbitrage training, set in .env:[/dim]")
+        console.print("[dim]  ARBITRAGE_ENABLED=true[/dim]")
+        console.print(f"[dim]  DATA_SOURCES={sources}[/dim]")
 
     except DataUnavailableError as e:
         console.print(f"\n[bold red]Data Error:[/bold red] {str(e)}")

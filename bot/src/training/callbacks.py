@@ -327,6 +327,7 @@ class EarlyStoppingCallback(BaseCallback):
         min_delta: float = 0.0,
         save_path: str = "./models",
         verbose: int = 0,
+        arbitrage_enabled: bool = False,
     ):
         super().__init__(verbose)
         self.training_run_id = training_run_id
@@ -339,6 +340,7 @@ class EarlyStoppingCallback(BaseCallback):
         self.min_delta = float(min_delta)
         self.save_path = Path(save_path)
         self.save_path.mkdir(parents=True, exist_ok=True)
+        self.arbitrage_enabled = arbitrage_enabled
 
         self.best_metric = -np.inf
         self.patience_counter = 0
@@ -354,6 +356,7 @@ class EarlyStoppingCallback(BaseCallback):
             model_path=str(temp_path),
             policy_type=self.policy_type,
             sequence_length=self.sequence_length,
+            arbitrage_enabled=self.arbitrage_enabled,
         )
         metrics = evaluator.evaluate(num_episodes=self.eval_episodes, deterministic=True)
         current_metric = float(metrics.get(self.metric_name, -np.inf))

@@ -23,7 +23,7 @@ from ..environment import (
 )
 from ..agents import PPOAgent
 from ..data import TrainingRun, init_db, get_db_session, CryptoSymbol
-from ..data.collectors import CryptoDataLoader
+from ..data.collectors import CryptoDataLoader, MultiSourceLoader
 from ..data.sources.base import DataUnavailableError
 from ..core.logger import get_logger
 from ..core.config import get_settings
@@ -102,8 +102,13 @@ class Trainer:
             env_sequence_length = sequence_length if use_sequence_stack else 1
             min_rows = max_steps + env_sequence_length + 1
 
+            # Check for arbitrage mode
+            arbitrage_enabled = self.settings.ARBITRAGE_ENABLED
+            if arbitrage_enabled:
+                logger.info("Arbitrage mode enabled - using multi-exchange data")
+
             # Load real dataset (fail fast if unavailable)
-            dataset = self._load_dataset(min_rows=min_rows)
+            dataset = self._load_dataset(min_rows=min_rows, arbitrage_enabled=arbitrage_enabled)
 
             # Create environment
             base_env = CryptoTradingEnv(
@@ -113,6 +118,7 @@ class Trainer:
                 max_steps=max_steps,
                 transaction_cost=transaction_cost,
                 sequence_length=env_sequence_length,
+                arbitrage_enabled=arbitrage_enabled,
             )
 
             env = base_env
@@ -161,6 +167,7 @@ class Trainer:
                 policy_type=policy_type,
                 sequence_length=sequence_length,
                 training_config=training_config,
+                arbitrage_enabled=arbitrage_enabled,
             )
             
             # Train
@@ -206,6 +213,7 @@ class Trainer:
         policy_type: str,
         sequence_length: int,
         training_config: Dict,
+        arbitrage_enabled: bool = False,
     ) -> CallbackList:
         """
         Create training callbacks
@@ -213,6 +221,7 @@ class Trainer:
         Args:
             checkpoint_frequency: Checkpoint save frequency
             eval_frequency: Evaluation frequency
+            arbitrage_enabled: Whether arbitrage mode is enabled
         
         Returns:
             CallbackList with all callbacks
@@ -247,6 +256,7 @@ class Trainer:
                 patience=patience,
                 min_delta=min_delta,
                 save_path=self.settings.MODEL_SAVE_PATH,
+                arbitrage_enabled=arbitrage_enabled,
             ),
         ]
         
@@ -369,10 +379,14 @@ class Trainer:
             'custom_config': self.config
         }
 
-    def _load_dataset(self, min_rows: Optional[int] = None):
+    def _load_dataset(self, min_rows: Optional[int] = None, arbitrage_enabled: bool = False):
         """
         Load real OHLCV dataset from database.
         Raises DataUnavailableError if data is missing.
+        
+        Args:
+            min_rows: Minimum rows required per symbol
+            arbitrage_enabled: If True, load from multiple exchanges and compute spread features
         """
         source = self.settings.DATA_SOURCE
         interval = self.settings.DATA_INTERVAL
@@ -399,16 +413,38 @@ class Trainer:
                 "No symbols found in database. Run CryptoDataLoader to sync symbols and candles."
             )
 
-        loader = CryptoDataLoader(source=source)
         end = datetime.utcnow()
         start = end - timedelta(days=days)
 
-        dataset = loader.load_dataset(
-            symbols=symbols,
-            interval=interval,
-            start=start,
-            end=end
-        )
+        # Use MultiSourceLoader if arbitrage is enabled and multiple sources are configured
+        if arbitrage_enabled and self.settings.DATA_SOURCES:
+            sources = [s.strip() for s in self.settings.DATA_SOURCES.split(",") if s.strip()]
+            if len(sources) >= 2:
+                logger.info(f"Loading multi-exchange data from: {sources}")
+                multi_loader = MultiSourceLoader(sources=sources)
+                dataset = multi_loader.load_aligned_dataset(
+                    symbols=symbols,
+                    interval=interval,
+                    start=start,
+                    end=end
+                )
+            else:
+                logger.warning("ARBITRAGE_ENABLED but DATA_SOURCES has < 2 exchanges. Using single source.")
+                loader = CryptoDataLoader(source=source)
+                dataset = loader.load_dataset(
+                    symbols=symbols,
+                    interval=interval,
+                    start=start,
+                    end=end
+                )
+        else:
+            loader = CryptoDataLoader(source=source)
+            dataset = loader.load_dataset(
+                symbols=symbols,
+                interval=interval,
+                start=start,
+                end=end
+            )
 
         if dataset is None or dataset.empty:
             raise DataUnavailableError("Dataset is empty after loading. Check data pipeline.")

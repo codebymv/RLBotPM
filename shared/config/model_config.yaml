@@ -5,9 +5,9 @@ ppo:
   # Policy type: MlpPolicy or MlpLstmPolicy
   policy_type: "MlpPolicy"
   # Learning rate - how fast the agent learns
-  # 1e-5 for fine-tuning (preserves learned behavior)
+  # 1e-4 for new feature sets (arbitrage mode)
   # 3e-4 is standard for training from scratch
-  learning_rate: 0.00001
+  learning_rate: 0.0001
   
   # Number of steps to collect per environment before updating
   # Higher = more stable but slower learning
@@ -57,7 +57,7 @@ recurrent:
 # Training configuration
 training:
   # Total training episodes
-  total_timesteps: 100000
+  total_timesteps: 300000
   
   # Evaluate every N episodes
   eval_frequency: 10000
@@ -93,8 +93,8 @@ environment:
   # Maximum steps per episode
   max_steps: 500
   
-  # Transaction cost percentage
-  transaction_cost: 0.001
+  # Transaction cost percentage (0.05% = maker fee level)
+  transaction_cost: 0.0005
   
   # Reward function weights
   reward_weights:

@@ -57,6 +57,7 @@ class CryptoTradingEnv(gym.Env):
         max_steps: int = 500,
         transaction_cost: Optional[float] = None,
         sequence_length: int = 1,
+        arbitrage_enabled: bool = False,
     ):
         """
         Initialize environment with a real OHLCV dataset.
@@ -64,12 +65,17 @@ class CryptoTradingEnv(gym.Env):
         Args:
             dataset: DataFrame with columns:
                 symbol, timestamp, open, high, low, close, volume
+                + optional spread features if arbitrage_enabled
             interval: Candle interval (e.g., 1m, 5m, 1h, 1d)
             initial_capital: Starting capital
             max_steps: Maximum steps per episode
             transaction_cost: Transaction cost percentage
+            arbitrage_enabled: If True, expect spread features in dataset and
+                extend observation space by 4 dimensions for cross-exchange analysis
         """
         super().__init__()
+        
+        self.arbitrage_enabled = arbitrage_enabled
 
         self.settings = get_settings()
         self.initial_capital = initial_capital or self.settings.INITIAL_CAPITAL
@@ -97,7 +103,15 @@ class CryptoTradingEnv(gym.Env):
         self.max_position_size_pct = max_position_pct
 
         tx_costs = self.risk_config.get("transaction_costs", {})
-        self.base_transaction_cost = float(tx_costs.get("base_cost_pct", self.transaction_cost))
+        # Maker/Taker fee structure
+        self.order_type = str(tx_costs.get("default_order_type", "taker"))
+        self.taker_fee_pct = float(tx_costs.get("taker_fee_pct", 0.001))  # 0.10%
+        self.maker_fee_pct = float(tx_costs.get("maker_fee_pct", 0.0001))  # 0.01%
+        self.maker_fill_probability = float(tx_costs.get("maker_fill_probability", 0.85))
+        self.taker_slippage_pct = float(tx_costs.get("taker_slippage_pct", 0.0005))
+        
+        # Legacy support - base_cost_pct maps to appropriate fee
+        self.base_transaction_cost = self.maker_fee_pct if self.order_type == "maker" else self.taker_fee_pct
         self.large_order_penalty_threshold = float(tx_costs.get("large_order_penalty_threshold", 0.15))
         self.large_order_penalty_pct = float(tx_costs.get("large_order_penalty_pct", 0.0))
         self.slippage_model = str(tx_costs.get("slippage_model", "fixed"))
@@ -135,8 +149,24 @@ class CryptoTradingEnv(gym.Env):
         self.current_symbol_index = 0
 
         # Observation space: current symbol view + portfolio + current position
-        # Architecture: [market(15) + portfolio(10) + position(4)] = 29 dimensions
-        self.obs_dim = 29
+        # Base: [market(15) + portfolio(10) + position(4)] = 29 dimensions
+        # Arbitrage: + [spread(4)] = 33 dimensions
+        self.base_obs_dim = 29
+        self.spread_obs_dim = 4 if self.arbitrage_enabled else 0
+        self.obs_dim = self.base_obs_dim + self.spread_obs_dim
+        
+        # Validate spread features if arbitrage enabled
+        if self.arbitrage_enabled:
+            spread_cols = ["price_diff_pct", "spread_zscore", "spread_ma_ratio", "spread_direction"]
+            missing_spread = [c for c in spread_cols if c not in self.dataset.columns]
+            if missing_spread:
+                logger.warning(f"Arbitrage enabled but missing spread columns: {missing_spread}. Disabling.")
+                self.arbitrage_enabled = False
+                self.spread_obs_dim = 0
+                self.obs_dim = self.base_obs_dim
+            else:
+                logger.info("Arbitrage mode enabled with cross-exchange spread features")
+        
         self.observation_space = spaces.Box(
             low=-5.0,
             high=5.0,
@@ -705,26 +735,49 @@ class CryptoTradingEnv(gym.Env):
             return {}
 
     def _estimate_slippage_pct(self, order_value: float, row: pd.Series) -> float:
+        """Estimate slippage based on order type and market conditions."""
+        # Maker orders have no slippage - you set the price
+        if self.order_type == "maker":
+            return 0.0
+        
+        # Taker orders have slippage based on model
         if self.slippage_model == "volume_based":
             volume_ma_24 = float(row.get("volume_ma_24", 0.0))
             current_price = float(row.get("close", 0.0))
             volume_value = max(volume_ma_24 * current_price, 1e-9)
-            raw_slippage = (order_value / volume_value) * self.max_slippage_pct
+            raw_slippage = (order_value / volume_value) * self.taker_slippage_pct
         else:
-            raw_slippage = self.max_slippage_pct * 0.5
+            raw_slippage = self.taker_slippage_pct
 
         return raw_slippage
 
     def _get_trade_cost_pct(self, order_value: float, portfolio_value: float, row: pd.Series) -> float:
-        cost_pct = self.base_transaction_cost
+        """Calculate total trade cost including fees and slippage."""
+        # Use maker or taker fee based on order type
+        if self.order_type == "maker":
+            cost_pct = self.maker_fee_pct
+        else:
+            cost_pct = self.taker_fee_pct
+            
+        # Large order penalty (applies to both order types)
         if portfolio_value > 0:
             order_pct = order_value / portfolio_value
             if order_pct > self.large_order_penalty_threshold:
                 cost_pct += self.large_order_penalty_pct
 
+        # Add slippage (0 for maker, calculated for taker)
         slippage_pct = min(self.max_slippage_pct, self._estimate_slippage_pct(order_value, row))
         cost_pct += slippage_pct
         return cost_pct
+    
+    def _check_maker_fill(self) -> bool:
+        """Check if a maker order fills (probabilistic for realism)."""
+        if self.order_type == "taker":
+            return True  # Market orders always fill
+        
+        # Maker orders have fill probability
+        import random
+        return random.random() < self.maker_fill_probability
 
     def _execute_buy_symbol(self, symbol: Optional[str], action: int) -> Dict:
         """Execute a buy order for the given symbol."""
@@ -789,6 +842,15 @@ class CryptoTradingEnv(gym.Env):
                 "pnl": 0.0, "cost": 0.0,
             }
 
+        # Check if maker order fills (probabilistic)
+        if not self._check_maker_fill():
+            return {
+                "action": action, "action_name": action_name,
+                "executed": False, "reason": "Maker order not filled",
+                "pnl": 0.0, "cost": 0.0,
+                "order_type": "maker",
+            }
+
         cost_pct = self._get_trade_cost_pct(position_value, self._get_portfolio_value(), row)
         cost = position_value * (1 + cost_pct)
         if cost > available_capital:
@@ -847,6 +909,15 @@ class CryptoTradingEnv(gym.Env):
                 "action": self.ACTION_SELL, "action_name": action_name,
                 "executed": False, "reason": "Slippage too high",
                 "pnl": 0.0, "cost": 0.0,
+            }
+
+        # Check if maker order fills (probabilistic)
+        if not self._check_maker_fill():
+            return {
+                "action": self.ACTION_SELL, "action_name": action_name,
+                "executed": False, "reason": "Maker order not filled",
+                "pnl": 0.0, "cost": 0.0,
+                "order_type": "maker",
             }
 
         cost_pct = self._get_trade_cost_pct(sell_size, self._get_portfolio_value(), row)
@@ -980,6 +1051,9 @@ class CryptoTradingEnv(gym.Env):
         if trade_result.get("executed"):
             action_name = trade_result.get("action_name", "")
             
+            # Note: Spread features (if arbitrage_enabled) are in observation space.
+            # The model learns to use them naturally from PnL feedback - no explicit bonuses.
+            
             if action_name.startswith(("SELL", "CLOSE")):
                 # OUTCOME LEARNING: Main PnL feedback
                 realized_pnl = float(trade_result.get("pnl", 0.0))
@@ -1042,12 +1116,17 @@ class CryptoTradingEnv(gym.Env):
 
     def _get_observation(self) -> np.ndarray:
         """
-        Build 29-dimensional observation for the current symbol.
+        Build observation for the current symbol.
         
-        Layout:
+        Layout (29 dims base, 33 with arbitrage):
           [0-14]  Market features (15)
           [15-24] Portfolio features (10)
           [25-28] Position features for current symbol (4)
+          [29-32] Arbitrage spread features (4) - only if arbitrage_enabled
+                  - price_diff_pct: Cross-exchange price difference
+                  - spread_zscore: How unusual is current spread
+                  - spread_ma_ratio: Spread relative to rolling mean
+                  - spread_direction: Direction of spread change
         """
         obs = np.zeros(self.obs_dim, dtype=np.float32)
 
@@ -1097,6 +1176,19 @@ class CryptoTradingEnv(gym.Env):
             obs[26] = self._clip_feature((current_price - entry_price) / (entry_price + 1e-9))
             obs[27] = self._clip_feature(hold_steps / self.max_hold_steps)
             obs[28] = 1.0
+
+        # Arbitrage spread features (obs[29-32]) if enabled
+        if self.arbitrage_enabled and self.spread_obs_dim > 0:
+            # Get spread features from current row
+            # Scale spread more aggressively: typical spread is 0.01% to 0.1%
+            # Multiply by 1000 so 0.1% becomes 1.0 (meaningful signal)
+            obs[29] = self._clip_feature(float(row.get("price_diff_pct", 0.0)) * 1000)
+            # Z-score is already normalized, keep as-is
+            obs[30] = self._clip_feature(float(row.get("spread_zscore", 0.0)))
+            # MA ratio indicates spread relative to recent mean
+            obs[31] = self._clip_feature(float(row.get("spread_ma_ratio", 0.0)))
+            # Direction of spread change
+            obs[32] = self._clip_feature(float(row.get("spread_direction", 0.0)))
 
         return obs
 

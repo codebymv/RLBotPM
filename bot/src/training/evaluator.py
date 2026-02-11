@@ -14,7 +14,7 @@ import numpy as np
 from ..agents import PPOAgent
 from ..environment import CryptoTradingEnv, SequenceStackWrapper
 from ..data import CryptoSymbol, get_db_session
-from ..data.collectors import CryptoDataLoader
+from ..data.collectors import CryptoDataLoader, MultiSourceLoader
 from ..data.sources.base import DataUnavailableError
 from ..core.config import get_settings
 from ..core.logger import get_logger
@@ -28,17 +28,19 @@ class Evaluator:
     Evaluate a trained PPO model on real OHLCV data.
     """
 
-    def __init__(self, model_path: str, policy_type: str = "MlpPolicy", sequence_length: int = 1):
+    def __init__(self, model_path: str, policy_type: str = "MlpPolicy", sequence_length: int = 1, arbitrage_enabled: bool = False):
         self.settings = get_settings()
         self.model_path = model_path
         self.policy_type = policy_type
         self.sequence_length = int(sequence_length)
+        self.arbitrage_enabled = arbitrage_enabled
 
         dataset = self._load_dataset()
         base_env = CryptoTradingEnv(
             dataset=dataset,
             interval=self.settings.DATA_INTERVAL,
             sequence_length=1,
+            arbitrage_enabled=self.arbitrage_enabled,
         )
         if self.policy_type == "MlpPolicy" and self.sequence_length > 1:
             self.env = SequenceStackWrapper(base_env, sequence_length=self.sequence_length, flatten=True)
@@ -292,16 +294,37 @@ class Evaluator:
                 "No symbols found in database. Run CryptoDataLoader to sync symbols and candles."
             )
 
-        loader = CryptoDataLoader(source=source)
         end = datetime.utcnow()
         start = end - timedelta(days=days)
 
-        dataset = loader.load_dataset(
-            symbols=symbols,
-            interval=interval,
-            start=start,
-            end=end,
-        )
+        # Use multi-source loader if arbitrage is enabled
+        if self.arbitrage_enabled and self.settings.DATA_SOURCES:
+            sources = [s.strip() for s in self.settings.DATA_SOURCES.split(",") if s.strip()]
+            if len(sources) >= 2:
+                logger.info(f"Evaluator loading multi-exchange data from: {sources}")
+                multi_loader = MultiSourceLoader(sources=sources)
+                dataset = multi_loader.load_aligned_dataset(
+                    symbols=symbols,
+                    interval=interval,
+                    start=start,
+                    end=end
+                )
+            else:
+                loader = CryptoDataLoader(source=source)
+                dataset = loader.load_dataset(
+                    symbols=symbols,
+                    interval=interval,
+                    start=start,
+                    end=end,
+                )
+        else:
+            loader = CryptoDataLoader(source=source)
+            dataset = loader.load_dataset(
+                symbols=symbols,
+                interval=interval,
+                start=start,
+                end=end,
+            )
 
         if dataset is None or dataset.empty:
             raise DataUnavailableError("Dataset is empty after loading. Check data pipeline.")

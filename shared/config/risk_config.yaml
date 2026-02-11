@@ -28,10 +28,12 @@ position_limits:
 # Market requirements
 market_requirements:
   # Minimum market liquidity to trade
-  min_market_liquidity: 500.0  # $500
+  # DISABLED - slippage model handles illiquid conditions
+  min_market_liquidity: 0.0  # Was $500
   
-  # Minimum volume in last 24h
-  min_volume_24h: 1000.0  # $1000
+  # Minimum volume in last 24h  
+  # DISABLED - let model learn from experience
+  min_volume_24h: 0.0  # Was $1000
   
   # Don't trade within N seconds of resolution
   no_trade_window_before_resolution: 7200  # 2 hours
@@ -74,11 +76,27 @@ position_sizing:
 
 # Transaction costs
 transaction_costs:
-  # Base transaction cost
-  base_cost_pct: 0.001  # 0.1%
+  # Order type: "maker" (limit orders) or "taker" (market orders)
+  # Maker orders are cheaper but may not fill immediately
+  default_order_type: "maker"
+  
+  # Taker fee (market orders) - immediate execution
+  taker_fee_pct: 0.001  # 0.10% - Coinbase/Binance taker
+  
+  # Maker fee (limit orders) - posts liquidity
+  # Real exchange rates: Bybit 0.01%, dYdX 0.02%, Hyperliquid 0.01%
+  maker_fee_pct: 0.0001  # 0.01% - competitive maker rate
+  
+  # Maker order fill probability (limit orders may not fill)
+  # Higher = more fills, but less realistic
+  maker_fill_probability: 0.85  # 85% of maker orders fill
   
   # Slippage model
   slippage_model: "volume_based"  # "fixed" or "volume_based"
+  
+  # Maker orders have no slippage (you set the price)
+  # Taker orders have slippage based on order book
+  taker_slippage_pct: 0.0005  # 0.05% for market orders
   
   # Additional cost for large orders
   large_order_penalty_threshold: 0.15  # Orders >15% of capital

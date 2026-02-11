@@ -30,10 +30,16 @@ class Settings(BaseSettings):
     MODEL_SAVE_PATH: str = Field(default="./models", description="Directory to save model checkpoints")
     TRAINING_MODE: bool = Field(default=True, description="Relax safety enforcement during training")
     DATA_SOURCE: str = Field(default="coinbase", description="Primary data source adapter")
+    DATA_SOURCES: Optional[str] = Field(default=None, description="Comma-separated list of exchanges for arbitrage (e.g., 'coinbase,kraken')")
     DATA_STRICT_MODE: bool = Field(default=True, description="Fail fast when data is unavailable")
     DATA_INTERVAL: str = Field(default="1h", description="OHLCV interval for training")
     REQUIRE_HISTORICAL_DAYS: int = Field(default=30, description="Minimum history required for training")
     DATA_SYMBOLS: Optional[str] = Field(default=None, description="Comma-separated symbol allowlist")
+    
+    # Arbitrage Settings
+    ARBITRAGE_ENABLED: bool = Field(default=False, description="Enable cross-exchange spread observation")
+    ARBITRAGE_MIN_SPREAD_PCT: float = Field(default=0.002, description="Minimum spread (0.2%) to consider actionable")
+    ARBITRAGE_LOOKBACK_PERIODS: int = Field(default=24, description="Periods to compute rolling spread stats")
     
     # Risk Management Settings (Phase 1 defaults - virtual money)
     INITIAL_CAPITAL: float = Field(default=1000.0, description="Starting capital for backtesting")
