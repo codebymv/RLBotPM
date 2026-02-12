@@ -39,7 +39,7 @@ training:
   verbose: 1
   tensorboard_log: ./logs/tensorboard
   early_stopping:
-    eval_episodes: 50
-    patience: 5
-    min_delta: 0.01
-    metric: sharpe_ratio
+    eval_episodes: 100
+    patience: 15         # relaxed for initial training
+    min_delta: 0.005     # smaller threshold
+    metric: win_rate     # track win rate for binary markets

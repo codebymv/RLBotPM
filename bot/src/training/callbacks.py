@@ -21,6 +21,7 @@ from ..risk import CircuitBreaker
 from ..core.logger import get_logger
 from ..core.config import get_settings
 from .evaluator import Evaluator
+from .kalshi_evaluator import KalshiEvaluator
 
 
 logger = get_logger(__name__)
@@ -354,17 +355,14 @@ class EarlyStoppingCallback(BaseCallback):
         temp_path = self.save_path / f"early_stop_eval_run_{self.training_run_id}_step_{self.n_calls}"
         self.model.save(str(temp_path))
 
-        # Kalshi uses a different env; skip crypto-only Evaluator
+        # Use strategy-specific evaluator
         if self.strategy == "kalshi":
-            # Use rollout mean reward from SB3 logger as proxy metric
-            name_to_value = getattr(self.model.logger, "name_to_value", {}) or {}
-            current_metric = float(
-                name_to_value.get("rollout/ep_rew_mean",
-                    name_to_value.get("train/policy_gradient_loss", -np.inf))
+            evaluator = KalshiEvaluator(
+                model_path=str(temp_path),
+                policy_type=self.policy_type,
             )
-            # If still no metric, infer from training loss improvement
-            if not np.isfinite(current_metric):
-                current_metric = -float(name_to_value.get("train/loss", np.inf))
+            metrics = evaluator.evaluate(num_episodes=self.eval_episodes, deterministic=True)
+            current_metric = float(metrics.get(self.metric_name, -np.inf))
         else:
             evaluator = Evaluator(
                 model_path=str(temp_path),
