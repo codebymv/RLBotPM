@@ -294,12 +294,17 @@ class KalshiAdapter(ExchangeAdapter):
         Args:
             asset: Crypto asset (BTC, ETH, etc.)
         """
-        # Kalshi crypto markets typically use series like "BTCUSD", "ETHUSD"
-        series = f"{asset.upper()}USD"
+        # Kalshi crypto markets typically use series like "KXBTC", "KXETH", etc.
+        # (Older configs may reference "BTCUSD" / "ETHUSD"; keep as fallback.)
+        asset_u = asset.upper()
+        series_candidates = [f"KX{asset_u}", f"{asset_u}USD"]
         
         try:
-            markets = self.get_markets(status="open", series_ticker=series)
-            return markets
+            for series in series_candidates:
+                markets = self.get_markets(status="open", series_ticker=series)
+                if markets:
+                    return markets
+            return []
         except DataUnavailableError:
             # Try category filter as fallback
             all_markets = self.get_markets(status="open", limit=500)

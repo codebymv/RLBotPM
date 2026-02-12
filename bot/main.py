@@ -1204,6 +1204,185 @@ def scan_markets(model, series, limit, confidence, demo):
         console.print("\n[yellow]No signals met confidence threshold[/yellow]")
 
 
+@kalshi.command("hybrid-scan")
+@click.option('--model', default=None, help='Path to trained RL model (optional for timing filter)')
+@click.option('--series', default='KXBTC,KXETH,KXSOLD', help='Comma-separated series to scan')
+@click.option('--limit', default=5, help='Max trade signals to show')
+@click.option('--min-edge', default=0.05, type=float, help='Min statistical edge (0.05 = 5%)')
+@click.option('--rl-threshold', default=0.6, type=float, help='Min RL timing confidence (0-1)')
+@click.option('--bankroll', default=25.0, type=float, help='Total capital for Kelly sizing')
+@click.option('--demo/--live', default=False, help='Use demo or live API')
+def hybrid_scan(model, series, limit, min_edge, rl_threshold, bankroll, demo):
+    """
+    Hybrid scanner: Statistical edges + RL timing + Kelly sizing.
+    
+    This combines:
+    - StatisticalEdgeDetector: finds mispriced markets
+    - RL model: filters by execution timing (optional)
+    - Kelly criterion: sizes positions
+    """
+    from src.strategies.kalshi_hybrid import HybridKalshiEngine
+    from src.data.sources.kalshi import KalshiAdapter
+    
+    console.print(f"\n[bold cyan]Kalshi Hybrid Scanner[/bold cyan]")
+    console.print(f"Statistical edge: ≥{min_edge:.1%} | RL threshold: ≥{rl_threshold:.0%} | Bankroll: ${bankroll:.2f}\n")
+    
+    if model:
+        console.print(f"[dim]Using RL model: {model}[/dim]\n")
+    else:
+        console.print(f"[dim]No RL model - using statistical edges only[/dim]\n")
+    
+    try:
+        # Initialize hybrid engine
+        engine = HybridKalshiEngine(
+            rl_model_path=model,
+            rl_threshold=rl_threshold,
+            min_edge=min_edge,
+            bankroll=bankroll,
+        )
+        
+        # Fetch live markets
+        adapter = KalshiAdapter(demo=demo)
+        series_list = [s.strip().upper() for s in series.split(",") if s.strip()]
+        
+        all_markets = []
+        for st in series_list:
+            console.print(f"[dim]Fetching {st} markets...[/dim]")
+            markets = adapter.get_markets(series_ticker=st, status="open", limit=50)
+            if markets:
+                all_markets.extend([
+                    {
+                        "ticker": m.ticker,
+                        "event_ticker": getattr(m, "event_ticker", None) or m.ticker.rsplit("-", 1)[0],
+                        "series_ticker": getattr(m, "series_ticker", None) or st,
+                        "title": getattr(m, "title", ""),
+                        "subtitle": getattr(m, "subtitle", ""),
+                        "category": getattr(m, "category", ""),
+                        "close_time": getattr(m, "close_time", None),
+                        "expiration_time": getattr(m, "expiration_time", None),
+                        "last_price": m.yes_price,
+                        "yes_bid": m.yes_bid,
+                        "yes_ask": m.yes_ask,
+                        # KalshiMarket doesn't currently expose NO book; approximate for arb detector.
+                        "no_bid": max(0.0, 100.0 - float(m.yes_ask)),
+                        "no_ask": max(0.0, 100.0 - float(m.yes_bid)),
+                        "volume": m.volume,
+                        "open_interest": m.open_interest or 0,
+                        "liquidity": float(m.open_interest or 0) or float(m.volume or 0),
+                        "previous_price": m.yes_price,
+                    }
+                    for m in markets
+                ])
+        
+        if not all_markets:
+            console.print("[yellow]No markets found[/yellow]")
+            return
+        
+        console.print(f"[dim]Analyzing {len(all_markets)} markets...[/dim]\n")
+        
+        # Run hybrid scan
+        signals = engine.scan_and_rank(all_markets, top_n=limit)
+        
+        if not signals:
+            console.print("[yellow]No tradeable signals found[/yellow]")
+            console.print(f"[dim]Try lowering --min-edge or --rl-threshold[/dim]")
+            return
+        
+        console.print(f"[bold green]Found {len(signals)} trade signals:[/bold green]\n")
+        
+        for i, sig in enumerate(signals, 1):
+            action_color = "green" if sig.action == "BUY_YES" else "red" if sig.action == "BUY_NO" else "yellow"
+            
+            console.print(f"[bold]{i}. {sig.ticker}[/bold]")
+            console.print(f"   [{action_color}]{sig.action}[/{action_color}] {sig.contracts} contracts (${sig.contracts * sig.edge.market_price / 100:.2f})")
+            console.print(f"   Edge: [green]{sig.edge.edge_value:+.1%}[/green] ({sig.edge.edge_type}) | RL: {sig.rl_confidence:.0%} | Kelly: {sig.kelly_fraction:.1%}")
+            console.print(f"   Expected Value: ${sig.expected_value * bankroll:.2f}")
+            console.print(f"   [dim]{sig.reasoning}[/dim]")
+            console.print()
+        
+        console.print(f"\n[bold]Total Deployment:[/bold] ${sum(s.contracts * s.edge.market_price / 100 for s in signals):.2f} / ${bankroll:.2f}")
+        
+    except Exception as e:
+        console.print(f"\n[red]Error:[/red] {e}")
+        import traceback
+        traceback.print_exc()
+
+
+@kalshi.command("backtest")
+@click.option('--model', default=None, help='Path to trained RL model for hybrid strategy')
+@click.option('--min-edge', default=0.05, type=float, help='Min statistical edge (0.05 = 5%)')
+@click.option('--rl-threshold', default=0.6, type=float, help='Min RL confidence for hybrid (0-1)')
+@click.option('--capital', default=25.0, type=float, help='Initial capital')
+def backtest(model, min_edge, rl_threshold, capital):
+    """
+    Backtest hybrid strategy on held-out test events.
+    
+    Compares statistical-only vs hybrid (statistical + RL + Kelly).
+    """
+    from src.strategies.kalshi_backtest import KalshiBacktester
+    
+    console.print(f"\n[bold cyan]Kalshi Strategy Backtest[/bold cyan]")
+    console.print(f"Initial capital: ${capital:.2f}\n")
+    
+    try:
+        backtester = KalshiBacktester(initial_capital=capital)
+        
+        console.print("[dim]Running backtest on held-out test events...[/dim]\n")
+        
+        comparison = backtester.compare_strategies(
+            rl_model_path=model,
+            min_edge=min_edge,
+            rl_threshold=rl_threshold,
+        )
+        
+        console.print("[bold]Strategy Comparison:[/bold]\n")
+        console.print(comparison.to_string(index=False))
+        console.print()
+        
+    except Exception as e:
+        console.print(f"\n[red]Error:[/red] {e}")
+        import traceback
+        traceback.print_exc()
+
+
+@kalshi.command("backtest-crypto")
+@click.option('--min-edge', default=0.01, type=float, help='Min edge threshold (0.01 = 1%)')
+@click.option('--min-price', default=1, type=int, help='Min tradeable market price in cents')
+@click.option('--max-price', default=99, type=int, help='Max tradeable market price in cents')
+@click.option('--hours-before', default=1.0, type=float, help='Simulated hours before settlement')
+@click.option('--seed', default=42, type=int, help='Random seed')
+@click.option('--series', default=None, help='Comma-separated series filter (e.g. KXBTC,KXETH)')
+def backtest_crypto(min_edge, min_price, max_price, hours_before, seed, series):
+    """
+    Backtest the crypto spot-vs-strike edge detector on settled markets.
+
+    Uses expiration_value + noise as simulated spot price.
+    """
+    from src.strategies.backtest_crypto_edge import run_backtest
+
+    console.print(f"\n[bold cyan]Crypto Edge Detector — Historical Backtest[/bold cyan]")
+    console.print(f"edge≥{min_edge:.1%} | price {min_price}-{max_price}¢ | spot noise ~{hours_before:.1f}h\n")
+
+    try:
+        series_filter = None
+        if series:
+            series_filter = [s.strip().upper() for s in series.split(",") if s.strip()]
+
+        report = run_backtest(
+            min_edge=min_edge,
+            min_tradeable_price=min_price,
+            max_tradeable_price=max_price,
+            hours_before=hours_before,
+            seed=seed,
+            series_filter=series_filter,
+        )
+        console.print(report.summary())
+    except Exception as e:
+        console.print(f"\n[red]Error:[/red] {e}")
+        import traceback
+        traceback.print_exc()
+
+
 @cli.command()
 def test_env():
     """Test the Gym environment setup"""
@@ -1258,6 +1437,60 @@ def test_env():
     except Exception as e:
         console.print(f"\n[bold red]Error:[/bold red] {str(e)}")
         raise
+
+
+@kalshi.command("paper-trade")
+@click.option('--interval', default=300, type=int, help='Seconds between scans (default 5 min)')
+@click.option('--bankroll', default=100.0, type=float, help='Starting capital')
+@click.option('--min-edge', default=0.01, type=float, help='Min edge threshold (0.01 = 1%%)')
+@click.option('--max-edge', default=0.20, type=float, help='Max edge (large edges are often wrong)')
+@click.option('--min-price', default=1, type=int, help='Min market price in cents')
+@click.option('--max-price', default=50, type=int, help='Max market price in cents')
+@click.option('--max-contracts', default=10, type=int, help='Max contracts per trade')
+@click.option('--max-positions', default=20, type=int, help='Max simultaneous positions')
+@click.option('--series', default=None, help='Comma-separated series (default: all crypto)')
+@click.option('--max-scans', default=None, type=int, help='Stop after N scans (default: forever)')
+@click.option('--demo/--live', default=True, help='Use demo or live API')
+def paper_trade(interval, bankroll, min_edge, max_edge, min_price, max_price,
+                max_contracts, max_positions, series, max_scans, demo):
+    """
+    Paper trade the crypto edge detector on live markets.
+
+    Polls markets every --interval seconds, opens hypothetical positions
+    on detected edges, checks settlements, and logs everything to
+    bot/logs/paper_trades.jsonl.
+
+    No real orders are placed.
+    """
+    from src.strategies.paper_trader import run_paper_trading
+
+    console.print(f"\n[bold cyan]Kalshi Paper Trading[/bold cyan]")
+    console.print(f"Bankroll: ${bankroll:.2f} | Interval: {interval}s | Edge: {min_edge:.1%}–{max_edge:.1%}")
+    console.print(f"Price: {min_price}–{max_price}¢ | Max contracts: {max_contracts} | Demo: {demo}\n")
+
+    try:
+        series_list = None
+        if series:
+            series_list = [s.strip().upper() for s in series.split(",") if s.strip()]
+
+        portfolio = run_paper_trading(
+            interval_seconds=interval,
+            bankroll=bankroll,
+            min_edge=min_edge,
+            max_edge=max_edge,
+            min_price=min_price,
+            max_price=max_price,
+            max_contracts_per_trade=max_contracts,
+            max_open_positions=max_positions,
+            series=series_list,
+            demo=demo,
+            max_scans=max_scans,
+        )
+        console.print(portfolio.summary())
+    except Exception as e:
+        console.print(f"\n[red]Error:[/red] {e}")
+        import traceback
+        traceback.print_exc()
 
 
 if __name__ == '__main__':
