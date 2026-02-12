@@ -53,7 +53,10 @@ def test_environment_with_db_data_if_available():
     env = CryptoTradingEnv(dataset=df, interval="1h", max_steps=50)
     obs, info = env.reset()
 
-    assert obs.shape == (42,), f"Expected observation shape (42,) but got {obs.shape}"
+    expected_shape = env.observation_space.shape
+    assert obs.shape == expected_shape, (
+        f"Expected observation shape {expected_shape} but got {obs.shape}"
+    )
     assert "capital" in info
     assert info["capital"] == env.initial_capital
 
