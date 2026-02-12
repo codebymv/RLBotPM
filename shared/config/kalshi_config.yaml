@@ -6,8 +6,9 @@ api:
   demo_mode: true  # Set to false for live trading
   
   # Endpoints
-  production_url: "https://trading-api.kalshi.com/trade-api/v2"
-  demo_url: "https://demo-api.kalshi.co/trade-api/v2"
+  # Note: Kalshi endpoints have migrated; the adapter uses the elections host.
+  production_url: "https://api.elections.kalshi.com/trade-api/v2"
+  demo_url: "https://demo-api.elections.kalshi.co/trade-api/v2"
   
   # Request settings
   timeout_seconds: 15
@@ -98,5 +99,5 @@ logging:
   snapshot_interval_minutes: 60
 
 # Environment variables required:
-# - KALSHI_API_KEY: Your Kalshi email/login
-# - KALSHI_API_SECRET: Your Kalshi password
+# - KALSHI_API_KEY: Your Kalshi access key
+# - KALSHI_API_SECRET: Your RSA private key (PEM). In `.env`, store as a single line with `\n` escapes.

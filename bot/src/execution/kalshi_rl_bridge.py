@@ -50,12 +50,22 @@ class KalshiRLBridge:
         )
 
     def _load_config(self) -> Dict:
-        config_path = (
-            Path(__file__).parents[2] / "shared" / "config" / "kalshi_config.yaml"
-        )
-        if config_path.exists():
-            with open(config_path) as f:
-                return yaml.safe_load(f)
+        # Allow explicit override for deployments with custom layout.
+        override = os.getenv("KALSHI_CONFIG_PATH")
+        if override:
+            path = Path(override).expanduser().resolve()
+            if path.exists():
+                with open(path) as f:
+                    return yaml.safe_load(f) or {}
+
+        # Search upwards for repo-root `shared/config/kalshi_config.yaml`.
+        here = Path(__file__).resolve()
+        for parent in [here.parent, *here.parents]:
+            candidate = parent / "shared" / "config" / "kalshi_config.yaml"
+            if candidate.exists():
+                with open(candidate) as f:
+                    return yaml.safe_load(f) or {}
+
         return {}
 
     def load_model(self) -> bool:
