@@ -328,6 +328,7 @@ class EarlyStoppingCallback(BaseCallback):
         save_path: str = "./models",
         verbose: int = 0,
         arbitrage_enabled: bool = False,
+        strategy: str = "crypto",
     ):
         super().__init__(verbose)
         self.training_run_id = training_run_id
@@ -341,6 +342,7 @@ class EarlyStoppingCallback(BaseCallback):
         self.save_path = Path(save_path)
         self.save_path.mkdir(parents=True, exist_ok=True)
         self.arbitrage_enabled = arbitrage_enabled
+        self.strategy = strategy
 
         self.best_metric = -np.inf
         self.patience_counter = 0
@@ -352,14 +354,26 @@ class EarlyStoppingCallback(BaseCallback):
         temp_path = self.save_path / f"early_stop_eval_run_{self.training_run_id}_step_{self.n_calls}"
         self.model.save(str(temp_path))
 
-        evaluator = Evaluator(
-            model_path=str(temp_path),
-            policy_type=self.policy_type,
-            sequence_length=self.sequence_length,
-            arbitrage_enabled=self.arbitrage_enabled,
-        )
-        metrics = evaluator.evaluate(num_episodes=self.eval_episodes, deterministic=True)
-        current_metric = float(metrics.get(self.metric_name, -np.inf))
+        # Kalshi uses a different env; skip crypto-only Evaluator
+        if self.strategy == "kalshi":
+            # Use rollout mean reward from SB3 logger as proxy metric
+            name_to_value = getattr(self.model.logger, "name_to_value", {}) or {}
+            current_metric = float(
+                name_to_value.get("rollout/ep_rew_mean",
+                    name_to_value.get("train/policy_gradient_loss", -np.inf))
+            )
+            # If still no metric, infer from training loss improvement
+            if not np.isfinite(current_metric):
+                current_metric = -float(name_to_value.get("train/loss", np.inf))
+        else:
+            evaluator = Evaluator(
+                model_path=str(temp_path),
+                policy_type=self.policy_type,
+                sequence_length=self.sequence_length,
+                arbitrage_enabled=self.arbitrage_enabled,
+            )
+            metrics = evaluator.evaluate(num_episodes=self.eval_episodes, deterministic=True)
+            current_metric = float(metrics.get(self.metric_name, -np.inf))
 
         if current_metric > self.best_metric + self.min_delta:
             self.best_metric = current_metric

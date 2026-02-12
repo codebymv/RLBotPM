@@ -215,6 +215,7 @@ class Trainer:
                 sequence_length=sequence_length,
                 training_config=training_config,
                 arbitrage_enabled=arbitrage_enabled,
+                strategy=strategy,
             )
             
             # Train
@@ -261,6 +262,7 @@ class Trainer:
         sequence_length: int,
         training_config: Dict,
         arbitrage_enabled: bool = False,
+        strategy: str = "crypto",
     ) -> CallbackList:
         """
         Create training callbacks
@@ -304,6 +306,7 @@ class Trainer:
                 min_delta=min_delta,
                 save_path=self.settings.MODEL_SAVE_PATH,
                 arbitrage_enabled=arbitrage_enabled,
+                strategy=strategy,
             ),
         ]
         
