@@ -26,6 +26,7 @@ from ..environment.strategy_envs import (
     MeanReversionTradingEnv,
     BreakoutTradingEnv,
 )
+from ..environment.kalshi_env import KalshiEventEnv, load_kalshi_settled_markets
 from ..agents import PPOAgent
 from ..data import TrainingRun, init_db, get_db_session, CryptoSymbol
 from ..data.collectors import CryptoDataLoader, MultiSourceLoader
@@ -112,35 +113,61 @@ class Trainer:
             if arbitrage_enabled:
                 logger.info("Arbitrage mode enabled - using multi-exchange data")
 
-            # Load real dataset (fail fast if unavailable)
-            dataset = self._load_dataset(min_rows=min_rows, arbitrage_enabled=arbitrage_enabled)
-
-            # Create environment (strategy-specific or default crypto)
-            strategy = (env_config.get("strategy") or "crypto").strip().lower()
-            env_kwargs = dict(
-                dataset=dataset,
-                interval=self.settings.DATA_INTERVAL,
-                initial_capital=initial_capital,
-                max_steps=max_steps,
-                transaction_cost=transaction_cost,
-                sequence_length=env_sequence_length,
-                arbitrage_enabled=arbitrage_enabled,
-            )
-            if strategy == "momentum":
-                base_env = MomentumTradingEnv(**env_kwargs)
-                logger.info("Using MomentumTradingEnv")
-            elif strategy == "mean_reversion":
-                base_env = MeanReversionTradingEnv(**env_kwargs)
-                logger.info("Using MeanReversionTradingEnv")
-            elif strategy == "breakout":
-                base_env = BreakoutTradingEnv(**env_kwargs)
-                logger.info("Using BreakoutTradingEnv")
+            # --- Kalshi strategy: completely different data & env path ---
+            if strategy == "kalshi":
+                session = get_db_session()
+                try:
+                    kalshi_cfg = self.config.get("kalshi", {})
+                    series_tickers = kalshi_cfg.get("series_tickers", None)
+                    df = load_kalshi_settled_markets(session, series_tickers=series_tickers)
+                    if df is None or df.empty:
+                        raise DataUnavailableError(
+                            "No settled Kalshi markets in DB. Run: python main.py kalshi backfill-settled"
+                        )
+                    base_env = KalshiEventEnv(
+                        settled_markets=df,
+                        initial_capital=initial_capital,
+                        max_positions_per_event=kalshi_cfg.get("max_positions_per_event", 3),
+                        contracts_per_trade=kalshi_cfg.get("contracts_per_trade", 1),
+                        transaction_cost_cents=kalshi_cfg.get("transaction_cost_cents", 0.0),
+                        min_volume=kalshi_cfg.get("min_volume", 0),
+                        min_contracts_per_event=kalshi_cfg.get("min_contracts_per_event", 3),
+                    )
+                    logger.info(f"Using KalshiEventEnv ({len(base_env.events)} events)")
+                finally:
+                    session.close()
+                env = base_env
             else:
-                base_env = CryptoTradingEnv(**env_kwargs)
+                # --- Standard crypto strategies ---
 
-            env = base_env
-            if use_sequence_stack:
-                env = SequenceStackWrapper(env, sequence_length=sequence_length, flatten=True)
+                # Load real dataset (fail fast if unavailable)
+                dataset = self._load_dataset(min_rows=min_rows, arbitrage_enabled=arbitrage_enabled)
+
+                # Create environment (strategy-specific or default crypto)
+                env_kwargs = dict(
+                    dataset=dataset,
+                    interval=self.settings.DATA_INTERVAL,
+                    initial_capital=initial_capital,
+                    max_steps=max_steps,
+                    transaction_cost=transaction_cost,
+                    sequence_length=env_sequence_length,
+                    arbitrage_enabled=arbitrage_enabled,
+                )
+                if strategy == "momentum":
+                    base_env = MomentumTradingEnv(**env_kwargs)
+                    logger.info("Using MomentumTradingEnv")
+                elif strategy == "mean_reversion":
+                    base_env = MeanReversionTradingEnv(**env_kwargs)
+                    logger.info("Using MeanReversionTradingEnv")
+                elif strategy == "breakout":
+                    base_env = BreakoutTradingEnv(**env_kwargs)
+                    logger.info("Using BreakoutTradingEnv")
+                else:
+                    base_env = CryptoTradingEnv(**env_kwargs)
+
+                env = base_env
+                if use_sequence_stack:
+                    env = SequenceStackWrapper(env, sequence_length=sequence_length, flatten=True)
             
             # Create agent
             ppo_config = self.config.get("ppo", {})

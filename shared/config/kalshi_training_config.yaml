@@ -1,0 +1,45 @@
+# Kalshi Binary Market RL Training Configuration
+# Usage: python main.py train --config shared/config/kalshi_training_config.yaml
+
+environment:
+  strategy: kalshi
+  initial_capital: 25.0
+  max_steps: 500         # not used for kalshi (steps = contracts in event)
+  transaction_cost: 0.0  # not used for kalshi
+
+kalshi:
+  # Series to train on (null = all available in DB)
+  series_tickers: null
+  # Max positions per event episode
+  max_positions_per_event: 3
+  # Contracts per BUY action
+  contracts_per_trade: 1
+  # Fee per contract (cents)
+  transaction_cost_cents: 0.0
+  # Minimum volume to include a contract
+  min_volume: 0
+  # Minimum contracts per event to be a valid episode
+  min_contracts_per_event: 3
+
+ppo:
+  policy_type: MlpPolicy
+  learning_rate: 0.0003
+  n_steps: 512
+  batch_size: 64
+  n_epochs: 10
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  ent_coef: 0.05        # higher entropy for exploration on binary markets
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+
+training:
+  use_gpu: true
+  verbose: 1
+  tensorboard_log: ./logs/tensorboard
+  early_stopping:
+    eval_episodes: 50
+    patience: 5
+    min_delta: 0.01
+    metric: sharpe_ratio

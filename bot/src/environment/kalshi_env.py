@@ -17,6 +17,7 @@ import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
 import pandas as pd
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Dict, Tuple, Optional, List, Any, TYPE_CHECKING
 from pathlib import Path
@@ -587,3 +588,403 @@ class KalshiTradingEnv(gym.Env):
         for action in self._get_valid_actions():
             mask[action] = 1.0
         return mask
+
+
+# ---------------------------------------------------------------------------
+# Event-level binary outcome environment (trained on settled market snapshots)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class _KalshiPos:
+    """A position in a single Kalshi contract."""
+    ticker: str
+    side: str           # 'yes' or 'no'
+    entry_price: float  # cents (0-100)
+    contracts: int
+    outcome: int        # 1=YES won, 0=NO won
+
+
+@dataclass
+class _EventGroup:
+    """A group of contracts from the same event (same expiry)."""
+    event_ticker: str
+    series_ticker: str
+    close_time: Any
+    open_time: Any
+    expiration_value: float
+    contracts: List[Dict]
+
+
+class KalshiEventEnv(gym.Env):
+    """
+    RL environment for trading settled Kalshi binary contracts, grouped by event.
+
+    Each episode replays one event (e.g., one hourly BTC expiry) with N contracts
+    at different strike levels. The agent steps through contracts and decides
+    whether to BUY_YES, BUY_NO, or HOLD for each one. At the end of the event,
+    all positions are settled using the actual outcome.
+
+    This is the environment you train on after running ``kalshi backfill-settled``.
+
+    Observation space (17 dims):
+        [0]  yes_price (0-1)
+        [1]  spread (0-1)             - bid/ask spread normalized
+        [2]  volume_log               - log(1 + volume) normalized
+        [3]  open_interest_log        - log(1 + OI) normalized
+        [4]  time_to_expiry           - hours until settlement, normalized
+        [5]  strike_distance          - how far strike is from underlying
+        [6]  strike_direction         - 1=above, -1=below, 0=range
+        [7]  implied_prob             - yes_price / 100
+        [8]  previous_price_delta     - change from previous close
+        [9]  liquidity_log            - log(1 + liquidity) normalized
+        [10] contract_index_norm      - position in event's contract list
+        [11] capital_ratio            - remaining capital / initial
+        [12] num_positions_norm       - current positions / max allowed
+        [13] total_exposure_ratio     - total $ at risk / capital
+        [14] unrealized_edge          - avg (1 - entry_price/100) for positions
+        [15] win_rate                 - rolling win rate
+        [16] episode_return           - cumulative return this episode
+
+    Action space: Discrete(3) — 0=HOLD, 1=BUY_YES, 2=BUY_NO
+    """
+
+    metadata = {"render_modes": ["human"]}
+
+    ACTION_HOLD = 0
+    ACTION_BUY_YES = 1
+    ACTION_BUY_NO = 2
+    ACTION_NAMES = {0: "HOLD", 1: "BUY_YES", 2: "BUY_NO"}
+
+    def __init__(
+        self,
+        settled_markets: pd.DataFrame,
+        initial_capital: float = 25.0,
+        max_positions_per_event: int = 3,
+        contracts_per_trade: int = 1,
+        transaction_cost_cents: float = 0.0,
+        min_volume: int = 0,
+        min_contracts_per_event: int = 3,
+    ):
+        """
+        Args:
+            settled_markets: DataFrame from ``load_kalshi_settled_markets()``.
+            initial_capital: Starting capital in dollars.
+            max_positions_per_event: Max contracts to buy per event episode.
+            contracts_per_trade: Contracts per BUY action.
+            transaction_cost_cents: Fee per contract (cents).
+            min_volume: Filter contracts with volume below this.
+            min_contracts_per_event: Minimum strike-level contracts to form a valid event.
+        """
+        super().__init__()
+
+        self.initial_capital = initial_capital
+        self.max_positions_per_event = max_positions_per_event
+        self.contracts_per_trade = contracts_per_trade
+        self.transaction_cost_cents = transaction_cost_cents
+
+        self.events = self._build_events(settled_markets, min_volume, min_contracts_per_event)
+        if not self.events:
+            raise DataUnavailableError(
+                "No valid events built from settled_markets. Run: python main.py kalshi backfill-settled"
+            )
+
+        logger.info(
+            f"KalshiEventEnv: {len(self.events)} events, "
+            f"{sum(len(e.contracts) for e in self.events)} total contracts"
+        )
+
+        self.action_space = spaces.Discrete(3)
+        self.obs_dim = 17
+        self.observation_space = spaces.Box(
+            low=-5.0, high=5.0, shape=(self.obs_dim,), dtype=np.float32
+        )
+
+        # State — will be set in reset()
+        self.capital = initial_capital
+        self.positions: List[_KalshiPos] = []
+        self.current_event_idx = 0
+        self.current_contract_idx = 0
+        self.episode_positions = 0
+        self.total_pnl = 0.0
+        self.trade_count = 0
+        self.win_count = 0
+        self.episode_trades: List[float] = []
+
+    # ------------------------------------------------------------------
+    # data preparation
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _build_events(
+        df: pd.DataFrame, min_volume: int, min_contracts: int
+    ) -> List[_EventGroup]:
+        if df is None or df.empty:
+            return []
+        if min_volume > 0:
+            df = df[df["volume"] >= min_volume]
+
+        events: List[_EventGroup] = []
+        for event_ticker, grp in df.groupby("event_ticker"):
+            contracts = grp.to_dict("records")
+            if len(contracts) < min_contracts:
+                continue
+            contracts.sort(key=lambda c: c.get("floor_strike") or c.get("cap_strike") or 0)
+            first = contracts[0]
+            events.append(_EventGroup(
+                event_ticker=str(event_ticker),
+                series_ticker=str(first.get("series_ticker", "")),
+                close_time=first.get("close_time"),
+                open_time=first.get("open_time"),
+                expiration_value=first.get("expiration_value") or 0.0,
+                contracts=contracts,
+            ))
+        events.sort(key=lambda e: str(e.close_time or ""))
+        return events
+
+    @classmethod
+    def from_db(
+        cls,
+        session: "Session",
+        series_tickers: Optional[List[str]] = None,
+        **env_kwargs: Any,
+    ) -> "KalshiEventEnv":
+        """Convenience constructor: load data from DB and create env."""
+        df = load_kalshi_settled_markets(session, series_tickers=series_tickers)
+        if df is None or df.empty:
+            raise DataUnavailableError(
+                "No settled Kalshi markets in DB. Run: python main.py kalshi backfill-settled"
+            )
+        return cls(settled_markets=df, **env_kwargs)
+
+    # ------------------------------------------------------------------
+    # gym interface
+    # ------------------------------------------------------------------
+
+    def reset(self, seed=None, options=None):
+        super().reset(seed=seed)
+        self.current_event_idx = int(self.np_random.integers(0, len(self.events)))
+        self.current_contract_idx = 0
+        self.capital = self.initial_capital
+        self.positions = []
+        self.episode_positions = 0
+        self.total_pnl = 0.0
+        self.trade_count = 0
+        self.win_count = 0
+        self.episode_trades = []
+        return self._get_obs(), self._get_info()
+
+    def step(self, action: int):
+        event = self.events[self.current_event_idx]
+        contract = event.contracts[self.current_contract_idx]
+        reward = 0.0
+
+        if action in (self.ACTION_BUY_YES, self.ACTION_BUY_NO):
+            side = "yes" if action == self.ACTION_BUY_YES else "no"
+            reward = self._execute_trade(contract, side)
+
+        self.current_contract_idx += 1
+        terminated = self.current_contract_idx >= len(event.contracts)
+        truncated = False
+
+        if terminated:
+            reward += self._settle_all(event)
+
+        obs = self._get_obs() if not terminated else np.zeros(self.obs_dim, dtype=np.float32)
+        return obs, reward, terminated, truncated, self._get_info()
+
+    # ------------------------------------------------------------------
+    # trade execution & settlement
+    # ------------------------------------------------------------------
+
+    def _execute_trade(self, contract: Dict, side: str) -> float:
+        if self.episode_positions >= self.max_positions_per_event:
+            return -0.01
+        if side == "yes":
+            entry = contract.get("yes_ask", contract.get("last_price", 50))
+        else:
+            entry = 100 - contract.get("yes_bid", contract.get("last_price", 50))
+        cost = (entry / 100.0) * self.contracts_per_trade
+        fee = (self.transaction_cost_cents / 100.0) * self.contracts_per_trade
+        if cost + fee > self.capital or entry <= 0 or entry >= 100:
+            return -0.01
+        self.capital -= cost + fee
+        self.positions.append(_KalshiPos(
+            ticker=contract["ticker"], side=side, entry_price=entry,
+            contracts=self.contracts_per_trade, outcome=contract.get("outcome", 0),
+        ))
+        self.episode_positions += 1
+        self.trade_count += 1
+        return -fee / self.initial_capital
+
+    def _settle_all(self, event: _EventGroup) -> float:
+        total_reward = 0.0
+        for pos in self.positions:
+            won = (pos.side == "yes" and pos.outcome == 1) or (pos.side == "no" and pos.outcome == 0)
+            payout = 1.0 * pos.contracts if won else 0.0
+            cost = (pos.entry_price / 100.0) * pos.contracts
+            pnl = payout - cost
+            self.total_pnl += pnl
+            self.capital += payout
+            if pnl > 0:
+                self.win_count += 1
+            self.episode_trades.append(pnl)
+            total_reward += pnl / self.initial_capital
+        # Episode-level shaping
+        total_reward += (self.total_pnl / self.initial_capital) * 0.5
+        return total_reward
+
+    # ------------------------------------------------------------------
+    # observation
+    # ------------------------------------------------------------------
+
+    def _get_obs(self) -> np.ndarray:
+        obs = np.zeros(self.obs_dim, dtype=np.float32)
+        if self.current_event_idx >= len(self.events):
+            return obs
+        event = self.events[self.current_event_idx]
+        if self.current_contract_idx >= len(event.contracts):
+            return obs
+        c = event.contracts[self.current_contract_idx]
+
+        yes_price = c.get("last_price", 50)
+        yes_bid = c.get("yes_bid", 0)
+        yes_ask = c.get("yes_ask", 100)
+        spread = max(0, yes_ask - yes_bid)
+        volume = c.get("volume", 0)
+        oi = c.get("open_interest", 0)
+        liquidity = c.get("liquidity", 0)
+        prev_price = c.get("previous_price", yes_price)
+
+        exp_val = event.expiration_value or 0
+        floor_s = c.get("floor_strike")
+        cap_s = c.get("cap_strike")
+        st = c.get("strike_type", "")
+        if st == "greater" and floor_s:
+            strike_ref, strike_dir = floor_s, 1.0
+        elif st == "less" and cap_s:
+            strike_ref, strike_dir = cap_s, -1.0
+        elif floor_s and cap_s:
+            strike_ref, strike_dir = (floor_s + cap_s) / 2, 0.0
+        else:
+            strike_ref, strike_dir = exp_val, 0.0
+        strike_dist = (strike_ref - exp_val) / exp_val if exp_val else 0.0
+
+        ct = event.close_time
+        ot = event.open_time
+        try:
+            if hasattr(ct, "timestamp") and hasattr(ot, "timestamp"):
+                dur_h = max(0.1, (ct.timestamp() - ot.timestamp()) / 3600)
+            else:
+                dur_h = 1.0
+        except Exception:
+            dur_h = 1.0
+
+        obs[0] = np.clip(yes_price / 100.0, 0, 1)
+        obs[1] = np.clip(spread / 100.0, 0, 1)
+        obs[2] = np.clip(np.log1p(volume) / 10.0, 0, 1)
+        obs[3] = np.clip(np.log1p(oi) / 10.0, 0, 1)
+        obs[4] = np.clip(dur_h / 24.0, 0, 1)
+        obs[5] = np.clip(strike_dist, -2, 2)
+        obs[6] = strike_dir
+        obs[7] = np.clip(yes_price / 100.0, 0, 1)
+        obs[8] = np.clip((yes_price - prev_price) / 100.0, -1, 1)
+        obs[9] = np.clip(np.log1p(liquidity) / 15.0, 0, 1)
+        obs[10] = self.current_contract_idx / max(1, len(event.contracts) - 1)
+        obs[11] = np.clip(self.capital / self.initial_capital, 0, 2)
+        obs[12] = self.episode_positions / self.max_positions_per_event
+        total_exp = sum((p.entry_price / 100.0) * p.contracts for p in self.positions)
+        obs[13] = np.clip(total_exp / self.initial_capital, 0, 1)
+        if self.positions:
+            avg_edge = np.mean([1.0 - p.entry_price / 100.0 for p in self.positions])
+        else:
+            avg_edge = 0.0
+        obs[14] = np.clip(avg_edge, -1, 1)
+        obs[15] = self.win_count / max(1, self.trade_count)
+        obs[16] = np.clip(self.total_pnl / self.initial_capital, -1, 1)
+        return obs
+
+    def _get_info(self) -> Dict:
+        return {
+            "capital": self.capital,
+            "total_pnl": self.total_pnl,
+            "positions": len(self.positions),
+            "trade_count": self.trade_count,
+            "win_count": self.win_count,
+            "win_rate": self.win_count / max(1, self.trade_count),
+            "episode_return": self.total_pnl / self.initial_capital,
+            "event_idx": self.current_event_idx,
+            "contract_idx": self.current_contract_idx,
+        }
+
+    def action_masks(self) -> np.ndarray:
+        """Return valid action mask for MaskablePPO."""
+        mask = np.ones(3, dtype=np.bool_)
+        can_buy = (
+            self.episode_positions < self.max_positions_per_event
+            and self.capital > 0.01
+        )
+        if not can_buy:
+            mask[self.ACTION_BUY_YES] = False
+            mask[self.ACTION_BUY_NO] = False
+        else:
+            event = self.events[self.current_event_idx]
+            if self.current_contract_idx < len(event.contracts):
+                c = event.contracts[self.current_contract_idx]
+                ya = c.get("yes_ask", 0)
+                yb = c.get("yes_bid", 0)
+                if ya <= 0 or ya >= 100:
+                    mask[self.ACTION_BUY_YES] = False
+                if yb <= 0 or yb >= 100:
+                    mask[self.ACTION_BUY_NO] = False
+                if (ya / 100.0) * self.contracts_per_trade > self.capital:
+                    mask[self.ACTION_BUY_YES] = False
+                if ((100 - yb) / 100.0) * self.contracts_per_trade > self.capital:
+                    mask[self.ACTION_BUY_NO] = False
+        return mask
+
+    def render(self, mode="human"):
+        event = self.events[self.current_event_idx]
+        print(f"Event: {event.event_ticker} | Contract {self.current_contract_idx}/{len(event.contracts)}")
+        print(f"Capital: ${self.capital:.2f} | PnL: ${self.total_pnl:.2f} | Positions: {len(self.positions)}")
+        if self.current_contract_idx < len(event.contracts):
+            c = event.contracts[self.current_contract_idx]
+            print(f"  {c.get('subtitle', c.get('ticker', ''))}")
+            print(f"  YES: bid={c.get('yes_bid',0)} ask={c.get('yes_ask',0)} | Result: {c.get('result','?')}")
+
+
+# ---------------------------------------------------------------------------
+# DB loaders
+# ---------------------------------------------------------------------------
+
+def load_kalshi_settled_markets(
+    session: "Session",
+    series_tickers: Optional[List[str]] = None,
+) -> pd.DataFrame:
+    """Load settled market snapshots from ``kalshi_settled_markets`` table."""
+    from ..data.database import KalshiSettledMarket
+
+    q = session.query(KalshiSettledMarket)
+    if series_tickers:
+        q = q.filter(KalshiSettledMarket.series_ticker.in_(series_tickers))
+    rows = q.all()
+    if not rows:
+        return pd.DataFrame()
+    records = []
+    for r in rows:
+        records.append({
+            "ticker": r.ticker, "event_ticker": r.event_ticker,
+            "series_ticker": r.series_ticker, "title": r.title,
+            "subtitle": r.subtitle, "strike_type": r.strike_type,
+            "floor_strike": r.floor_strike, "cap_strike": r.cap_strike,
+            "result": r.result, "outcome": r.outcome,
+            "expiration_value": r.expiration_value,
+            "settlement_value": r.settlement_value,
+            "last_price": r.last_price, "yes_bid": r.yes_bid,
+            "yes_ask": r.yes_ask, "no_bid": r.no_bid, "no_ask": r.no_ask,
+            "previous_price": r.previous_price, "volume": r.volume,
+            "open_interest": r.open_interest, "liquidity": r.liquidity,
+            "open_time": r.open_time, "close_time": r.close_time,
+            "settlement_ts": r.settlement_ts, "created_time": r.created_time,
+            "category": r.category,
+        })
+    return pd.DataFrame(records)

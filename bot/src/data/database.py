@@ -231,6 +231,58 @@ class KalshiMarketHistory(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
+class KalshiSettledMarket(Base):
+    """
+    Stores settled Kalshi market snapshots for RL training.
+
+    Each row is one resolved binary contract with its full context:
+    strike price, settlement value, result, volume, and pricing at various snapshots.
+    This table feeds the KalshiTradingEnv for training.
+    """
+    __tablename__ = "kalshi_settled_markets"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ticker = Column(String(255), nullable=False, unique=True, index=True)
+    event_ticker = Column(String(255), nullable=False, index=True)
+    series_ticker = Column(String(100), nullable=False, index=True)
+
+    # Market structure
+    title = Column(Text, nullable=True)
+    subtitle = Column(Text, nullable=True)
+    strike_type = Column(String(20), nullable=True)       # 'greater', 'less', 'between'
+    floor_strike = Column(Float, nullable=True)            # lower bound
+    cap_strike = Column(Float, nullable=True)              # upper bound
+
+    # Settlement data
+    result = Column(String(10), nullable=False)            # 'yes' or 'no'
+    outcome = Column(Integer, nullable=False)              # 1=YES, 0=NO
+    expiration_value = Column(Float, nullable=True)        # actual underlying price at settlement
+    settlement_value = Column(Float, nullable=True)        # 0 or 100
+
+    # Pricing
+    last_price = Column(Integer, default=0)                # cents (0-100)
+    yes_bid = Column(Integer, default=0)
+    yes_ask = Column(Integer, default=0)
+    no_bid = Column(Integer, default=0)
+    no_ask = Column(Integer, default=0)
+    previous_price = Column(Integer, default=0)
+
+    # Volume & liquidity
+    volume = Column(Integer, default=0)
+    open_interest = Column(Integer, default=0)
+    liquidity = Column(Float, default=0)
+
+    # Time
+    open_time = Column(DateTime, nullable=True)
+    close_time = Column(DateTime, nullable=True)
+    settlement_ts = Column(DateTime, nullable=True)
+    created_time = Column(DateTime, nullable=True)
+
+    # Metadata
+    category = Column(String(100), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 # Database engine and session factory
 def get_engine():
     """Create database engine from settings"""

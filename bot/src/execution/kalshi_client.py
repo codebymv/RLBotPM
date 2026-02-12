@@ -206,9 +206,10 @@ class KalshiExecutionClient:
     
     def _sign_request(self, method: str, path: str, timestamp_ms: int) -> str:
         """
-        Sign a request using RSA-SHA256.
+        Sign a request using RSA-PSS-SHA256.
         
         Kalshi signature format: timestamp_ms + method + path
+        Path must be the full URL path (e.g. /trade-api/v2/portfolio/balance).
         """
         if not self._private_key:
             return ""
@@ -218,7 +219,10 @@ class KalshiExecutionClient:
         try:
             signature = self._private_key.sign(
                 message.encode(),
-                padding.PKCS1v15(),
+                padding.PSS(
+                    mgf=padding.MGF1(hashes.SHA256()),
+                    salt_length=padding.PSS.MAX_LENGTH,
+                ),
                 hashes.SHA256(),
             )
             return base64.b64encode(signature).decode()
@@ -252,7 +256,10 @@ class KalshiExecutionClient:
             return {"error": "Authentication not configured"}
         
         url = f"{self.base_url}{endpoint}"
-        headers = self._get_auth_headers(method.upper(), endpoint)
+        # Kalshi requires the FULL URL path in the signature (including /trade-api/v2)
+        from urllib.parse import urlparse
+        full_path = urlparse(url).path
+        headers = self._get_auth_headers(method.upper(), full_path)
         
         try:
             resp = self._session.request(

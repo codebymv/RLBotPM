@@ -1111,6 +1111,45 @@ def backfill(tickers, limit, demo, dry_run):
     console.print(f"\n[bold]Total: {total} rows[/bold]")
 
 
+@kalshi.command("backfill-settled")
+@click.option('--max-per-series', default=5000, help='Max settled markets per series')
+@click.option('--series', default=None, help='Comma-separated series tickers (default: all hourly+daily)')
+@click.option('--demo/--live', default=True, help='Use demo or live API')
+def backfill_settled(max_per_series, series, demo):
+    """Backfill settled Kalshi markets for RL training on binary outcomes."""
+    from src.data.collectors.kalshi_backfill import backfill_all_series, backfill_settled_series
+    from src.data.sources.kalshi import KalshiAdapter
+    from src.data.database import init_db, DatabaseSession
+
+    console.print("\n[bold cyan]Kalshi settled-market backfill[/bold cyan]")
+    init_db()
+    adapter = KalshiAdapter(demo=demo)
+
+    with DatabaseSession() as session:
+        if series:
+            ticker_list = [t.strip().upper() for t in series.split(",") if t.strip()]
+            console.print(f"Series: {ticker_list}")
+            total = 0
+            for st in ticker_list:
+                try:
+                    n = backfill_settled_series(adapter, session, st, max_markets=max_per_series)
+                    console.print(f"  {st}: +{n} settled markets")
+                    total += n
+                except Exception as e:
+                    console.print(f"  [red]{st}: {e}[/red]")
+            session.commit()
+            console.print(f"\n[bold green]Total: {total} settled markets ingested[/bold green]")
+        else:
+            console.print("Backfilling all hourly + daily series...")
+            results = backfill_all_series(adapter, session, max_per_series=max_per_series)
+            session.commit()
+            total = sum(results.values())
+            console.print(f"\n[bold green]Total: {total} settled markets ingested[/bold green]")
+            for s, n in results.items():
+                if n > 0:
+                    console.print(f"  {s}: {n}")
+
+
 @cli.command()
 def test_env():
     """Test the Gym environment setup"""
