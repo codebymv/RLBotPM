@@ -859,11 +859,14 @@ class KalshiEventEnv(gym.Env):
         floor_s = c.get("floor_strike")
         cap_s = c.get("cap_strike")
         st = c.get("strike_type", "")
-        if st == "greater" and floor_s:
+        # Guard against NaN strike values
+        floor_ok = floor_s is not None and np.isfinite(floor_s)
+        cap_ok = cap_s is not None and np.isfinite(cap_s)
+        if st == "greater" and floor_ok:
             strike_ref, strike_dir = floor_s, 1.0
-        elif st == "less" and cap_s:
+        elif st == "less" and cap_ok:
             strike_ref, strike_dir = cap_s, -1.0
-        elif floor_s and cap_s:
+        elif floor_ok and cap_ok:
             strike_ref, strike_dir = (floor_s + cap_s) / 2, 0.0
         else:
             strike_ref, strike_dir = exp_val, 0.0
@@ -901,6 +904,8 @@ class KalshiEventEnv(gym.Env):
         obs[14] = np.clip(avg_edge, -1, 1)
         obs[15] = self.win_count / max(1, self.trade_count)
         obs[16] = np.clip(self.total_pnl / self.initial_capital, -1, 1)
+        # Final NaN/Inf guard
+        np.nan_to_num(obs, copy=False, nan=0.0, posinf=1.0, neginf=-1.0)
         return obs
 
     def _get_info(self) -> Dict:

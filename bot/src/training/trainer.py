@@ -113,6 +113,9 @@ class Trainer:
             if arbitrage_enabled:
                 logger.info("Arbitrage mode enabled - using multi-exchange data")
 
+            # Determine strategy
+            strategy = (env_config.get("strategy") or "crypto").strip().lower()
+
             # --- Kalshi strategy: completely different data & env path ---
             if strategy == "kalshi":
                 session = get_db_session()
