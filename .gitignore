@@ -48,6 +48,8 @@ logs/
 bot/models/*.pt
 bot/models/*.pth
 bot/models/*.pkl
+bot/models/*.zip
+bot/bot/models/
 !bot/models/.gitkeep
 
 # Data
