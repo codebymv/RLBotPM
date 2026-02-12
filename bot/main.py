@@ -1150,6 +1150,60 @@ def backfill_settled(max_per_series, series, demo):
                     console.print(f"  {s}: {n}")
 
 
+@kalshi.command("scan")
+@click.option('--model', required=True, help='Path to trained model (e.g., models/best_model_run_162)')
+@click.option('--series', default='KXBTC,KXETH,KXSOLD', help='Comma-separated series to scan')
+@click.option('--limit', default=10, help='Max markets per series')
+@click.option('--confidence', default=0.7, type=float, help='Min confidence threshold (0-1)')
+@click.option('--demo/--live', default=False, help='Use demo or live API')
+def scan_markets(model, series, limit, confidence, demo):
+    """Scan live Kalshi markets with trained RL model and show trading signals."""
+    from src.inference.kalshi_inference import KalshiInference
+    from src.data.sources.kalshi import KalshiAdapter
+
+    console.print(f"\n[bold cyan]Kalshi Live Market Scanner[/bold cyan]")
+    console.print(f"Model: [yellow]{model}[/yellow]")
+    console.print(f"Confidence threshold: {confidence:.0%}\n")
+
+    adapter = KalshiAdapter(demo=demo)
+    inference = KalshiInference(
+        model_path=model,
+        adapter=adapter,
+        confidence_threshold=confidence,
+    )
+
+    series_list = [s.strip().upper() for s in series.split(",") if s.strip()]
+    all_signals = []
+
+    for st in series_list:
+        console.print(f"[cyan]Scanning {st}...[/cyan]")
+        signals = inference.scan_series(st, limit=limit)
+        all_signals.extend(signals)
+        if signals:
+            for sig in signals[:5]:  # top 5 per series
+                action_color = "green" if sig.action == "BUY_YES" else "red" if sig.action == "BUY_NO" else "yellow"
+                console.print(
+                    f"  [{action_color}]{sig.action:8s}[/{action_color}] "
+                    f"{sig.ticker:20s} @{sig.yes_price:3d} "
+                    f"(conf={sig.confidence:.0%})"
+                )
+        else:
+            console.print(f"  [dim]No high-confidence signals[/dim]")
+
+    if all_signals:
+        console.print(f"\n[bold green]Found {len(all_signals)} total signals[/bold green]")
+        # Show top 3 overall
+        console.print("\n[bold]Top recommendations:[/bold]")
+        for i, sig in enumerate(all_signals[:3], 1):
+            action_color = "green" if sig.action == "BUY_YES" else "red"
+            console.print(
+                f"{i}. [{action_color}]{sig.action}[/{action_color}] {sig.ticker} "
+                f"@ ${sig.yes_price/100:.2f} (confidence: {sig.confidence:.0%})"
+            )
+    else:
+        console.print("\n[yellow]No signals met confidence threshold[/yellow]")
+
+
 @cli.command()
 def test_env():
     """Test the Gym environment setup"""
