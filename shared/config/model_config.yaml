@@ -7,7 +7,7 @@ ppo:
   # Learning rate - how fast the agent learns
   # 1e-4 for new feature sets (arbitrage mode)
   # 3e-4 is standard for training from scratch
-  learning_rate: 0.0001
+  learning_rate: 0.0003
   
   # Number of steps to collect per environment before updating
   # Higher = more stable but slower learning
@@ -15,7 +15,7 @@ ppo:
   
   # Mini-batch size for training
   # Must be a divisor of (n_steps * n_envs)
-  batch_size: 256
+  batch_size: 512
   
   # Number of training epochs per rollout
   # Higher = more learning per data collected, but risk overfitting
@@ -23,7 +23,7 @@ ppo:
   
   # Discount factor (gamma)
   # How much to value future rewards (0.99 = very forward-looking)
-  gamma: 0.99
+  gamma: 0.95
   
   # GAE lambda for advantage estimation
   # Balances bias vs variance in advantage estimates
@@ -35,7 +35,7 @@ ppo:
   
   # Entropy coefficient
   # Encourages exploration (higher = more random actions)
-  ent_coef: 0.03
+  ent_coef: 0.01
   
   # Value function coefficient
   # Weight of value loss in total loss
@@ -78,23 +78,36 @@ training:
   # Verbosity (0=none, 1=info, 2=debug)
   verbose: 1
 
+  # Reward normalization (stabilizes training)
+  normalize_rewards: true
+
   # Early stopping configuration
   early_stopping:
     eval_episodes: 50
     patience: 15
     min_delta: 0.0
-    metric: "profit_factor"
+    metric: "golden_score"
+    min_profit_factor: 1.2
+    min_total_return: 0.001
+    max_drawdown: 0.20
+    max_fees_pct_of_gross_pnl: 0.30
 
 # Environment configuration
 environment:
   # Strategy env: crypto (default), momentum, mean_reversion, breakout
   strategy: "crypto"
+  # Optional reward profile from shared/config/reward_config.yaml profiles
+  reward_profile: "lean"
   
   # Initial capital for backtesting
   initial_capital: 1000.0
   
   # Maximum steps per episode
   max_steps: 500
+  
+  # Frame stacking (provide history to agent)
+  # Stacks last N observations (e.g. 4) into a single observation vector
+  frame_stack: 4
   
   # Transaction cost percentage (0.05% = maker fee level)
   transaction_cost: 0.0005
@@ -136,3 +149,17 @@ curriculum:
         min_volume: 1000
         min_liquidity: 500
         categories: null  # All categories
+
+# Specialist routing (optional) for evaluation/inference
+specialist_router:
+  enabled: true
+  model_paths:
+    momentum: "bot/models/best_model_run_168"
+    mean_reversion: "bot/models/best_model_run_169"
+    breakout: "bot/models/best_model_run_167"
+  router:
+    momentum_abs_return_24h: 0.025
+    breakout_abs_return_1h: 0.008
+    low_volatility_threshold: 0.012
+    momentum_ratio_threshold: 1.0
+    trend_strength_threshold: 0.25

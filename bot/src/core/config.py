@@ -5,10 +5,15 @@ This module manages all configuration from environment variables and YAML files.
 Settings are validated at startup to catch configuration errors early.
 """
 
+from pathlib import Path as _Path
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field, field_validator
 from typing import Optional
 import os
+
+# Anchor to the bot/ directory (2 levels up from this file: core → src → bot)
+_BOT_DIR = _Path(__file__).resolve().parents[2]
 
 
 class Settings(BaseSettings):
@@ -27,7 +32,10 @@ class Settings(BaseSettings):
     DATABASE_URL: str = Field(..., description="PostgreSQL connection string")
     
     # Bot Configuration
-    MODEL_SAVE_PATH: str = Field(default="./models", description="Directory to save model checkpoints")
+    MODEL_SAVE_PATH: str = Field(
+        default=str(_BOT_DIR / "models"),
+        description="Directory to save model checkpoints",
+    )
     TRAINING_MODE: bool = Field(default=True, description="Relax safety enforcement during training")
     DATA_SOURCE: str = Field(default="coinbase", description="Primary data source adapter")
     DATA_SOURCES: Optional[str] = Field(default=None, description="Comma-separated list of exchanges for arbitrage (e.g., 'coinbase,kraken')")

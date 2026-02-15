@@ -97,7 +97,7 @@ class KalshiExecutionClient:
     """
     
     PROD_URL = "https://api.elections.kalshi.com/trade-api/v2"
-    DEMO_URL = "https://demo-api.elections.kalshi.co/trade-api/v2"
+    DEMO_URL = "https://demo-api.kalshi.co/trade-api/v2"
     
     def __init__(self, demo: bool = True):
         """
@@ -106,7 +106,9 @@ class KalshiExecutionClient:
         Args:
             demo: If True, use demo API (paper trading)
         """
-        self.base_url = self.DEMO_URL if demo else self.PROD_URL
+        prod_url = os.getenv("KALSHI_API_BASE_URL", self.PROD_URL).rstrip("/")
+        demo_url = os.getenv("KALSHI_DEMO_API_BASE_URL", self.DEMO_URL).rstrip("/")
+        self.base_url = demo_url if demo else prod_url
         self.demo = demo
         
         # Load credentials
@@ -141,7 +143,7 @@ class KalshiExecutionClient:
         self._risk_config = self._load_risk_config()
         self._kalshi_config = self._load_kalshi_config()
         
-        logger.info(f"KalshiExecutionClient initialized (demo={demo})")
+        logger.info(f"KalshiExecutionClient initialized (demo={demo}, base_url={self.base_url})")
     
     def _load_risk_config(self) -> Dict:
         cfg_path = Path(__file__).parents[2] / "shared" / "config" / "risk_config.yaml"
@@ -699,7 +701,18 @@ class KalshiExecutionClient:
     def healthcheck(self) -> Dict:
         """Check API connectivity and auth."""
         try:
-            available, total = self.get_balance()
+            resp = self._request("GET", "/portfolio/balance")
+            if "error" in resp:
+                return {
+                    "source": "kalshi",
+                    "ok": False,
+                    "demo": self.demo,
+                    "authenticated": self._private_key is not None,
+                    "error": resp.get("error", "unknown error"),
+                }
+
+            available = resp.get("balance", 0) / 100.0
+            total = resp.get("portfolio_value", resp.get("balance", 0)) / 100.0
             return {
                 "source": "kalshi",
                 "ok": True,

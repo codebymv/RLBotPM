@@ -81,8 +81,11 @@ class KalshiAdapter(ExchangeAdapter):
     name = "kalshi"
     
     # Production and demo endpoints
+    # Defaults are overrideable via env:
+    # - KALSHI_API_BASE_URL
+    # - KALSHI_DEMO_API_BASE_URL
     PROD_URL = "https://api.elections.kalshi.com/trade-api/v2"
-    DEMO_URL = "https://demo-api.elections.kalshi.co/trade-api/v2"
+    DEMO_URL = "https://demo-api.kalshi.co/trade-api/v2"
     
     # Market categories we focus on
     SUPPORTED_CATEGORIES = [
@@ -99,7 +102,9 @@ class KalshiAdapter(ExchangeAdapter):
         Args:
             demo: If True, use demo API (paper trading)
         """
-        self.base_url = self.DEMO_URL if demo else self.PROD_URL
+        prod_url = os.getenv("KALSHI_API_BASE_URL", self.PROD_URL).rstrip("/")
+        demo_url = os.getenv("KALSHI_DEMO_API_BASE_URL", self.DEMO_URL).rstrip("/")
+        self.base_url = demo_url if demo else prod_url
         self.demo = demo
         
         # Load API credentials
@@ -127,7 +132,7 @@ class KalshiAdapter(ExchangeAdapter):
         
         self._session = requests.Session()
         
-        logger.info(f"KalshiAdapter initialized (demo={demo})")
+        logger.info(f"KalshiAdapter initialized (demo={demo}, base_url={self.base_url})")
     
     def _sign_request(self, method: str, path: str, timestamp_ms: int) -> str:
         """

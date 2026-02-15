@@ -155,6 +155,7 @@ class Trainer:
                     transaction_cost=transaction_cost,
                     sequence_length=env_sequence_length,
                     arbitrage_enabled=arbitrage_enabled,
+                    reward_config_path=env_config.get("reward_config_path"),
                 )
                 if strategy == "momentum":
                     base_env = MomentumTradingEnv(**env_kwargs)
@@ -175,7 +176,9 @@ class Trainer:
             # Create agent
             ppo_config = self.config.get("ppo", {})
             training_config = self.config.get("training", {})
-            log_root = training_config.get("tensorboard_log", "./logs/tensorboard")
+            bot_dir = Path(__file__).resolve().parents[2]
+            default_log = str(bot_dir / "logs" / "tensorboard")
+            log_root = training_config.get("tensorboard_log", default_log)
             tensorboard_log = str(Path(log_root) / f"run_{self.training_run.id}")
 
             policy_kwargs = None
@@ -204,7 +207,8 @@ class Trainer:
                 use_gpu=training_config.get("use_gpu", True),
                 tensorboard_log=tensorboard_log,
                 verbose=training_config.get("verbose", 1),
-                checkpoint_path=self._checkpoint_path
+                checkpoint_path=self._checkpoint_path,
+                normalize_rewards=training_config.get("normalize_rewards", False),
             )
             
             # Create callbacks
@@ -227,7 +231,7 @@ class Trainer:
             )
             
             # Save final model
-            final_model_path = f"models/final_run_{self.training_run.id}"
+            final_model_path = str(Path(self.settings.MODEL_SAVE_PATH) / f"final_run_{self.training_run.id}")
             agent.save(final_model_path)
             
             # Update training run
@@ -280,6 +284,10 @@ class Trainer:
         patience = int(early_stopping_config.get("patience", 3))
         min_delta = float(early_stopping_config.get("min_delta", 0.0))
         metric_name = str(early_stopping_config.get("metric", "sharpe_ratio"))
+        min_profit_factor = float(early_stopping_config.get("min_profit_factor", 0.0))
+        min_total_return = float(early_stopping_config.get("min_total_return", -1.0))
+        max_drawdown = float(early_stopping_config.get("max_drawdown", 1.0))
+        max_fees_pct = float(early_stopping_config.get("max_fees_pct_of_gross_pnl", 1.0))
         eval_sequence_length = sequence_length if policy_type == "MlpPolicy" else 1
 
         callbacks = [
@@ -307,6 +315,10 @@ class Trainer:
                 save_path=self.settings.MODEL_SAVE_PATH,
                 arbitrage_enabled=arbitrage_enabled,
                 strategy=strategy,
+                min_profit_factor=min_profit_factor,
+                min_total_return=min_total_return,
+                max_drawdown=max_drawdown,
+                max_fees_pct_of_gross_pnl=max_fees_pct,
             ),
         ]
         

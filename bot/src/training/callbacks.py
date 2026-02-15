@@ -13,7 +13,7 @@ These integrate with Stable-Baselines3's callback system.
 from stable_baselines3.common.callbacks import BaseCallback
 from pathlib import Path
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Dict
 import numpy as np
 
 from ..data import Episode, Trade, ModelCheckpoint, get_db_session
@@ -330,6 +330,10 @@ class EarlyStoppingCallback(BaseCallback):
         verbose: int = 0,
         arbitrage_enabled: bool = False,
         strategy: str = "crypto",
+        min_profit_factor: float = 0.0,
+        min_total_return: float = -1.0,
+        max_drawdown: float = 1.0,
+        max_fees_pct_of_gross_pnl: float = 1.0,
     ):
         super().__init__(verbose)
         self.training_run_id = training_run_id
@@ -344,9 +348,46 @@ class EarlyStoppingCallback(BaseCallback):
         self.save_path.mkdir(parents=True, exist_ok=True)
         self.arbitrage_enabled = arbitrage_enabled
         self.strategy = strategy
+        self.min_profit_factor = float(min_profit_factor)
+        self.min_total_return = float(min_total_return)
+        self.max_drawdown = float(max_drawdown)
+        self.max_fees_pct_of_gross_pnl = float(max_fees_pct_of_gross_pnl)
 
         self.best_metric = -np.inf
         self.patience_counter = 0
+
+    def _compute_metric(self, metrics: Dict[str, float]) -> float:
+        """
+        Compute objective metric used by early stopping.
+        Supports direct metric lookup and a composite golden score.
+        """
+        if self.metric_name == "golden_score":
+            # Composite objective aligned with durable profitability:
+            # reward return/sharpe/profit_factor, penalize fees/drawdown.
+            sharpe = float(metrics.get("sharpe_ratio", 0.0))
+            total_return = float(metrics.get("total_return", 0.0))
+            profit_factor = float(metrics.get("profit_factor", 0.0))
+            fees_pct = float(metrics.get("fees_pct_of_gross_pnl", 1.0))
+            drawdown = float(metrics.get("max_drawdown", 1.0))
+            in_position = float(metrics.get("in_position_ratio", 0.0))
+            return (
+                0.35 * sharpe
+                + 45.0 * total_return
+                + 0.60 * profit_factor
+                - 10.0 * fees_pct
+                - 6.0 * drawdown
+                + 1.5 * in_position
+            )
+        return float(metrics.get(self.metric_name, -np.inf))
+
+    def _passes_hard_gates(self, metrics: Dict[str, float]) -> bool:
+        """Hard constraints to avoid selecting brittle checkpoints."""
+        return (
+            float(metrics.get("profit_factor", 0.0)) >= self.min_profit_factor
+            and float(metrics.get("total_return", -1.0)) >= self.min_total_return
+            and float(metrics.get("max_drawdown", 1.0)) <= self.max_drawdown
+            and float(metrics.get("fees_pct_of_gross_pnl", 1.0)) <= self.max_fees_pct_of_gross_pnl
+        )
 
     def _on_step(self) -> bool:
         if self.n_calls % self.eval_frequency != 0:
@@ -362,7 +403,7 @@ class EarlyStoppingCallback(BaseCallback):
                 policy_type=self.policy_type,
             )
             metrics = evaluator.evaluate(num_episodes=self.eval_episodes, deterministic=True)
-            current_metric = float(metrics.get(self.metric_name, -np.inf))
+            current_metric = self._compute_metric(metrics)
         else:
             evaluator = Evaluator(
                 model_path=str(temp_path),
@@ -371,7 +412,18 @@ class EarlyStoppingCallback(BaseCallback):
                 arbitrage_enabled=self.arbitrage_enabled,
             )
             metrics = evaluator.evaluate(num_episodes=self.eval_episodes, deterministic=True)
-            current_metric = float(metrics.get(self.metric_name, -np.inf))
+            current_metric = self._compute_metric(metrics)
+
+        if not self._passes_hard_gates(metrics):
+            logger.info(
+                "Early stopping gate reject at step %s: return=%.4f pf=%.4f drawdown=%.4f fees=%.4f",
+                self.n_calls,
+                float(metrics.get("total_return", 0.0)),
+                float(metrics.get("profit_factor", 0.0)),
+                float(metrics.get("max_drawdown", 0.0)),
+                float(metrics.get("fees_pct_of_gross_pnl", 0.0)),
+            )
+            current_metric = -np.inf
 
         if current_metric > self.best_metric + self.min_delta:
             self.best_metric = current_metric

@@ -68,7 +68,7 @@ class BacktestReport:
     def summary(self) -> str:
         lines = [
             "=" * 60,
-            "CRYPTO EDGE DETECTOR — HISTORICAL BACKTEST",
+            "CRYPTO EDGE DETECTOR - HISTORICAL BACKTEST",
             "=" * 60,
             f"Markets scanned        : {self.total_markets_scanned:,}",
             f"Markets with edge      : {self.markets_with_edge:,}",
@@ -124,7 +124,7 @@ def _simulate_spot(expiration_value: float, vol_annual: float, hours_before: flo
         return expiration_value
     t = hours_before / (365.0 * 24.0)
     sigma = vol_annual * math.sqrt(t)
-    # Small perturbation – roughly 0.3-0.5% for 1h with 60% annual vol
+    # Small perturbation - roughly 0.3-0.5% for 1h with 60% annual vol
     noise = np.random.normal(0, sigma)
     return expiration_value * math.exp(noise)
 
@@ -170,7 +170,7 @@ def run_backtest(
         crypto = crypto[crypto["series_ticker"].isin(series_filter)]
     logger.info(f"Crypto markets: {len(crypto)} across {crypto['series_ticker'].nunique()} series")
 
-    # Vol lookup — calibrated from historical settlement data
+    # Vol lookup - calibrated from historical settlement data
     vol_map = {
         "KXBTC": 0.56, "KXBTCD": 0.56,
         "KXETH": 0.70, "KXETHD": 0.70,
@@ -190,7 +190,7 @@ def run_backtest(
     report = BacktestReport()
     all_trades: List[TradeRecord] = []
 
-    # Create detector — we'll monkey-patch spot prices per event
+    # Create detector - we'll monkey-patch spot prices per event
     detector = StatisticalEdgeDetector(
         min_edge=min_edge,
         min_liquidity=0,   # Don't filter liquidity in backtest
@@ -313,7 +313,7 @@ def run_backtest(
     report.trades = all_trades
     report.trades_taken = len(all_trades)
     if not all_trades:
-        logger.warning("No trades generated — try lowering min_edge or min_tradeable_price")
+        logger.warning("No trades generated - try lowering min_edge or min_tradeable_price")
         return report
 
     pnls = np.array([t.pnl for t in all_trades])

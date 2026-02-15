@@ -2,6 +2,7 @@
 
 from .ppo_agent import PPOAgent, create_parallel_env
 from .ensemble_agent import EnsembleAgent
+from .specialist_manager import SpecialistManager
 from .baseline_agents import (
     RandomAgent,
     BuyAndHoldAgent,
@@ -23,4 +24,5 @@ __all__ = [
     "get_baseline_agents",
     "compare_agents",
     "EnsembleAgent",
+    "SpecialistManager",
 ]

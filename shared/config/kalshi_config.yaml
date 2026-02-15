@@ -6,9 +6,9 @@ api:
   demo_mode: true  # Set to false for live trading
   
   # Endpoints
-  # Note: Kalshi endpoints have migrated; the adapter uses the elections host.
+  # Current endpoints (override in env with KALSHI_API_BASE_URL / KALSHI_DEMO_API_BASE_URL)
   production_url: "https://api.elections.kalshi.com/trade-api/v2"
-  demo_url: "https://demo-api.elections.kalshi.co/trade-api/v2"
+  demo_url: "https://demo-api.kalshi.co/trade-api/v2"
   
   # Request settings
   timeout_seconds: 15

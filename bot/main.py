@@ -9,6 +9,7 @@ import asyncio
 import click
 import numpy as np
 import json
+import re
 from rich.console import Console
 from rich.panel import Panel
 from dotenv import load_dotenv
@@ -39,22 +40,38 @@ def cli():
 @click.option('--sequence-length', default=None, type=int, help='Sequence length for frame stacking')
 @click.option('--checkpoint-frequency', default=10000, type=int, help='Save checkpoints every N episodes')
 @click.option('--eval-frequency', default=10000, type=int, help='Evaluate every N episodes')
-def train(episodes, checkpoint, config, policy, sequence_length, checkpoint_frequency, eval_frequency):
+@click.option('--strategy', default=None, help='Trading strategy (crypto, momentum, mean_reversion, etc)')
+@click.option('--reward-config', default=None, help='Path to custom reward config')
+def train(episodes, checkpoint, config, policy, sequence_length, checkpoint_frequency, eval_frequency, strategy, reward_config):
     """Train the RL agent on historical data"""
     console.print(f"\n[bold green]Starting training:[/bold green] {episodes} episodes")
     
     if checkpoint:
         console.print(f"[yellow]Resuming from checkpoint:[/yellow] {checkpoint}")
+    if reward_config:
+        console.print(f"[cyan]Using custom reward config:[/cyan] {reward_config}")
     
     # Import here to avoid loading heavy dependencies on CLI help
     from src.training.trainer import Trainer
     
     try:
         overrides = {}
+        
+        # Strategy-specific overrides
+        env_overrides = {}
+        if strategy:
+            env_overrides["strategy"] = strategy
+        if reward_config:
+            env_overrides["reward_config_path"] = reward_config
+        
+        if env_overrides:
+            overrides["environment"] = env_overrides
+
         if policy:
             overrides["ppo"] = {"policy_type": policy}
         if sequence_length:
             overrides["recurrent"] = {"sequence_length": sequence_length}
+        
         trainer = Trainer(config_path=config, overrides=overrides or None)
         
         if checkpoint:
@@ -71,7 +88,7 @@ def train(episodes, checkpoint, config, policy, sequence_length, checkpoint_freq
     except KeyboardInterrupt:
         console.print("\n[yellow]Training interrupted by user[/yellow]")
     except Exception as e:
-        console.print(f"\n[bold red]Error:[/bold red] {str(e)}")
+        console.print(f"\n[bold red]Training failed:[/bold red] {e}")
         raise
 
 
@@ -82,7 +99,8 @@ def train(episodes, checkpoint, config, policy, sequence_length, checkpoint_freq
 @click.option('--policy', default="MlpPolicy", help='Policy type (MlpPolicy or MlpLstmPolicy)')
 @click.option('--sequence-length', default=1, type=int, help='Sequence length for frame stacking')
 @click.option('--arbitrage', is_flag=True, help='Enable arbitrage mode (33-dim obs)')
-def evaluate(model, episodes, stochastic, policy, sequence_length, arbitrage):
+@click.option('--specialist-router', is_flag=True, help='Route actions through regime specialists from model_config.yaml')
+def evaluate(model, episodes, stochastic, policy, sequence_length, arbitrage, specialist_router):
     """Evaluate a trained model on test data"""
     console.print(f"\n[bold cyan]Evaluating model:[/bold cyan] {model}")
     
@@ -93,14 +111,50 @@ def evaluate(model, episodes, stochastic, policy, sequence_length, arbitrage):
     settings = get_settings()
     use_arbitrage = arbitrage or settings.ARBITRAGE_ENABLED
     
-    try:
+    def _run_eval(seq_len: int):
         evaluator = Evaluator(
-            model_path=model, 
-            policy_type=policy, 
-            sequence_length=sequence_length,
-            arbitrage_enabled=use_arbitrage
+            model_path=model,
+            policy_type=policy,
+            sequence_length=seq_len,
+            arbitrage_enabled=use_arbitrage,
+            use_specialist_router=specialist_router,
         )
-        results = evaluator.evaluate(num_episodes=episodes, deterministic=not stochastic)
+        return evaluator.evaluate(num_episodes=episodes, deterministic=not stochastic)
+
+    try:
+        results = _run_eval(sequence_length)
+    except ValueError as e:
+        # Friendly recovery when env/model observation shapes mismatch
+        # (commonly caused by wrong frame-stacking sequence length).
+        error_msg = str(e)
+        if "Observation spaces do not match" in error_msg and policy == "MlpPolicy":
+            retry_sequence = None
+            if sequence_length != 1:
+                retry_sequence = 1
+            else:
+                dims = [int(x) for x in re.findall(r"\((\d+),\)", error_msg)]
+                if len(dims) >= 2:
+                    model_dim, env_dim = dims[0], dims[1]
+                    if model_dim > env_dim and model_dim % env_dim == 0:
+                        retry_sequence = model_dim // env_dim
+
+            if retry_sequence and retry_sequence != sequence_length:
+                console.print(
+                    f"\n[yellow]Observation shape mismatch detected.[/yellow] "
+                    f"Retrying with --sequence-length {retry_sequence}..."
+                )
+                results = _run_eval(retry_sequence)
+            else:
+                console.print(
+                    "\n[bold red]Error:[/bold red] Model/environment observation spaces do not match."
+                )
+                console.print(
+                    "[dim]Try --sequence-length 1 (no frame stack) or the value used during training.[/dim]"
+                )
+                raise
+        else:
+            raise
+    try:
         
         # Display results
         console.print("\n[bold green]Evaluation Results:[/bold green]")
@@ -162,6 +216,12 @@ def evaluate(model, episodes, stochastic, policy, sequence_length, arbitrage):
             console.print("\n[bold]Auto exits:[/bold]")
             for reason, count in auto_exits.items():
                 console.print(f"  {reason}: {count}")
+
+        regime_counts = results.get("regime_counts", {})
+        if regime_counts:
+            console.print("\n[bold]Specialist regime routing:[/bold]")
+            for regime, count in regime_counts.items():
+                console.print(f"  {regime}: {count}")
         
     except Exception as e:
         console.print(f"\n[bold red]Error:[/bold red] {str(e)}")
@@ -387,11 +447,19 @@ def data_dedupe(dry_run):
 @click.option('--test-days', default=3, type=int, help='Test window in days')
 @click.option('--train-episodes', default=1000, type=int, help='Training episodes per fold')
 @click.option('--eval-episodes', default=20, type=int, help='Evaluation episodes per fold')
-def walk_forward(folds, train_days, test_days, train_episodes, eval_episodes):
-    """Run walk-forward training and evaluation"""
+@click.option('--reward-config', default=None, help='Path to custom reward config (e.g., shared/config/reward_config_lean.yaml)')
+@click.option('--config', default=None, help='Path to model config (e.g., shared/config/model_config.yaml)')
+def walk_forward(folds, train_days, test_days, train_episodes, eval_episodes, reward_config, config):
+    """Run walk-forward validation"""
     console.print("\n[bold cyan]Walk-Forward Evaluation[/bold cyan]")
+    console.print(f"  Folds: {folds}, Train: {train_days}d, Test: {test_days}d")
+    console.print(f"  Train episodes: {train_episodes}, Eval episodes: {eval_episodes}")
+    if reward_config:
+        console.print(f"  Reward Config: {reward_config}")
+    if config:
+        console.print(f"  Model Config: {config}")
 
-    from src.training.walk_forward import run_walk_forward
+    from src.training.walk_forward import run_walk_forward, WalkForwardResult
     from src.data.sources.base import DataUnavailableError
 
     try:
@@ -401,17 +469,28 @@ def walk_forward(folds, train_days, test_days, train_episodes, eval_episodes):
             test_days=test_days,
             train_episodes=train_episodes,
             eval_episodes=eval_episodes,
+            reward_config_path=reward_config,
         )
 
+        console.print(f"\n[bold green]Walk-Forward Results ({len(results)} folds):[/bold green]")
         for result in results:
             console.print(
-                f"Fold {result.fold}: "
-                f"return={result.total_return:.2%}, "
+                f"  Fold {result.fold}: "
+                f"return={result.total_return:+.2%}, "
                 f"sharpe={result.sharpe_ratio:.3f}, "
                 f"drawdown={result.max_drawdown:.2%}, "
                 f"win_rate={result.win_rate:.2%}, "
-                f"avg_trade_pnl=${result.avg_trade_pnl:.2f}"
+                f"avg_trade_pnl=${result.avg_trade_pnl:.2f}  "
+                f"({result.train_start.date()} -> {result.test_end.date()})"
             )
+
+        # Summary statistics
+        returns = [r.total_return for r in results]
+        sharpes = [r.sharpe_ratio for r in results]
+        console.print(f"\n[bold]Summary:[/bold]")
+        console.print(f"  Avg Return: {np.mean(returns):+.2%} (std: {np.std(returns):.2%})")
+        console.print(f"  Avg Sharpe: {np.mean(sharpes):.3f}")
+        console.print(f"  Profitable Folds: {sum(1 for r in returns if r > 0)}/{len(returns)}")
 
     except DataUnavailableError as e:
         console.print(f"\n[bold red]Data Error:[/bold red] {str(e)}")
@@ -1225,7 +1304,9 @@ def hybrid_scan(model, series, limit, min_edge, rl_threshold, bankroll, demo):
     from src.data.sources.kalshi import KalshiAdapter
     
     console.print(f"\n[bold cyan]Kalshi Hybrid Scanner[/bold cyan]")
-    console.print(f"Statistical edge: ≥{min_edge:.1%} | RL threshold: ≥{rl_threshold:.0%} | Bankroll: ${bankroll:.2f}\n")
+    console.print(
+        f"Statistical edge: >={min_edge:.1%} | RL threshold: >={rl_threshold:.0%} | Bankroll: ${bankroll:.2f}\n"
+    )
     
     if model:
         console.print(f"[dim]Using RL model: {model}[/dim]\n")
@@ -1360,8 +1441,10 @@ def backtest_crypto(min_edge, min_price, max_price, hours_before, seed, series):
     """
     from src.strategies.backtest_crypto_edge import run_backtest
 
-    console.print(f"\n[bold cyan]Crypto Edge Detector — Historical Backtest[/bold cyan]")
-    console.print(f"edge≥{min_edge:.1%} | price {min_price}-{max_price}¢ | spot noise ~{hours_before:.1f}h\n")
+    console.print("\n[bold cyan]Crypto Edge Detector - Historical Backtest[/bold cyan]")
+    console.print(
+        f"edge>={min_edge:.1%} | price {min_price}-{max_price}c | spot noise ~{hours_before:.1f}h\n"
+    )
 
     try:
         series_filter = None
@@ -1465,8 +1548,8 @@ def paper_trade(interval, bankroll, min_edge, max_edge, min_price, max_price,
     from src.strategies.paper_trader import run_paper_trading
 
     console.print(f"\n[bold cyan]Kalshi Paper Trading[/bold cyan]")
-    console.print(f"Bankroll: ${bankroll:.2f} | Interval: {interval}s | Edge: {min_edge:.1%}–{max_edge:.1%}")
-    console.print(f"Price: {min_price}–{max_price}¢ | Max contracts: {max_contracts} | Demo: {demo}\n")
+    console.print(f"Bankroll: ${bankroll:.2f} | Interval: {interval}s | Edge: {min_edge:.1%}-{max_edge:.1%}")
+    console.print(f"Price: {min_price}-{max_price}c | Max contracts: {max_contracts} | Demo: {demo}\n")
 
     try:
         series_list = None

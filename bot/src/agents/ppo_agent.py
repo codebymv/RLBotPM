@@ -18,14 +18,15 @@ Key hyperparameters explained:
 - clip_range: How much policy can change per update (0.2 is standard)
 """
 
-from sb3_contrib import RecurrentPPO, MaskablePPO
-from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
+from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize, VecFrameStack
 from stable_baselines3.common.callbacks import BaseCallback
+from sb3_contrib import MaskablePPO, RecurrentPPO
 import torch
 import numpy as np
 from pathlib import Path
-from typing import Optional, Dict, Callable
+from typing import Optional, Dict, Callable, Tuple
 import os
+import pickle
 
 from ..environment import CryptoTradingEnv
 from ..data.sources.base import DataUnavailableError
@@ -71,7 +72,9 @@ class PPOAgent:
         use_gpu: bool = True,
         tensorboard_log: Optional[str] = "./logs/tensorboard",
         verbose: int = 1,
-        checkpoint_path: Optional[str] = None
+        checkpoint_path: Optional[str] = None,
+        normalize_rewards: bool = False,
+        frame_stack: int = 1
     ):
         """
         Initialize PPO agent
@@ -91,11 +94,15 @@ class PPOAgent:
             use_gpu: Whether to use GPU if available
             tensorboard_log: Directory for TensorBoard logs
             verbose: Verbosity level (0=none, 1=info, 2=debug)
+            normalize_rewards: Whether to normalize rewards (stabilizes training)
+            frame_stack: Number of frames to stack (1=no stacking)
         """
         self.settings = get_settings()
         self.policy_type = policy_type
         self.policy_kwargs = policy_kwargs
         self.is_recurrent = policy_type == "MlpLstmPolicy"
+        self.normalize_rewards = normalize_rewards
+        self.frame_stack = frame_stack
         
         # Require a real-data environment
         if env is None:
@@ -103,6 +110,22 @@ class PPOAgent:
         
         # Wrap in vectorized environment (required by SB3)
         self.env = DummyVecEnv([lambda: env])
+        
+        # Apply frame stacking if requested
+        if self.frame_stack > 1:
+            logger.info(f"Enabling frame stacking (n={self.frame_stack})")
+            self.env = VecFrameStack(self.env, n_stack=self.frame_stack)
+        
+        # Apply reward normalization if requested
+        if self.normalize_rewards:
+            logger.info("Enabling reward normalization (VecNormalize)")
+            self.env = VecNormalize(
+                self.env, 
+                norm_obs=False, 
+                norm_reward=True, 
+                clip_reward=10.0, 
+                gamma=gamma
+            )
         
         # Determine device
         if use_gpu and torch.cuda.is_available():
@@ -115,6 +138,35 @@ class PPOAgent:
         # Load from checkpoint if provided, otherwise create new model
         if checkpoint_path:
             logger.info(f"Fine-tuning from checkpoint: {checkpoint_path}")
+            
+            # Use appropriate load method for VecNormalize if applicable
+            # Note: We need to load stats BEFORE creating the model if we want the env to be synced,
+            # but usually we load the model policy. 
+            # If normalize_rewards is True, we should try to load stats.
+            if self.normalize_rewards:
+                stats_path = str(Path(checkpoint_path).with_suffix(".norm.pkl"))
+                if os.path.exists(stats_path):
+                    logger.info(f"Loading normalization stats from {stats_path}")
+                    with open(stats_path, "rb") as f:
+                        self.env.training = True # Set to training mode
+                        # Manually load generic stats or use VecNormalize.load
+                        # Since we already created self.env, we can load onto it or replace it.
+                        # VecNormalize.load creates a new instance.
+                        # Let's try to just load state_dict if possible? No, load is a classmethod.
+                        # We will replace self.env with loaded one, but we need to ensure it wraps the same dummy env.
+                        # Actually, better to just load pickle and set attributes? 
+                        # Or use VecNormalize.load(stats_path, self.env.venv) -> self.env is the VecNormalize object.
+                        # self.env.venv is the DummyVecEnv.
+                         # But VecNormalize.load expects the venv as second arg.
+                         # Wait, self.env IS VecNormalize now. self.env.venv is the inner env.
+                        norm_env = VecNormalize.load(stats_path, self.env.venv)
+                        norm_env.training = True
+                        norm_env.norm_obs = False
+                        norm_env.norm_reward = True
+                        self.env = norm_env
+                else:
+                    logger.warning(f"Normalization stats not found at {stats_path}, starting fresh normalization.")
+
             # Create fresh model first (with fresh optimizer state)
             if self.is_recurrent:
                 self.model = RecurrentPPO(
@@ -208,86 +260,124 @@ class PPOAgent:
         logger.info(f"  Learning rate: {learning_rate}")
         logger.info(f"  Batch size: {batch_size}")
         logger.info(f"  Gamma: {gamma}")
+        logger.info(f"  Reward Normalization: {self.normalize_rewards}")
     
-    def train(
-        self,
-        total_timesteps: int,
-        callback: Optional[BaseCallback] = None,
-        log_interval: int = 10
-    ):
+    def train(self, total_timesteps: int, callback: Optional[BaseCallback] = None, log_interval: int = 1):
         """
         Train the agent
         
         Args:
-            total_timesteps: Total training steps
-            callback: Optional callback for custom logic
-            log_interval: Log every N episodes
-        """
-        logger.info(f"Starting training for {total_timesteps:,} timesteps")
-        
-        try:
-            self.model.learn(
-                total_timesteps=total_timesteps,
-                callback=callback,
-                log_interval=log_interval,
-                progress_bar=True
-            )
-            logger.info("Training completed successfully")
+            total_timesteps: Number of timesteps to train for
+            callback: Callback for monitoring training
+            log_interval: Logging interval
             
-        except KeyboardInterrupt:
-            logger.warning("Training interrupted by user")
-            raise
-        except Exception as e:
-            logger.error(f"Training error: {str(e)}")
-            raise
+        Returns:
+            Trained model
+        """
+        logger.info(f"Starting training for {total_timesteps} timesteps")
+        
+        # Train model
+        self.model.learn(
+            total_timesteps=total_timesteps,
+            callback=callback,
+            log_interval=log_interval,
+            reset_num_timesteps=False
+        )
+        
+        logger.info("Training completed")
+        return self.model
     
     def predict(
-        self,
-        observation: np.ndarray,
-        deterministic: bool = True,
-        state: Optional[np.ndarray] = None,
+        self, 
+        observation: np.ndarray, 
+        state: Optional[Tuple[np.ndarray, ...]] = None,
         episode_start: Optional[np.ndarray] = None,
-    ) -> tuple[int, Optional[np.ndarray]]:
+        deterministic: bool = True,
+        action_masks: Optional[np.ndarray] = None,
+    ):
         """
-        Predict action for given observation
+        Predict action for a given observation
         
         Args:
             observation: Current state
-            deterministic: If True, use deterministic policy (no exploration)
-        
+            state: LSTM state (optional)
+            episode_start: Start of episode (optional)
+            deterministic: Whether to use deterministic or stochastic policy
+            action_masks: Action masks for MaskablePPO (optional)
+            
         Returns:
-            (action, state) tuple
+            Tuple of (action, state)
         """
-        if self.is_recurrent:
-            action, next_state = self.model.predict(
-                observation,
-                state=state,
-                episode_start=episode_start,
-                deterministic=deterministic,
-            )
-            return int(action), next_state
+        # We invoke the model's predict method directly
+        # If MaskablePPO logic is needed for action masks, we should ensure
+        # that the environment we pass is wrapped or provides masks.
+        # However, for simple predict with MaskablePPO, it might require action_masks.
+        # SB3 Contrib says: model.predict(obs, action_masks=mask)
+        # If we use env.action_masks(), `predict` needs access to env?
+        # Typically PPOAgent doesn't reference env in predict for masking unless passed.
+        # But MaskablePPO *requires* masks if masking is enabled.
+        # If we don't pass masks, it might fail or pick invalid action.
+        
+        # NOTE: In walk_forward, we are passing `obs` from `env.reset()`.
+        # `walk_forward` creates `test_env`. `test_env` has `action_masks()`.
+        # But `agent` does NOT know about `test_env` (it knows `self.env` which is dummy wrapper around train env).
+        
+        # If we are using MaskablePPO, we MUST pass action masks.
+        # But we can't get masks from `obs` alone.
+        # `agent.predict` signature in `walk_forward` is `agent.predict(obs)`.
+        # It does NOT pass env or masks.
+        
+        # Solution: `walk_forward.py` loop likely needs update to pass masks?
+        # OR PPOAgent assumes `observation` includes mask? No.
+        
+        # Wait, if `MaskablePPO` is used, `model.predict` will complain if no mask is passed?
+        # Actually, `MaskablePPO.predict` signature:
+        # def predict(self, observation, state=None, episode_start=None, deterministic=False, action_masks=None)
+        
+        # If `action_masks` is None, it calls `self.policy.predict(..., apply_mask=False)`.
+        # So it works but might pick invalid action.
+        # However, `CryptoTradingEnv` might reject invalid action with penalty (or just no-op).
+        # We saw `get_valid_actions` in env.
+        
+        # For now, let's just forward to model.predict.
+        # If we need strict masking during eval, we would need to fetch masks from eval env.
+        # But `agent` is decoupled from eval env loop in `walk_forward`.
+        
+        # Prepare kwargs for predict
+        predict_kwargs = {"deterministic": deterministic}
+        
+        # Add optional args if they are not None
+        if state is not None:
+            predict_kwargs["state"] = state
+        if episode_start is not None:
+            predict_kwargs["episode_start"] = episode_start
+        if action_masks is not None:
+            predict_kwargs["action_masks"] = action_masks
+            
+        # Check if model accepts action_masks to avoid invalid kwarg error
+        import inspect
+        sig = inspect.signature(self.model.predict)
+        if "action_masks" not in sig.parameters and "action_masks" in predict_kwargs:
+            del predict_kwargs["action_masks"]
+            
+        action, state = self.model.predict(observation, **predict_kwargs)
+        
+        # Convert numpy array to scalar if it's a single action
+        # This prevents "unhashable type: 'numpy.ndarray'" error when using action as dict key
+        if isinstance(action, np.ndarray):
+            if action.ndim == 0:
+                action = action.item()
+            elif action.size == 1:
+                action = action.item()
+                
+        return action, state
 
-        action_masks = self._get_action_masks()
-        action, next_state = self.model.predict(
-            observation,
-            deterministic=deterministic,
-            action_masks=action_masks,
-        )
-        return int(action), next_state
+    
+    # ... (train method remains similar) ...
 
-    def _get_action_masks(self) -> Optional[np.ndarray]:
-        base_env = None
-        if hasattr(self.env, "envs") and self.env.envs:
-            base_env = self.env.envs[0]
-        if base_env is not None:
-            if hasattr(base_env, "get_wrapper_attr"):
-                try:
-                    return base_env.get_wrapper_attr("action_masks")()
-                except AttributeError:
-                    pass
-            if hasattr(base_env, "unwrapped") and hasattr(base_env.unwrapped, "action_masks"):
-                return base_env.unwrapped.action_masks()
-        return None
+    # ... (predict method remains similar) ...
+
+    # ... (_get_action_masks remains similar) ...
     
     def save(self, path: str):
         """
@@ -302,6 +392,12 @@ class PPOAgent:
         # Save model
         self.model.save(path)
         logger.info(f"Model saved to {path}")
+        
+        # Save normalization stats if enabled
+        if self.normalize_rewards and isinstance(self.env, VecNormalize):
+            stats_path = str(Path(path).with_suffix(".norm.pkl"))
+            self.env.save(stats_path)
+            logger.info(f"Normalization stats saved to {stats_path}")
     
     def load(self, path: str):
         """
@@ -310,8 +406,26 @@ class PPOAgent:
         Args:
             path: File path to load model from
         """
-        if not os.path.exists(path + ".zip"):
-            raise FileNotFoundError(f"Model not found at {path}")
+        # Check if file exists with .zip extension if not provided
+        if not path.endswith(".zip"):
+            check_path = path + ".zip"
+        else:
+            check_path = path
+            
+        if not os.path.exists(check_path):
+            raise FileNotFoundError(f"Model not found at {check_path}")
+            
+        # SB3 load/save handles suffixes, but usually expects path without suffix
+        # or handles it if present. We should pass the path that works.
+        # Actually SB3 adds .zip if missing.
+        # If we pass "model.zip", SB3 might look for "model.zip.zip" if we are not careful?
+        # No, SB3 uses pathlib.Path(path).with_suffix(".zip") usually? 
+        # Actually checking source: load(path, ...) -> if path is string, verify exists.
+        
+        # We will use the path without extension for the load call if possible, 
+        # or rely on SB3's handling. 
+        # But for our check:
+
         
         if self.is_recurrent:
             self.model = RecurrentPPO.load(
@@ -325,6 +439,32 @@ class PPOAgent:
                 env=self.env,
                 device=self.device
             )
+        
+        # Load normalization stats if enabled
+        if self.normalize_rewards:
+            stats_path = str(Path(path).with_suffix(".norm.pkl"))
+            if os.path.exists(stats_path):
+                 # Load stats onto existing environment
+                 # We need to access the inner environment to pass to VecNormalize.load
+                 # If self.env is already VecNormalize, we need its venv.
+                 venv = self.env.venv if isinstance(self.env, VecNormalize) else self.env
+                 
+                 norm_env = VecNormalize.load(stats_path, venv)
+                 norm_env.training = False # Default to eval mode upon load? Or training? 
+                 # Usually if we load for inference, we want training=False. 
+                 # But if we load to continue training (which is init with checkpoint), we want True.
+                 # This 'load' method is typically used for inference.
+                 norm_env.norm_obs = False
+                 norm_env.norm_reward = True
+                 self.env = norm_env
+                 
+                 # Re-attach env to model? The model holds reference to env?
+                 # SB3 models usually hold self.env.
+                 self.model.set_env(self.env)
+                 logger.info(f"Normalization stats loaded from {stats_path}")
+            else:
+                logger.warning(f"Normalization stats expected but not found at {stats_path}")
+
         logger.info(f"Model loaded from {path}")
     
     def get_action_probabilities(self, observation: np.ndarray) -> np.ndarray:

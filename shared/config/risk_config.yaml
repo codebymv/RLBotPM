@@ -90,6 +90,10 @@ transaction_costs:
   # Maker order fill probability (limit orders may not fill)
   # Higher = more fills, but less realistic
   maker_fill_probability: 0.85  # 85% of maker orders fill
+
+  # If maker misses, optionally fall back to taker to capture strong signals
+  maker_fallback_to_taker: true
+  maker_fallback_fill_probability: 0.80
   
   # Slippage model
   slippage_model: "volume_based"  # "fixed" or "volume_based"

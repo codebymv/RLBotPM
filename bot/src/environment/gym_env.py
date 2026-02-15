@@ -13,6 +13,7 @@ from gymnasium import spaces
 import numpy as np
 import pandas as pd
 from datetime import datetime
+import os
 from typing import Dict, Tuple, Optional, List
 from pathlib import Path
 import yaml
@@ -58,6 +59,7 @@ class CryptoTradingEnv(gym.Env):
         transaction_cost: Optional[float] = None,
         sequence_length: int = 1,
         arbitrage_enabled: bool = False,
+        reward_config_path: Optional[str] = None,
     ):
         """
         Initialize environment with a real OHLCV dataset.
@@ -70,8 +72,8 @@ class CryptoTradingEnv(gym.Env):
             initial_capital: Starting capital
             max_steps: Maximum steps per episode
             transaction_cost: Transaction cost percentage
-            arbitrage_enabled: If True, expect spread features in dataset and
-                extend observation space by 4 dimensions for cross-exchange analysis
+            arbitrage_enabled: If True, expect spread features in dataset
+            reward_config_path: Optional path to specific reward config YAML
         """
         super().__init__()
         
@@ -83,7 +85,7 @@ class CryptoTradingEnv(gym.Env):
         self.max_steps = max_steps
         self.interval = interval
         self.sequence_length = max(1, int(sequence_length))
-        self.reward_config = self._load_reward_config()
+        self.reward_config = self._load_reward_config(reward_config_path)
         self.risk_config = self._load_risk_config()
         self.min_hold_steps = int(self.reward_config.get("min_hold_steps", 5))
         self.max_hold_steps = int(self.reward_config.get("max_hold_steps", 100))
@@ -108,6 +110,10 @@ class CryptoTradingEnv(gym.Env):
         self.taker_fee_pct = float(tx_costs.get("taker_fee_pct", 0.001))  # 0.10%
         self.maker_fee_pct = float(tx_costs.get("maker_fee_pct", 0.0001))  # 0.01%
         self.maker_fill_probability = float(tx_costs.get("maker_fill_probability", 0.85))
+        self.maker_fallback_to_taker = bool(tx_costs.get("maker_fallback_to_taker", True))
+        self.maker_fallback_fill_probability = float(
+            tx_costs.get("maker_fallback_fill_probability", 0.8)
+        )
         self.taker_slippage_pct = float(tx_costs.get("taker_slippage_pct", 0.0005))
         
         # Legacy support - base_cost_pct maps to appropriate fee
@@ -398,8 +404,16 @@ class CryptoTradingEnv(gym.Env):
                 if close_result.get("executed"):
                     pnl = float(close_result.get("pnl", 0.0))
                     pnl_pct = pnl / self.initial_capital
-                    # Small penalty for not manually closing before end
-                    end_close_penalty = float(self.reward_config.get("auto_exit_penalty", 0.5)) * 0.25
+                    # Penalty for carrying positions into forced episode-end exits.
+                    # This is tunable so we can push the policy to realize gains/losses
+                    # intentionally during the episode instead of relying on forced closes.
+                    end_close_penalty_scale = float(
+                        self.reward_config.get("episode_end_close_penalty_scale", 0.5)
+                    )
+                    end_close_penalty = (
+                        float(self.reward_config.get("auto_exit_penalty", 0.5))
+                        * end_close_penalty_scale
+                    )
                     reward -= end_close_penalty
                     reward += pnl_pct  # PnL feedback
 
@@ -596,13 +610,6 @@ class CryptoTradingEnv(gym.Env):
             row = self._get_symbol_row(current_symbol)
             if row is None:
                 return valid
-
-            if self.entry_signal_threshold > 0:
-                trend_strength = abs(float(row["return_24h"]))
-                if trend_strength < self.entry_signal_threshold:
-                    return valid
-
-            if self.entry_volatility_cap > 0:
                 volatility = abs(float(row["volatility_24h"]))
                 if volatility > self.entry_volatility_cap:
                     return valid
@@ -635,7 +642,7 @@ class CryptoTradingEnv(gym.Env):
             mask[action] = True
         return mask
 
-    def _load_reward_config(self) -> Dict[str, float]:
+    def _load_reward_config(self, custom_path: Optional[str] = None) -> Dict[str, float]:
         default_config = {
             "base_penalty": 0.02,
             "portfolio_step_scale": 10.0,
@@ -702,24 +709,50 @@ class CryptoTradingEnv(gym.Env):
             "sharpe_bonus_scale": 2.0,
             "sharpe_bonus_cap": 2.0,
             "manual_exit_bonus": 0.1,
+            "episode_end_close_penalty_scale": 0.5,
         }
 
-        reward_config_path = Path(__file__).resolve().parents[3] / "shared" / "config" / "reward_config.yaml"
+        if custom_path:
+            reward_config_path = Path(custom_path).resolve()
+            logger.info(f"Loading custom reward config from: {reward_config_path}")
+        else:
+            reward_config_path = Path(__file__).resolve().parents[3] / "shared" / "config" / "reward_config.yaml"
+            
         config_path = Path(__file__).resolve().parents[3] / "shared" / "config" / "model_config.yaml"
         try:
+            model_config_data = {}
+            if config_path.exists():
+                with config_path.open("r", encoding="utf-8") as handle:
+                    model_config_data = yaml.safe_load(handle) or {}
             if reward_config_path.exists():
                 with reward_config_path.open("r", encoding="utf-8") as handle:
                     data = yaml.safe_load(handle) or {}
             else:
-                with config_path.open("r", encoding="utf-8") as handle:
-                    data = yaml.safe_load(handle) or {}
+                data = model_config_data
         except FileNotFoundError:
             logger.warning("Reward config not found at %s; using defaults.", reward_config_path)
             data = {}
+            model_config_data = {}
 
         reward_overrides = data.get("reward_weights") or data.get("environment", {}).get("reward_weights", {}) or {}
+        reward_profiles = data.get("profiles", {}) or {}
+        selected_profile = (
+            os.getenv("REWARD_PROFILE")
+            or model_config_data.get("environment", {}).get("reward_profile")
+            or ""
+        )
+        profile_overrides = {}
+        if selected_profile and selected_profile in reward_profiles:
+            profile_overrides = reward_profiles[selected_profile].get("reward_weights", {}) or {}
+            logger.info("Using reward profile: %s", selected_profile)
+        elif selected_profile:
+            logger.warning("Reward profile '%s' not found; using base reward config", selected_profile)
+
         merged = default_config.copy()
         for key, value in reward_overrides.items():
+            if value is not None:
+                merged[key] = value
+        for key, value in profile_overrides.items():
             if value is not None:
                 merged[key] = value
         merged["_version"] = str(data.get("version", "legacy"))
@@ -734,10 +767,13 @@ class CryptoTradingEnv(gym.Env):
             logger.warning("Risk config not found at %s; using defaults.", config_path)
             return {}
 
-    def _estimate_slippage_pct(self, order_value: float, row: pd.Series) -> float:
+    def _estimate_slippage_pct(
+        self, order_value: float, row: pd.Series, order_type: Optional[str] = None
+    ) -> float:
         """Estimate slippage based on order type and market conditions."""
+        effective_order_type = order_type or self.order_type
         # Maker orders have no slippage - you set the price
-        if self.order_type == "maker":
+        if effective_order_type == "maker":
             return 0.0
         
         # Taker orders have slippage based on model
@@ -751,10 +787,17 @@ class CryptoTradingEnv(gym.Env):
 
         return raw_slippage
 
-    def _get_trade_cost_pct(self, order_value: float, portfolio_value: float, row: pd.Series) -> float:
+    def _get_trade_cost_pct(
+        self,
+        order_value: float,
+        portfolio_value: float,
+        row: pd.Series,
+        order_type: Optional[str] = None,
+    ) -> float:
         """Calculate total trade cost including fees and slippage."""
+        effective_order_type = order_type or self.order_type
         # Use maker or taker fee based on order type
-        if self.order_type == "maker":
+        if effective_order_type == "maker":
             cost_pct = self.maker_fee_pct
         else:
             cost_pct = self.taker_fee_pct
@@ -766,7 +809,10 @@ class CryptoTradingEnv(gym.Env):
                 cost_pct += self.large_order_penalty_pct
 
         # Add slippage (0 for maker, calculated for taker)
-        slippage_pct = min(self.max_slippage_pct, self._estimate_slippage_pct(order_value, row))
+        slippage_pct = min(
+            self.max_slippage_pct,
+            self._estimate_slippage_pct(order_value, row, order_type=effective_order_type),
+        )
         cost_pct += slippage_pct
         return cost_pct
     
@@ -778,6 +824,26 @@ class CryptoTradingEnv(gym.Env):
         # Maker orders have fill probability
         import random
         return random.random() < self.maker_fill_probability
+
+    def _resolve_execution_order_type(self) -> Tuple[Optional[str], Optional[str]]:
+        """
+        Resolve execution order type for this step.
+        Returns (order_type, reason). order_type is None when not executable.
+        """
+        if self.order_type == "taker":
+            return "taker", None
+
+        # Maker-first behavior
+        if self._check_maker_fill():
+            return "maker", None
+
+        # Optional fallback from maker miss to taker to capture edge
+        if self.maker_fallback_to_taker:
+            import random
+            if random.random() < self.maker_fallback_fill_probability:
+                return "taker", "Maker miss -> taker fallback"
+
+        return None, "Maker order not filled"
 
     def _execute_buy_symbol(self, symbol: Optional[str], action: int) -> Dict:
         """Execute a buy order for the given symbol."""
@@ -842,16 +908,21 @@ class CryptoTradingEnv(gym.Env):
                 "pnl": 0.0, "cost": 0.0,
             }
 
-        # Check if maker order fills (probabilistic)
-        if not self._check_maker_fill():
+        execution_order_type, execution_reason = self._resolve_execution_order_type()
+        if execution_order_type is None:
             return {
                 "action": action, "action_name": action_name,
-                "executed": False, "reason": "Maker order not filled",
+                "executed": False, "reason": execution_reason or "Order not filled",
                 "pnl": 0.0, "cost": 0.0,
                 "order_type": "maker",
             }
 
-        cost_pct = self._get_trade_cost_pct(position_value, self._get_portfolio_value(), row)
+        cost_pct = self._get_trade_cost_pct(
+            position_value,
+            self._get_portfolio_value(),
+            row,
+            order_type=execution_order_type,
+        )
         cost = position_value * (1 + cost_pct)
         if cost > available_capital:
             return {
@@ -872,9 +943,11 @@ class CryptoTradingEnv(gym.Env):
 
         return {
             "action": action, "action_name": action_name,
-            "executed": True, "reason": "Buy executed",
+            "executed": True,
+            "reason": "Buy executed" if not execution_reason else f"Buy executed ({execution_reason})",
             "size": position_value, "price": current_price,
             "side": "buy", "cost": transaction_cost_paid, "pnl": 0.0,
+            "order_type": execution_order_type,
             "symbol": symbol,
         }
 
@@ -911,16 +984,21 @@ class CryptoTradingEnv(gym.Env):
                 "pnl": 0.0, "cost": 0.0,
             }
 
-        # Check if maker order fills (probabilistic)
-        if not self._check_maker_fill():
+        execution_order_type, execution_reason = self._resolve_execution_order_type()
+        if execution_order_type is None:
             return {
                 "action": self.ACTION_SELL, "action_name": action_name,
-                "executed": False, "reason": "Maker order not filled",
+                "executed": False, "reason": execution_reason or "Order not filled",
                 "pnl": 0.0, "cost": 0.0,
                 "order_type": "maker",
             }
 
-        cost_pct = self._get_trade_cost_pct(sell_size, self._get_portfolio_value(), row)
+        cost_pct = self._get_trade_cost_pct(
+            sell_size,
+            self._get_portfolio_value(),
+            row,
+            order_type=execution_order_type,
+        )
         transaction_cost_paid = sell_size * cost_pct
         pnl = pnl_before_costs - transaction_cost_paid
 
@@ -938,9 +1016,11 @@ class CryptoTradingEnv(gym.Env):
 
         return {
             "action": self.ACTION_SELL, "action_name": action_name,
-            "executed": True, "reason": "Sell executed",
+            "executed": True,
+            "reason": "Sell executed" if not execution_reason else f"Sell executed ({execution_reason})",
             "size": sell_size, "price": current_price,
             "side": "sell", "pnl": pnl, "cost": transaction_cost_paid,
+            "order_type": execution_order_type,
             "entry_price": position["entry_price"], "price_change": price_change,
             "symbol": symbol,
         }

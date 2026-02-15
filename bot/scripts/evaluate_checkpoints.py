@@ -12,7 +12,7 @@ import json
 from pathlib import Path
 import re
 import sys
-from typing import List
+from typing import List, Dict, Tuple
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -56,6 +56,42 @@ def _evaluate_model(path: Path, policy: str, sequence_length: int, episodes: int
     return results
 
 
+def _golden_score(metrics: Dict[str, float]) -> float:
+    """Composite score aligned with durable profitability."""
+    sharpe = float(metrics.get("sharpe_ratio", 0.0))
+    total_return = float(metrics.get("total_return", 0.0))
+    profit_factor = float(metrics.get("profit_factor", 0.0))
+    fees = float(metrics.get("fees_pct_of_gross_pnl", 1.0))
+    drawdown = float(metrics.get("max_drawdown", 1.0))
+    in_position = float(metrics.get("in_position_ratio", 0.0))
+    return (
+        0.35 * sharpe
+        + 45.0 * total_return
+        + 0.60 * profit_factor
+        - 10.0 * fees
+        - 6.0 * drawdown
+        + 1.5 * in_position
+    )
+
+
+def _passes_golden_gate(metrics: Dict[str, float]) -> Tuple[bool, List[str]]:
+    """Hard gate for shortlist promotion."""
+    failures: List[str] = []
+    if float(metrics.get("total_return", -1.0)) < 0.0:
+        failures.append("total_return<0")
+    if float(metrics.get("profit_factor", 0.0)) < 1.2:
+        failures.append("profit_factor<1.2")
+    if float(metrics.get("sharpe_ratio", -999.0)) < 0.5:
+        failures.append("sharpe_ratio<0.5")
+    if float(metrics.get("max_drawdown", 1.0)) > 0.20:
+        failures.append("max_drawdown>0.20")
+    if float(metrics.get("fees_pct_of_gross_pnl", 1.0)) > 0.30:
+        failures.append("fees_pct_of_gross_pnl>0.30")
+    if float(metrics.get("in_position_ratio", 0.0)) < 0.35:
+        failures.append("in_position_ratio<0.35")
+    return len(failures) == 0, failures
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate checkpoints for a run.")
     parser.add_argument("--run-id", type=int, required=True, help="Training run id")
@@ -64,6 +100,8 @@ def main() -> None:
     parser.add_argument("--sequence-length", type=int, default=1, help="Sequence length for MLP stacking")
     parser.add_argument("--episodes", type=int, default=50, help="Evaluation episodes per checkpoint")
     parser.add_argument("--output", type=str, default=None, help="Optional JSON output path")
+    parser.add_argument("--top-k", type=int, default=5, help="Number of top models to print")
+    parser.add_argument("--golden-gate", action="store_true", help="Apply golden ticket gate to shortlist")
     args = parser.parse_args()
 
     models_dir = Path(args.models_dir)
@@ -79,10 +117,28 @@ def main() -> None:
             sequence_length=args.sequence_length,
             episodes=args.episodes,
         )
+        result["golden_score"] = _golden_score(result)
+        passed, failures = _passes_golden_gate(result)
+        result["golden_gate_pass"] = passed
+        result["golden_gate_failures"] = failures
         results.append(result)
         print(
             f"{model_path.name}: return={result['total_return']:.2%}, "
-            f"win_rate={result['win_rate']:.2%}, drawdown={result['max_drawdown']:.2%}"
+            f"win_rate={result['win_rate']:.2%}, drawdown={result['max_drawdown']:.2%}, "
+            f"score={result['golden_score']:.3f}, gate={'PASS' if passed else 'FAIL'}"
+        )
+
+    ranked = sorted(results, key=lambda r: float(r.get("golden_score", -1e9)), reverse=True)
+    shortlist = [r for r in ranked if r.get("golden_gate_pass")] if args.golden_gate else ranked
+    top_k = shortlist[: max(1, int(args.top_k))]
+
+    print("\nTop candidates:")
+    for i, r in enumerate(top_k, start=1):
+        print(
+            f"{i}. {Path(r['model_path']).name} | score={r['golden_score']:.3f} | "
+            f"ret={r['total_return']:.2%} pf={r['profit_factor']:.2f} "
+            f"sharpe={r['sharpe_ratio']:.2f} fees={r['fees_pct_of_gross_pnl']:.2%} "
+            f"dd={r['max_drawdown']:.2%} inpos={r['in_position_ratio']:.2%}"
         )
 
     if args.output:
