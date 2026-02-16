@@ -313,17 +313,23 @@ async def get_trades(
 
 
 @app.get("/api/paper-trading/metrics")
-async def get_paper_trading_metrics():
+async def get_paper_trading_metrics(
+    mode: Optional[str] = Query(None, description="Filter by mode: paper, live, or omit for all"),
+):
     """
-    Return paper trading portfolio metrics from the kalshi_trades table.
+    Return trading portfolio metrics from the kalshi_trades table.
+    Supports mode filtering: paper, live, or all (no filter).
     """
     if not DB_ENGINE:
         raise HTTPException(status_code=503, detail="Database not configured")
 
+    mode_filter = "AND mode = :mode" if mode else ""
+    mode_params: dict = {"mode": mode} if mode else {}
+
     try:
         with DB_ENGINE.connect() as conn:
             # Overall stats
-            row = conn.execute(text("""
+            row = conn.execute(text(f"""
                 SELECT
                     COUNT(*) AS total,
                     SUM(CASE WHEN status='settled' AND pnl > 0 THEN 1 ELSE 0 END) AS wins,
@@ -332,8 +338,8 @@ async def get_paper_trading_metrics():
                     SUM(CASE WHEN status='open' THEN 1 ELSE 0 END) AS open_count,
                     COALESCE(SUM(CASE WHEN status='open' THEN cost_dollars END), 0) AS open_cost
                 FROM kalshi_trades
-                WHERE mode = 'paper'
-            """)).fetchone()
+                WHERE 1=1 {mode_filter}
+            """), mode_params).fetchone()
 
             total = int(row[0] or 0)
             wins = int(row[1] or 0)
@@ -345,31 +351,53 @@ async def get_paper_trading_metrics():
             win_rate = (wins / settled) if settled > 0 else 0.0
 
             # Side breakdown
-            side_rows = conn.execute(text("""
+            side_rows = conn.execute(text(f"""
                 SELECT
                     side,
                     COUNT(*) AS total,
                     SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) AS wins,
                     COALESCE(SUM(pnl), 0) AS pnl
                 FROM kalshi_trades
-                WHERE mode = 'paper' AND status = 'settled'
+                WHERE status = 'settled' {mode_filter}
                 GROUP BY side
-            """)).fetchall()
+            """), mode_params).fetchall()
             side_breakdown = {
                 r[0]: {"total": int(r[1]), "wins": int(r[2]), "pnl": float(r[3])}
                 for r in side_rows
             }
 
+            # Mode breakdown (paper vs live)
+            mode_rows = conn.execute(text("""
+                SELECT
+                    mode,
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN status='settled' AND pnl > 0 THEN 1 ELSE 0 END) AS wins,
+                    SUM(CASE WHEN status='settled' AND pnl <= 0 THEN 1 ELSE 0 END) AS losses,
+                    COALESCE(SUM(CASE WHEN status='settled' THEN pnl END), 0) AS realized_pnl,
+                    SUM(CASE WHEN status='open' THEN 1 ELSE 0 END) AS open_count,
+                    COALESCE(SUM(CASE WHEN status='open' THEN cost_dollars END), 0) AS open_cost
+                FROM kalshi_trades
+                GROUP BY mode
+            """)).fetchall()
+            mode_breakdown = {
+                r[0]: {
+                    "total": int(r[1]), "wins": int(r[2]), "losses": int(r[3]),
+                    "realized_pnl": float(r[4]), "open_positions": int(r[5]),
+                    "open_cost": float(r[6]),
+                }
+                for r in mode_rows
+            }
+
             # Recent trades (last 20)
-            recent = conn.execute(text("""
+            recent = conn.execute(text(f"""
                 SELECT ticker, side, entry_price_cents, edge_value, contracts,
                        cost_dollars, status, outcome, pnl,
-                       opened_at, settled_at, edge_type
+                       opened_at, settled_at, edge_type, mode
                 FROM kalshi_trades
-                WHERE mode = 'paper'
+                WHERE 1=1 {mode_filter}
                 ORDER BY id DESC
                 LIMIT 20
-            """)).fetchall()
+            """), mode_params).fetchall()
 
         recent_trades = [
             {
@@ -385,6 +413,7 @@ async def get_paper_trading_metrics():
                 "opened_at": r[9].isoformat() if r[9] else None,
                 "settled_at": r[10].isoformat() if r[10] else None,
                 "edge_type": r[11],
+                "mode": r[12],
             }
             for r in recent
         ]
@@ -398,6 +427,7 @@ async def get_paper_trading_metrics():
             "open_positions": open_count,
             "open_cost": open_cost,
             "side_breakdown": side_breakdown,
+            "mode_breakdown": mode_breakdown,
             "recent_trades": recent_trades,
             "timestamp": datetime.utcnow().isoformat(),
         }
@@ -471,22 +501,25 @@ async def get_kalshi_trades(
 
 @app.get("/api/kalshi/positions")
 async def get_kalshi_positions(
-    mode: Optional[str] = Query("paper", description="paper or live"),
+    mode: Optional[str] = Query(None, description="paper, live, or omit for all"),
 ):
     """Get currently open Kalshi positions."""
     if not DB_ENGINE:
         raise HTTPException(status_code=503, detail="Database not configured")
 
     try:
+        mode_filter = "AND mode = :mode" if mode else ""
+        params: dict = {"mode": mode} if mode else {}
+
         with DB_ENGINE.connect() as conn:
-            rows = conn.execute(text("""
+            rows = conn.execute(text(f"""
                 SELECT ticker, side, entry_price_cents, fair_price_cents,
                        edge_value, edge_type, contracts, cost_dollars,
-                       reasoning, opened_at, series_ticker
+                       reasoning, opened_at, series_ticker, mode
                 FROM kalshi_trades
-                WHERE status = 'open' AND mode = :mode
+                WHERE status = 'open' {mode_filter}
                 ORDER BY opened_at DESC
-            """), {"mode": mode}).fetchall()
+            """), params).fetchall()
 
         positions = [
             {
@@ -498,6 +531,7 @@ async def get_kalshi_positions(
                 "cost": float(r[7]), "reasoning": r[8],
                 "opened_at": r[9].isoformat() if r[9] else None,
                 "series_ticker": r[10],
+                "mode": r[11],
             }
             for r in rows
         ]

@@ -4,7 +4,7 @@ import Nav from "./components/Nav";
 
 export const metadata: Metadata = {
   title: "RLTrade Dashboard",
-  description: "Kalshi crypto edge trading bot dashboard",
+  description: "Crypto prediction market trading bot dashboard",
 };
 
 export default function RootLayout({

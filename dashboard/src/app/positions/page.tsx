@@ -14,6 +14,7 @@ type Position = {
   reasoning: string;
   opened_at: string | null;
   series_ticker: string;
+  mode: string;
 };
 
 type PriceData = { price?: number; error?: string };
@@ -38,7 +39,7 @@ function fmt(n: number, d = 2) {
 
 async function getPositions() {
   try {
-    const res = await fetch(`${baseUrl}/api/kalshi/positions?mode=paper`, {
+    const res = await fetch(`${baseUrl}/api/kalshi/positions`, {
       cache: "no-store",
     });
     if (!res.ok) return { positions: [], count: 0 };
@@ -117,11 +118,22 @@ export default async function PositionsPage() {
                       </span>
                     )}
                   </div>
-                  <span
-                    className={`px-2 py-0.5 rounded text-xs font-medium ${p.side === "no" ? "bg-green-900/60 text-green-300" : "bg-red-900/60 text-red-300"}`}
-                  >
-                    BUY_{p.side.toUpperCase()}
-                  </span>
+                  <div className="flex items-center gap-2">
+                    <span
+                      className={`px-2 py-0.5 rounded text-xs font-medium ${
+                        p.mode === "live"
+                          ? "bg-blue-900/60 text-blue-300"
+                          : "bg-gray-800 text-gray-400"
+                      }`}
+                    >
+                      {(p.mode || "paper").toUpperCase()}
+                    </span>
+                    <span
+                      className={`px-2 py-0.5 rounded text-xs font-medium ${p.side === "no" ? "bg-green-900/60 text-green-300" : "bg-red-900/60 text-red-300"}`}
+                    >
+                      BUY_{p.side.toUpperCase()}
+                    </span>
+                  </div>
                 </div>
 
                 <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3 text-sm">

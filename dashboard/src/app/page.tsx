@@ -90,7 +90,7 @@ export default async function Page() {
         <div>
           <h1 className="text-3xl font-bold mb-1">RLTrade Dashboard</h1>
           <p className="text-gray-500 text-sm">
-            Kalshi crypto edge trading bot &mdash; BUY_NO lognormal strategy
+            Crypto prediction market trading bot &mdash; Kalshi &middot; Coinbase
           </p>
         </div>
         <div className="flex gap-2 mt-3 sm:mt-0 text-xs">
@@ -111,6 +111,28 @@ export default async function Page() {
       <Section title="Trading Performance">
         {metrics ? (
           <>
+            {/* Mode breakdown */}
+            {metrics.mode_breakdown && Object.keys(metrics.mode_breakdown).length > 0 && (
+              <div className="flex gap-2 mb-4">
+                {Object.entries(
+                  metrics.mode_breakdown as Record<string, { total: number; wins: number; losses: number; realized_pnl: number; open_positions: number; open_cost: number }>
+                ).map(([m, d]) => (
+                  <div key={m} className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border text-xs ${
+                    m === 'live' ? 'border-blue-700/60 bg-blue-950/20 text-blue-300' : 'border-gray-700/60 bg-gray-900/40 text-gray-400'
+                  }`}>
+                    <span className={`w-2 h-2 rounded-full ${m === 'live' ? 'bg-blue-400' : 'bg-gray-500'}`} />
+                    <span className="font-medium uppercase">{m}</span>
+                    <span>{d.total} trades</span>
+                    <span className="text-gray-600">|</span>
+                    <span>{d.wins}W/{d.losses}L</span>
+                    <span className="text-gray-600">|</span>
+                    <span className={d.realized_pnl >= 0 ? 'text-green-400' : 'text-red-400'}>
+                      ${d.realized_pnl >= 0 ? '+' : ''}{fmt(d.realized_pnl)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
             <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 mb-4">
               <Card label="Total Trades" value={metrics.total_trades} />
               <Card
@@ -277,6 +299,7 @@ export default async function Page() {
               <thead>
                 <tr className="text-gray-500 border-b border-gray-800 text-xs">
                   <th className="text-left py-2 px-2">Ticker</th>
+                  <th className="text-left py-2 px-2">Mode</th>
                   <th className="text-left py-2 px-2">Side</th>
                   <th className="text-right py-2 px-2">Price</th>
                   <th className="text-right py-2 px-2">Edge</th>
@@ -291,6 +314,7 @@ export default async function Page() {
                   (
                     t: {
                       ticker: string;
+                      mode: string;
                       side: string;
                       entry_price_cents: number;
                       edge: number | null;
@@ -307,6 +331,13 @@ export default async function Page() {
                     >
                       <td className="py-1.5 px-2 font-mono text-xs">
                         {t.ticker}
+                      </td>
+                      <td className="py-1.5 px-2">
+                        <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                          t.mode === 'live' ? 'bg-blue-900/60 text-blue-300' : 'bg-gray-800 text-gray-400'
+                        }`}>
+                          {t.mode?.toUpperCase() || 'PAPER'}
+                        </span>
                       </td>
                       <td className="py-1.5 px-2">
                         <span
