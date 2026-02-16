@@ -847,6 +847,197 @@ async def get_data_source_health():
     return {"sources": results, "status": "ok" if overall_ok else "stale"}
 
 
+# ──────────────────────────────────────────────────────────────────────
+#  Crypto Market Data endpoints
+# ──────────────────────────────────────────────────────────────────────
+
+CRYPTO_ASSETS = ["BTC", "ETH", "SOL", "DOGE", "XRP"]
+COINBASE_TICKER = "https://api.exchange.coinbase.com/products/{symbol}/ticker"
+COINBASE_CANDLES = "https://api.exchange.coinbase.com/products/{symbol}/candles"
+
+# Annualised vols calibrated from Kalshi settlement data
+CALIBRATED_VOLS = {
+    "BTC": 0.56, "ETH": 0.70, "SOL": 0.74, "DOGE": 0.65, "XRP": 0.71,
+}
+
+import httpx  # lightweight async HTTP – already transitively available
+
+
+@app.get("/api/crypto/prices")
+async def get_crypto_prices():
+    """Live spot prices for all tracked crypto assets from Coinbase."""
+    import time as _time
+    results = {}
+    async with httpx.AsyncClient(timeout=10) as client:
+        for asset in CRYPTO_ASSETS:
+            symbol = f"{asset}-USD"
+            try:
+                resp = await client.get(
+                    COINBASE_TICKER.format(symbol=symbol)
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    results[asset] = {
+                        "price": float(data["price"]),
+                        "volume_24h": float(data.get("volume", 0)),
+                        "bid": float(data.get("bid", 0)),
+                        "ask": float(data.get("ask", 0)),
+                        "symbol": symbol,
+                        "timestamp": datetime.utcnow().isoformat(),
+                    }
+                else:
+                    results[asset] = {"error": f"HTTP {resp.status_code}"}
+            except Exception as e:
+                results[asset] = {"error": str(e)}
+    return {
+        "prices": results,
+        "volatilities": CALIBRATED_VOLS,
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+
+
+@app.get("/api/crypto/candles/{asset}")
+async def get_crypto_candles(
+    asset: str,
+    interval: str = Query("1h", regex="^(1m|5m|15m|1h|4h|1d)$"),
+    limit: int = Query(48, ge=1, le=300),
+):
+    """Recent OHLCV candles for a crypto asset from Coinbase."""
+    if asset.upper() not in CRYPTO_ASSETS:
+        raise HTTPException(status_code=400, detail=f"Unsupported asset: {asset}")
+
+    granularity_map = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}
+    symbol = f"{asset.upper()}-USD"
+    params = {"granularity": granularity_map[interval]}
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(
+            COINBASE_CANDLES.format(symbol=symbol), params=params
+        )
+        if resp.status_code != 200:
+            raise HTTPException(status_code=502, detail=f"Coinbase error: {resp.status_code}")
+        raw = resp.json()
+
+    # Coinbase returns [time, low, high, open, close, volume] newest first
+    candles = []
+    for row in reversed(raw[:limit]):
+        candles.append({
+            "timestamp": datetime.utcfromtimestamp(row[0]).isoformat(),
+            "open": float(row[3]),
+            "high": float(row[2]),
+            "low": float(row[1]),
+            "close": float(row[4]),
+            "volume": float(row[5]),
+        })
+    return {"asset": asset.upper(), "interval": interval, "candles": candles}
+
+
+# ──────────────────────────────────────────────────────────────────────
+#  Bot Operations endpoint
+# ──────────────────────────────────────────────────────────────────────
+
+@app.get("/api/bot/status")
+async def get_bot_status():
+    """
+    Aggregated bot status: latest session, scan stats, and configuration.
+    """
+    if not DB_ENGINE:
+        raise HTTPException(status_code=503, detail="Database not configured")
+
+    try:
+        with DB_ENGINE.connect() as conn:
+            # Latest session
+            sess = conn.execute(text("""
+                SELECT session_id,
+                       MIN(opened_at) AS started,
+                       MAX(opened_at) AS last_trade,
+                       COUNT(*) AS trades_opened,
+                       SUM(CASE WHEN status='open' THEN 1 ELSE 0 END) AS open_now,
+                       SUM(CASE WHEN status='settled' AND pnl > 0 THEN 1 ELSE 0 END) AS wins,
+                       SUM(CASE WHEN status='settled' AND pnl <= 0 THEN 1 ELSE 0 END) AS losses,
+                       COALESCE(SUM(CASE WHEN status='settled' THEN pnl END), 0) AS realized_pnl
+                FROM kalshi_trades
+                WHERE mode = 'paper'
+                GROUP BY session_id
+                ORDER BY MIN(opened_at) DESC
+                LIMIT 5
+            """)).fetchall()
+
+            sessions = []
+            for r in sess:
+                sessions.append({
+                    "session_id": r[0],
+                    "started_at": r[1].isoformat() if r[1] else None,
+                    "last_trade_at": r[2].isoformat() if r[2] else None,
+                    "trades_opened": int(r[3] or 0),
+                    "open_now": int(r[4] or 0),
+                    "wins": int(r[5] or 0),
+                    "losses": int(r[6] or 0),
+                    "realized_pnl": float(r[7] or 0),
+                })
+
+            # Overall counts
+            totals = conn.execute(text("""
+                SELECT COUNT(DISTINCT session_id) AS total_sessions,
+                       COUNT(*) AS total_trades,
+                       MIN(opened_at) AS first_trade,
+                       MAX(opened_at) AS last_trade
+                FROM kalshi_trades
+                WHERE mode = 'paper'
+            """)).fetchone()
+
+        return {
+            "sessions": sessions,
+            "total_sessions": int(totals[0] or 0),
+            "total_trades": int(totals[1] or 0),
+            "first_trade_at": totals[2].isoformat() if totals[2] else None,
+            "last_trade_at": totals[3].isoformat() if totals[3] else None,
+            "strategy": {
+                "name": "BUY_NO Lognormal Edge",
+                "side_filter": "no",
+                "min_edge": 0.02,
+                "max_edge": 0.05,
+                "min_price": 1,
+                "max_price": 15,
+                "assets": CRYPTO_ASSETS,
+                "volatilities": CALIBRATED_VOLS,
+            },
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ──────────────────────────────────────────────────────────────────────
+#  Settled markets stats
+# ──────────────────────────────────────────────────────────────────────
+
+@app.get("/api/kalshi/market-stats")
+async def get_kalshi_market_stats():
+    """Summary of backfilled settled markets in the database."""
+    if not DB_ENGINE:
+        raise HTTPException(status_code=503, detail="Database not configured")
+    try:
+        with DB_ENGINE.connect() as conn:
+            row = conn.execute(text("""
+                SELECT COUNT(*) AS total,
+                       COUNT(DISTINCT event_ticker) AS events,
+                       COUNT(DISTINCT series_ticker) AS series,
+                       MIN(close_time) AS earliest,
+                       MAX(close_time) AS latest
+                FROM kalshi_settled_markets
+            """)).fetchone()
+        return {
+            "total_markets": int(row[0] or 0),
+            "total_events": int(row[1] or 0),
+            "total_series": int(row[2] or 0),
+            "earliest_close": row[3].isoformat() if row[3] else None,
+            "latest_close": row[4].isoformat() if row[4] else None,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 def _interval_to_seconds(interval: str) -> int:
     mapping = {
         "1m": 60,

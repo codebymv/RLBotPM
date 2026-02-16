@@ -51,11 +51,8 @@ export default async function EdgeHealthPage() {
   const byEdgeType: Record<string, EdgeTypeStats> = health?.by_edge_type || {};
 
   return (
-    <main className="min-h-screen bg-gray-950 text-gray-100 p-6 max-w-6xl mx-auto">
-      <Link href="/" className="text-blue-400 text-sm hover:underline">
-        ← Dashboard
-      </Link>
-      <h1 className="text-2xl font-bold mt-4 mb-1">Edge Health</h1>
+    <main className="min-h-screen bg-gray-950 text-gray-100 p-4 sm:p-6 max-w-7xl mx-auto">
+      <h1 className="text-2xl font-bold mt-2 mb-1">Edge Health</h1>
       <p className="text-gray-500 text-sm mb-6">
         Is the statistical edge still working?
       </p>
