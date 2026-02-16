@@ -321,6 +321,40 @@ class KalshiTrade(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
+class RLCryptoTrade(Base):
+    """
+    Stores RL Crypto Bot paper and live trades for dashboard monitoring.
+
+    Written by LiveRLPaperTrader, read by the API/dashboard.
+    """
+    __tablename__ = "rl_crypto_trades"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    symbol = Column(String(50), nullable=False, index=True)  # BTC-USD, ETH-USD
+    action = Column(String(10), nullable=False)  # buy, sell
+
+    # Trade execution
+    entry_price = Column(Float, nullable=False)
+    exit_price = Column(Float, nullable=True)
+    position_size = Column(Float, nullable=False)
+    pnl = Column(Float, nullable=True)
+    pnl_pct = Column(Float, nullable=True)
+
+    # RL-specific
+    model_path = Column(String(255), nullable=False)
+    confidence = Column(Float, nullable=True)
+    regime = Column(String(50), nullable=True)  # momentum, breakout, mean_reversion
+    hold_steps = Column(Integer, nullable=True)
+    exit_reason = Column(String(100), nullable=True)  # MODEL_DECISION, STOP_LOSS, TAKE_PROFIT
+
+    # Standard fields
+    mode = Column(String(20), default="paper", index=True)
+    status = Column(String(20), default="open", index=True)
+    session_id = Column(String(100), nullable=True, index=True)
+    opened_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    closed_at = Column(DateTime, nullable=True)
+
+
 # Database engine and session factory
 def get_engine():
     """Create database engine from settings"""

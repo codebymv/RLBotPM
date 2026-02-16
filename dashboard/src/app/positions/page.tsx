@@ -15,6 +15,18 @@ async function getPositions() {
   }
 }
 
+async function getRLPositions(mode: string) {
+  try {
+    const res = await fetch(`${baseUrl}/api/rl-crypto/positions?mode=${mode}`, {
+      cache: "no-store",
+    });
+    if (!res.ok) return { positions: [], count: 0 };
+    return res.json();
+  } catch {
+    return { positions: [], count: 0 };
+  }
+}
+
 async function getCryptoPrices() {
   try {
     const res = await fetch(`${baseUrl}/api/crypto/prices`, {
@@ -27,12 +39,19 @@ async function getCryptoPrices() {
   }
 }
 
-export default async function PositionsPage() {
-  const [data, crypto] = await Promise.all([getPositions(), getCryptoPrices()]);
+type PageProps = { searchParams?: { mode?: string } };
+
+export default async function PositionsPage({ searchParams }: PageProps) {
+  const mode = searchParams?.mode || "paper";
+  const [kalshiData, rlData, crypto] = await Promise.all([
+    getPositions(),
+    getRLPositions(mode),
+    getCryptoPrices(),
+  ]);
 
   return (
     <Suspense fallback={<div className="p-6">Loading positions...</div>}>
-      <PositionsClient data={data} crypto={crypto} />
+      <PositionsClient kalshiData={kalshiData} rlData={rlData} crypto={crypto} />
     </Suspense>
   );
 }

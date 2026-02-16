@@ -30,6 +30,7 @@ from sb3_contrib import MaskablePPO
 from stable_baselines3.common.vec_env import DummyVecEnv
 
 from ..data.sources.coinbase import CoinbaseAdapter
+from ..data.database import get_db_session, RLCryptoTrade
 from ..environment.gym_env import CryptoTradingEnv, _interval_to_steps
 from ..core.logger import get_logger
 from ..core.config import get_settings
@@ -141,6 +142,10 @@ class LiveRLPaperTrader:
 
         # Decision log
         self.decision_log: List[Dict] = []
+
+        # Mode and session for database persistence
+        self.mode = "paper"
+        self.session_id = f"rl_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
 
         # Interval helpers
         self.interval_seconds = self._interval_to_seconds(interval)
@@ -431,6 +436,58 @@ class LiveRLPaperTrader:
         adjusted_fraction = min(max(adjusted_fraction, 0.15), 0.35)
         self.position_sizer.set_kelly_fraction(adjusted_fraction)
 
+    def _persist_trade_open(self, symbol: str, entry_price: float, size: float) -> None:
+        """Persist opened trade to database."""
+        try:
+            sess = get_db_session()
+            trade = RLCryptoTrade(
+                symbol=symbol,
+                action="buy",
+                entry_price=entry_price,
+                position_size=size,
+                model_path=self.model_path,
+                mode=self.mode,
+                status="open",
+                session_id=self.session_id,
+                opened_at=datetime.utcnow(),
+            )
+            sess.add(trade)
+            sess.commit()
+            sess.close()
+        except Exception as e:
+            logger.warning("Failed to persist trade open: %s", e)
+
+    def _persist_trade_close(
+        self,
+        symbol: str,
+        exit_price: float,
+        pnl: float,
+        pnl_pct: float,
+        reason: str,
+        hold_steps: int = 0,
+    ) -> None:
+        """Update trade as closed in database."""
+        try:
+            sess = get_db_session()
+            trade = (
+                sess.query(RLCryptoTrade)
+                .filter_by(symbol=symbol, status="open", mode=self.mode)
+                .order_by(RLCryptoTrade.id.desc())
+                .first()
+            )
+            if trade:
+                trade.status = "closed"
+                trade.exit_price = exit_price
+                trade.pnl = pnl
+                trade.pnl_pct = pnl_pct
+                trade.exit_reason = reason
+                trade.hold_steps = hold_steps
+                trade.closed_at = datetime.utcnow()
+                sess.commit()
+            sess.close()
+        except Exception as e:
+            logger.warning("Failed to persist trade close: %s", e)
+
     def _execute_buy(self, symbol: str, current_price: float, row: Optional[pd.Series]) -> Dict:
         """Execute a paper buy order for a specific symbol."""
         if symbol in self.positions:
@@ -478,6 +535,8 @@ class LiveRLPaperTrader:
             "last_row": row,
         }
 
+        self._persist_trade_open(symbol, current_price, position_value)
+
         return {
             "executed": True,
             "action": "BUY",
@@ -519,6 +578,9 @@ class LiveRLPaperTrader:
         self.trade_count += 1
         self._update_adaptive_kelly(pnl)
 
+        hold_steps = position.get("hold_steps", 0)
+        pnl_pct = round(price_change * 100, 4)
+
         trade_record = {
             "executed": True,
             "action": "SELL",
@@ -528,13 +590,17 @@ class LiveRLPaperTrader:
             "exit_price": current_price,
             "size": sell_size,
             "pnl": round(pnl, 4),
-            "pnl_pct": round(price_change * 100, 4),
+            "pnl_pct": pnl_pct,
             "cost": round(transaction_cost, 4),
-            "hold_steps": position.get("hold_steps", 0),
+            "hold_steps": hold_steps,
             "capital_after": round(self.capital, 2),
             "timestamp": datetime.utcnow().isoformat(),
         }
         self.trade_history.append(trade_record)
+
+        self._persist_trade_close(
+            symbol, current_price, round(pnl, 4), pnl_pct, reason, hold_steps
+        )
 
         del self.positions[symbol]
         self.symbol_cooldowns[symbol] = 0

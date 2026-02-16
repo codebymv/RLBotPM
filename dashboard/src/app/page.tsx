@@ -61,10 +61,28 @@ async function getMarketStats() {
   }
 }
 
-export default async function Page() {
-  const [health, metrics, crypto, bot, mktStats] = await Promise.all([
+async function getCombinedMetrics(mode: string) {
+  try {
+    const res = await fetch(`${baseUrl}/api/metrics/combined?mode=${mode}`, {
+      cache: "no-store",
+    });
+    if (!res.ok) return null;
+    return res.json();
+  } catch {
+    return null;
+  }
+}
+
+type PageProps = {
+  searchParams?: { mode?: string; bot?: string };
+};
+
+export default async function Page({ searchParams }: PageProps) {
+  const mode = searchParams?.mode || "paper";
+
+  const [health, combinedMetrics, crypto, bot, mktStats] = await Promise.all([
     getHealth(),
-    getMetrics(),
+    getCombinedMetrics(mode),
     getCryptoPrices(),
     getBotStatus(),
     getMarketStats(),
@@ -74,7 +92,7 @@ export default async function Page() {
     <Suspense fallback={<div className="p-6">Loading...</div>}>
       <OverviewClient
         health={health}
-        metrics={metrics}
+        combinedMetrics={combinedMetrics}
         crypto={crypto}
         bot={bot}
         mktStats={mktStats}

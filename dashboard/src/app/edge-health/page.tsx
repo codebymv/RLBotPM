@@ -27,20 +27,33 @@ async function getPnlSeries(mode: string) {
   }
 }
 
+async function getCombinedMetrics(mode: string) {
+  try {
+    const res = await fetch(`${baseUrl}/api/metrics/combined?mode=${mode}`, {
+      cache: "no-store",
+    });
+    if (!res.ok) return null;
+    return res.json();
+  } catch {
+    return null;
+  }
+}
+
 export default async function EdgeHealthPage({
   searchParams,
 }: {
   searchParams: { mode?: string };
 }) {
-  const mode = searchParams.mode || "paper";
-  const [health, pnl] = await Promise.all([
+  const mode = searchParams?.mode || "paper";
+  const [health, pnl, combinedMetrics] = await Promise.all([
     getEdgeHealth(mode),
     getPnlSeries(mode),
+    getCombinedMetrics(mode),
   ]);
 
   return (
     <Suspense fallback={<div className="p-6">Loading edge health...</div>}>
-      <EdgeHealthClient health={health} pnl={pnl} />
+      <EdgeHealthClient health={health} pnl={pnl} combinedMetrics={combinedMetrics} />
     </Suspense>
   );
 }

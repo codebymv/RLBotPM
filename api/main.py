@@ -435,6 +435,239 @@ async def get_paper_trading_metrics(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/metrics/combined")
+async def get_combined_metrics(
+    mode: str = Query("paper", description="paper or live"),
+):
+    """Get combined metrics across all strategies (Kalshi + RL Crypto)."""
+    if not DB_ENGINE:
+        raise HTTPException(status_code=503, detail="Database not configured")
+
+    try:
+        kalshi_metrics = await get_paper_trading_metrics(mode=mode)
+
+        with DB_ENGINE.connect() as conn:
+            rl_total = conn.execute(
+                text(
+                    "SELECT COUNT(*) FROM rl_crypto_trades WHERE mode = :mode AND status = 'closed'"
+                ),
+                {"mode": mode},
+            ).scalar() or 0
+            rl_wins = conn.execute(
+                text(
+                    "SELECT COUNT(*) FROM rl_crypto_trades WHERE mode = :mode AND status = 'closed' AND pnl > 0"
+                ),
+                {"mode": mode},
+            ).scalar() or 0
+            rl_pnl = conn.execute(
+                text(
+                    "SELECT COALESCE(SUM(pnl), 0) FROM rl_crypto_trades WHERE mode = :mode AND status = 'closed'"
+                ),
+                {"mode": mode},
+            ).scalar() or 0.0
+            rl_open = conn.execute(
+                text(
+                    "SELECT COUNT(*) FROM rl_crypto_trades WHERE mode = :mode AND status = 'open'"
+                ),
+                {"mode": mode},
+            ).scalar() or 0
+            rl_open_cost = conn.execute(
+                text(
+                    "SELECT COALESCE(SUM(position_size), 0) FROM rl_crypto_trades WHERE mode = :mode AND status = 'open'"
+                ),
+                {"mode": mode},
+            ).scalar() or 0.0
+
+            rl_recent = conn.execute(
+                text("""
+                    SELECT symbol, action, entry_price, exit_price, position_size,
+                           pnl, pnl_pct, status, opened_at, closed_at
+                    FROM rl_crypto_trades
+                    WHERE mode = :mode
+                    ORDER BY id DESC
+                    LIMIT 20
+                """),
+                {"mode": mode},
+            ).fetchall()
+
+        rl_recent_trades = [
+            {
+                "ticker": r[0],
+                "side": r[1],
+                "entry_price_cents": None,
+                "edge": None,
+                "contracts": 1,
+                "cost": float(r[4]),
+                "status": r[7],
+                "pnl": float(r[5]) if r[5] is not None else None,
+                "opened_at": r[8].isoformat() if r[8] else None,
+                "settled_at": r[9].isoformat() if r[9] else None,
+                "mode": mode,
+                "strategy": "rl_crypto",
+            }
+            for r in rl_recent
+        ]
+
+        rl_losses = rl_total - rl_wins
+        rl_win_rate = (rl_wins / rl_total) if rl_total > 0 else 0.0
+
+        combined_trades = kalshi_metrics["total_trades"] + rl_total
+        combined_pnl = kalshi_metrics["realized_pnl"] + rl_pnl
+        combined_wins = kalshi_metrics["wins"] + rl_wins
+        combined_losses = kalshi_metrics["losses"] + rl_losses
+        combined_win_rate = (
+            (combined_wins / combined_trades) if combined_trades > 0 else 0.0
+        )
+
+        return {
+            "combined": {
+                "total_trades": combined_trades,
+                "wins": combined_wins,
+                "losses": combined_losses,
+                "win_rate": combined_win_rate,
+                "realized_pnl": combined_pnl,
+                "open_positions": kalshi_metrics["open_positions"] + rl_open,
+                "open_cost": kalshi_metrics["open_cost"] + rl_open_cost,
+            },
+            "by_strategy": {
+                "kalshi": {
+                    "total_trades": kalshi_metrics["total_trades"],
+                    "wins": kalshi_metrics["wins"],
+                    "losses": kalshi_metrics["losses"],
+                    "win_rate": kalshi_metrics["win_rate"],
+                    "realized_pnl": kalshi_metrics["realized_pnl"],
+                    "open_positions": kalshi_metrics["open_positions"],
+                    "open_cost": kalshi_metrics["open_cost"],
+                    "side_breakdown": kalshi_metrics["side_breakdown"],
+                    "mode_breakdown": kalshi_metrics["mode_breakdown"],
+                    "recent_trades": [
+                        {**t, "strategy": "kalshi"}
+                        for t in (kalshi_metrics.get("recent_trades") or [])
+                    ],
+                },
+                "rl_crypto": {
+                    "total_trades": rl_total,
+                    "wins": rl_wins,
+                    "losses": rl_losses,
+                    "win_rate": rl_win_rate,
+                    "realized_pnl": rl_pnl,
+                    "open_positions": rl_open,
+                    "open_cost": rl_open_cost,
+                    "recent_trades": rl_recent_trades,
+                },
+            },
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/rl-crypto/trades")
+async def get_rl_crypto_trades(
+    mode: str = Query("paper", description="paper or live"),
+    status: Optional[str] = Query(None, description="open or closed"),
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
+    """Get RL crypto bot trades."""
+    if not DB_ENGINE:
+        raise HTTPException(status_code=503, detail="Database not configured")
+
+    try:
+        conditions = ["mode = :mode"]
+        params: dict = {"mode": mode, "lim": limit, "off": offset}
+        if status:
+            conditions.append("status = :status")
+            params["status"] = status
+        where = " AND ".join(conditions)
+
+        with DB_ENGINE.connect() as conn:
+            total = conn.execute(
+                text(f"SELECT COUNT(*) FROM rl_crypto_trades WHERE {where}"), params
+            ).scalar() or 0
+            rows = conn.execute(
+                text(f"""
+                SELECT id, symbol, action, entry_price, exit_price, position_size,
+                       pnl, pnl_pct, model_path, regime, hold_steps, exit_reason,
+                       mode, status, session_id, opened_at, closed_at
+                FROM rl_crypto_trades
+                WHERE {where}
+                ORDER BY opened_at DESC
+                LIMIT :lim OFFSET :off
+                """
+                ),
+                params,
+            ).fetchall()
+
+        trades = [
+            {
+                "id": r[0],
+                "symbol": r[1],
+                "action": r[2],
+                "entry_price": float(r[3]),
+                "exit_price": float(r[4]) if r[4] is not None else None,
+                "position_size": float(r[5]),
+                "pnl": float(r[6]) if r[6] is not None else None,
+                "pnl_pct": float(r[7]) if r[7] is not None else None,
+                "model_path": r[8],
+                "regime": r[9],
+                "hold_steps": r[10],
+                "exit_reason": r[11],
+                "mode": r[12],
+                "status": r[13],
+                "session_id": r[14],
+                "opened_at": r[15].isoformat() if r[15] else None,
+                "closed_at": r[16].isoformat() if r[16] else None,
+            }
+            for r in rows
+        ]
+        return {"trades": trades, "total": total, "limit": limit, "offset": offset}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/rl-crypto/positions")
+async def get_rl_crypto_positions(
+    mode: str = Query("paper", description="paper or live"),
+):
+    """Get currently open RL crypto positions."""
+    if not DB_ENGINE:
+        raise HTTPException(status_code=503, detail="Database not configured")
+
+    try:
+        with DB_ENGINE.connect() as conn:
+            rows = conn.execute(
+                text("""
+                SELECT id, symbol, action, entry_price, position_size,
+                       model_path, regime, hold_steps, mode, session_id, opened_at
+                FROM rl_crypto_trades
+                WHERE status = 'open' AND mode = :mode
+                ORDER BY opened_at DESC
+                """),
+                {"mode": mode},
+            ).fetchall()
+
+        positions = [
+            {
+                "id": r[0],
+                "symbol": r[1],
+                "action": r[2],
+                "entry_price": float(r[3]),
+                "position_size": float(r[4]),
+                "model_path": r[5],
+                "regime": r[6],
+                "hold_steps": r[7] or 0,
+                "mode": r[8],
+                "session_id": r[9],
+                "opened_at": r[10].isoformat() if r[10] else None,
+            }
+            for r in rows
+        ]
+        return {"positions": positions, "count": len(positions)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/kalshi/trades")
 async def get_kalshi_trades(
     mode: Optional[str] = Query(None, description="Filter by mode: paper or live"),

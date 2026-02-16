@@ -3,8 +3,9 @@
 import { useState } from "react";
 import Link from "next/link";
 import Image from "next/image";
-import { usePathname } from "next/navigation";
+import { usePathname, useSearchParams } from "next/navigation";
 import { ModeToggle } from "./ModeToggle";
+import { BotSelector } from "./BotSelector";
 
 const links = [
   { href: "/", label: "OVERVIEW", icon: "■" },
@@ -16,7 +17,10 @@ const links = [
 
 export default function Nav() {
   const pathname = usePathname();
+  const searchParams = useSearchParams();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const queryString = searchParams.toString();
+  const href = (path: string) => (queryString ? `${path}?${queryString}` : path);
 
   return (
     <nav
@@ -27,7 +31,7 @@ export default function Nav() {
         <div className="flex items-center justify-between h-16 gap-4">
           {/* Logo */}
           <Link
-            href="/"
+            href={href("/")}
             aria-label="RLTrade home"
             className="flex items-center shrink-0 hover:opacity-80 transition-opacity focus:outline-none focus:ring-2 focus:ring-cyan-500/50 focus:ring-offset-2 focus:ring-offset-gray-950 rounded-sm"
           >
@@ -47,7 +51,7 @@ export default function Nav() {
               return (
                 <Link
                   key={l.href}
-                  href={l.href}
+                  href={href(l.href)}
                   aria-current={active ? "page" : undefined}
                   className={`flex items-center gap-1.5 px-3 py-2 rounded-md text-[11px] font-mono font-medium whitespace-nowrap transition-all focus:outline-none focus:ring-2 focus:ring-cyan-500/50 focus:ring-offset-2 focus:ring-offset-gray-950 ${
                     active
@@ -64,8 +68,9 @@ export default function Nav() {
             })}
           </div>
 
-          {/* Mode Toggle - Desktop */}
-          <div className="hidden md:block shrink-0">
+          {/* Bot Selector + Mode Toggle - Desktop */}
+          <div className="hidden md:flex shrink-0 items-center gap-2">
+            <BotSelector />
             <ModeToggle />
           </div>
 
@@ -111,7 +116,7 @@ export default function Nav() {
               return (
                 <Link
                   key={l.href}
-                  href={l.href}
+                  href={href(l.href)}
                   onClick={() => setMobileMenuOpen(false)}
                   aria-current={active ? "page" : undefined}
                   className={`flex items-center gap-2 px-4 py-3 rounded-md text-sm font-mono font-medium transition-all ${
@@ -127,7 +132,8 @@ export default function Nav() {
                 </Link>
               );
             })}
-            <div className="pt-3 border-t border-gray-800/60">
+            <div className="pt-3 border-t border-gray-800/60 space-y-3">
+              <BotSelector />
               <ModeToggle />
             </div>
           </div>

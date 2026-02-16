@@ -1,9 +1,11 @@
 "use client";
 
 import { useMode } from "../components/ModeToggle";
+import { useBot } from "../components/BotSelector";
 import { StatusPill } from "../components/StatusPill";
 import { SectionHeader } from "../components/SectionHeader";
 import { EmptyState } from "../components/EmptyState";
+import { StrategyBadge } from "../components/StrategyBadge";
 
 type SideStats = {
   total: number;
@@ -26,12 +28,17 @@ type EdgeTypeStats = {
 type Props = {
   health: any;
   pnl: any;
+  combinedMetrics: any;
 };
 
-export default function EdgeHealthClient({ health, pnl }: Props) {
+export default function EdgeHealthClient({ health, pnl, combinedMetrics }: Props) {
   const mode = useMode();
+  const bot = useBot();
   const bySide: Record<string, SideStats> = health?.by_side || {};
   const byEdgeType: Record<string, EdgeTypeStats> = health?.by_edge_type || {};
+  const rlMetrics = combinedMetrics?.by_strategy?.rl_crypto || {};
+  const showKalshi = bot === "all" || bot === "kalshi";
+  const showRL = bot === "all" || bot === "rl_crypto";
 
   return (
     <main className="min-h-screen bg-gray-950 text-gray-100 p-3 sm:p-4 max-w-6xl mx-auto grid-terminal">
@@ -39,10 +46,14 @@ export default function EdgeHealthClient({ health, pnl }: Props) {
       <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between mb-6 pb-4 border-b border-gray-800/60">
         <div>
           <h1 className="text-4xl font-bold tracking-tight mb-2">
-            Edge Health
+            Edge Health{bot !== "all" ? (bot === "rl_crypto" ? " (RL Crypto)" : " (Kalshi)") : ""}
           </h1>
           <p className="text-gray-500 text-base font-mono">
-            Statistical edge validation and performance diagnostics
+            {bot === "all"
+              ? "Statistical edge and performance across strategies"
+              : bot === "rl_crypto"
+                ? "RL Crypto Bot performance summary"
+                : "Statistical edge validation and performance diagnostics"}
           </p>
         </div>
         <div className="mt-4 sm:mt-0">
@@ -50,13 +61,71 @@ export default function EdgeHealthClient({ health, pnl }: Props) {
         </div>
       </div>
 
-      {/* By Side */}
-      {Object.keys(bySide).length > 0 ? (
+      {/* RL Crypto Performance Summary */}
+      {showRL && (
         <section className="mb-6">
           <SectionHeader
-            title="Performance by Side"
+            title={bot === "all" ? "RL Crypto Bot — Performance" : "Performance Summary"}
+            subtitle="Win rate and realized P&L from closed trades"
+          />
+          <div className="rounded-lg border border-purple-800/40 bg-purple-950/10 p-6">
+            {bot === "all" && (
+              <div className="flex items-center gap-2 mb-4">
+                <StrategyBadge strategy="rl_crypto" />
+                <span className="text-xs font-mono text-gray-500">RL Crypto Bot</span>
+              </div>
+            )}
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <div>
+                <div className="text-2xl font-mono font-bold tabular-nums">
+                  {rlMetrics.total_trades ?? 0}
+                </div>
+                <div className="text-[10px] text-gray-600 uppercase tracking-widest font-mono">Total Trades</div>
+              </div>
+              <div>
+                <div className="text-2xl font-mono font-bold tabular-nums">
+                  {((rlMetrics.win_rate ?? 0) * 100).toFixed(0)}%
+                </div>
+                <div className="text-[10px] text-gray-600 uppercase tracking-widest font-mono">Win Rate</div>
+              </div>
+              <div>
+                <div className="text-2xl font-mono font-bold tabular-nums">
+                  {(rlMetrics.wins ?? 0)}W / {(rlMetrics.losses ?? 0)}L
+                </div>
+                <div className="text-[10px] text-gray-600 uppercase tracking-widest font-mono">Record</div>
+              </div>
+              <div>
+                <div
+                  className={`text-2xl font-mono font-bold tabular-nums ${
+                    (rlMetrics.realized_pnl ?? 0) >= 0 ? "text-green-400" : "text-red-400"
+                  }`}
+                >
+                  ${(rlMetrics.realized_pnl ?? 0) >= 0 ? "+" : ""}
+                  {(rlMetrics.realized_pnl ?? 0).toFixed(2)}
+                </div>
+                <div className="text-[10px] text-gray-600 uppercase tracking-widest font-mono">Realized P&L</div>
+              </div>
+            </div>
+            {(rlMetrics.total_trades ?? 0) === 0 && (
+              <p className="text-sm text-gray-500 font-mono mt-4">No closed RL crypto trades yet.</p>
+            )}
+          </div>
+        </section>
+      )}
+
+      {/* Kalshi — By Side */}
+      {showKalshi && (Object.keys(bySide).length > 0 ? (
+        <section className="mb-6">
+          <SectionHeader
+            title={bot === "all" ? "Kalshi — Performance by Side" : "Performance by Side"}
             subtitle="Win rate, edge realization, and P&L breakdown"
           />
+          {bot === "all" && (
+            <div className="flex items-center gap-2 mb-3">
+              <StrategyBadge strategy="kalshi" />
+              <span className="text-xs font-mono text-gray-500">Kalshi Market Bot</span>
+            </div>
+          )}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {Object.entries(bySide).map(([side, s]) => (
               <div
@@ -121,14 +190,16 @@ export default function EdgeHealthClient({ health, pnl }: Props) {
           </div>
         </section>
       ) : (
-        <EmptyState
-          message={`No settled ${mode} trades yet`}
-          submessage="Edge health data will appear after settlements"
-        />
-      )}
+        bot === "all" ? null : (
+          <EmptyState
+            message={`No settled ${mode} Kalshi trades yet`}
+            submessage="Edge health data will appear after settlements"
+          />
+        )
+      ))}
 
-      {/* By Edge Type */}
-      {Object.keys(byEdgeType).length > 0 && (
+      {/* Kalshi — By Edge Type */}
+      {showKalshi && Object.keys(byEdgeType).length > 0 && (
         <section className="mb-6">
           <SectionHeader
             title="Performance by Edge Type"
@@ -228,8 +299,8 @@ export default function EdgeHealthClient({ health, pnl }: Props) {
         </section>
       )}
 
-      {/* P&L Series */}
-      {pnl && pnl.series && pnl.series.length > 0 && (
+      {/* Kalshi — P&L Series */}
+      {showKalshi && pnl && pnl.series && pnl.series.length > 0 && (
         <section className="mb-6">
           <SectionHeader
             title="Cumulative P&L Series"

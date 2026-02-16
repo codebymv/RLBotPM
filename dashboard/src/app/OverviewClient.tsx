@@ -1,12 +1,15 @@
 "use client";
 
 import Image from "next/image";
+import { useSearchParams } from "next/navigation";
 import { useMode } from "./components/ModeToggle";
+import { useBot } from "./components/BotSelector";
 import { KpiCard } from "./components/KpiCard";
 import { StatusPill } from "./components/StatusPill";
 import { SectionHeader } from "./components/SectionHeader";
 import { EmptyState } from "./components/EmptyState";
 import { DataFreshness } from "./components/DataFreshness";
+import { StrategyBadge } from "./components/StrategyBadge";
 
 function fmt(n: number, decimals = 2) {
   return n.toLocaleString("en-US", {
@@ -17,7 +20,7 @@ function fmt(n: number, decimals = 2) {
 
 type Props = {
   health: any;
-  metrics: any;
+  combinedMetrics: any;
   crypto: any;
   bot: any;
   mktStats: any;
@@ -25,35 +28,67 @@ type Props = {
 
 export default function OverviewClient({
   health,
-  metrics,
+  combinedMetrics,
   crypto,
-  bot,
+  bot: botStatus,
   mktStats,
 }: Props) {
   const mode = useMode();
+  const bot = useBot();
+  const searchParams = useSearchParams();
+  const queryString = searchParams.toString();
+  const link = (path: string) => (queryString ? `${path}?${queryString}` : path);
 
-  // Filter metrics by mode
-  const modeData = metrics?.mode_breakdown?.[mode];
-  const totalTrades = modeData?.total || 0;
-  const wins = modeData?.wins || 0;
-  const losses = modeData?.losses || 0;
-  const pnl = modeData?.realized_pnl || 0;
-  const openPositions = modeData?.open_positions || 0;
-  const openCost = modeData?.open_cost || 0;
+  // Select data by bot
+  const byStrategy = combinedMetrics?.by_strategy || {};
+  const kalshiData = byStrategy.kalshi || {};
+  const rlData = byStrategy.rl_crypto || {};
+  const combinedData = combinedMetrics?.combined || {};
+
+  const strategyData =
+    bot === "all"
+      ? combinedData
+      : bot === "kalshi"
+        ? kalshiData
+        : rlData;
+
+  const totalTrades = strategyData?.total_trades ?? 0;
+  const wins = strategyData?.wins ?? 0;
+  const losses = strategyData?.losses ?? 0;
+  const pnl = strategyData?.realized_pnl ?? 0;
+  const openPositions = strategyData?.open_positions ?? 0;
+  const openCost = strategyData?.open_cost ?? 0;
   const winRate = totalTrades > 0 ? (wins / totalTrades) * 100 : 0;
 
-  // Filter recent trades by mode
-  const recentTrades = metrics?.recent_trades?.filter(
+  // Recent trades: merge when "all", otherwise filter by bot
+  const kalshiTrades = (kalshiData.recent_trades || []).filter(
     (t: any) => (t.mode || "paper") === mode
-  ) || [];
+  );
+  const rlTrades = (rlData.recent_trades || []).filter(
+    (t: any) => (t.mode || "paper") === mode
+  );
+  const recentTrades =
+    bot === "all"
+      ? [...kalshiTrades, ...rlTrades]
+          .sort((a: any, b: any) => {
+            const dateA = a.opened_at || a.settled_at || "";
+            const dateB = b.opened_at || b.settled_at || "";
+            return dateB.localeCompare(dateA);
+          })
+          .slice(0, 20)
+      : bot === "kalshi"
+        ? kalshiTrades
+        : rlTrades;
 
-  // Get side breakdown for current mode
-  const sideBreakdown = metrics?.side_breakdown
-    ? Object.entries(metrics.side_breakdown).map(([side, data]: [string, any]) => ({
-        side,
-        ...data,
-      }))
-    : [];
+  const sideBreakdown =
+    (bot === "all" || bot === "kalshi") && kalshiData.side_breakdown
+      ? Object.entries(kalshiData.side_breakdown).map(([side, data]: [string, any]) => ({
+          side,
+          ...data,
+        }))
+      : [];
+  const showSideBreakdown = (bot === "all" || bot === "kalshi") && sideBreakdown.length > 0;
+  const showStrategyBreakdown = bot === "all";
 
   return (
     <main className="min-h-screen bg-gray-950 text-gray-100 p-3 sm:p-4 max-w-6xl mx-auto grid-terminal">
@@ -107,13 +142,49 @@ export default function OverviewClient({
       <section className="mb-6">
         <SectionHeader
           title="Trading Performance"
-          subtitle={`Performance metrics for ${mode.toUpperCase()} trading mode`}
-          actionHref="/positions"
+          subtitle={
+            bot === "all"
+              ? `Combined metrics for ${mode.toUpperCase()} (all strategies)`
+              : `Performance for ${mode.toUpperCase()} · ${bot === "rl_crypto" ? "RL Crypto Bot" : "Kalshi Bot"}`
+          }
+          actionHref={link("/positions")}
           actionLabel="VIEW ALL POSITIONS →"
         />
 
-        {metrics && modeData ? (
+        {combinedMetrics && strategyData ? (
           <>
+            {/* Strategy breakdown when "all" */}
+            {showStrategyBreakdown && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-5">
+                <div className="rounded-lg border border-purple-800/40 bg-purple-950/10 p-4">
+                  <div className="flex items-center justify-between mb-2">
+                    <StrategyBadge strategy="rl_crypto" />
+                    <span className="text-xs font-mono text-gray-500">RL Crypto Bot</span>
+                  </div>
+                  <div className="text-xl font-mono font-bold tabular-nums">
+                    ${(rlData.realized_pnl ?? 0) >= 0 ? "+" : ""}
+                    {fmt(rlData.realized_pnl ?? 0)}
+                  </div>
+                  <div className="text-sm font-mono text-gray-400">
+                    {(rlData.total_trades ?? 0)} trades · {(rlData.win_rate ?? 0) * 100}% win rate
+                  </div>
+                </div>
+                <div className="rounded-lg border border-blue-800/40 bg-blue-950/10 p-4">
+                  <div className="flex items-center justify-between mb-2">
+                    <StrategyBadge strategy="kalshi" />
+                    <span className="text-xs font-mono text-gray-500">Kalshi Market Bot</span>
+                  </div>
+                  <div className="text-xl font-mono font-bold tabular-nums">
+                    ${(kalshiData.realized_pnl ?? 0) >= 0 ? "+" : ""}
+                    {fmt(kalshiData.realized_pnl ?? 0)}
+                  </div>
+                  <div className="text-sm font-mono text-gray-400">
+                    {(kalshiData.total_trades ?? 0)} trades · {(kalshiData.win_rate ?? 0) * 100}% win rate
+                  </div>
+                </div>
+              </div>
+            )}
+
             {/* Primary KPIs */}
             <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 mb-5">
               <KpiCard
@@ -148,8 +219,8 @@ export default function OverviewClient({
               />
             </div>
 
-            {/* Side Breakdown */}
-            {sideBreakdown.length > 0 && (
+            {/* Side Breakdown (Kalshi only) */}
+            {showSideBreakdown && (
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 {sideBreakdown.map((data: any) => {
                   const sideWins = data.wins || 0;
@@ -195,7 +266,7 @@ export default function OverviewClient({
           </>
         ) : (
           <EmptyState
-            message={`No ${mode} trading data available`}
+            message={`No ${mode} trading data for ${bot === "all" ? "any strategy" : bot === "rl_crypto" ? "RL Crypto Bot" : "Kalshi Bot"}`}
             submessage="Start the paper trader or switch modes"
           />
         )}
@@ -206,7 +277,7 @@ export default function OverviewClient({
         <SectionHeader
           title="Crypto Spot Prices"
           subtitle="Real-time market data from Coinbase"
-          actionHref="/crypto"
+          actionHref={link("/crypto")}
           actionLabel="DETAILED VIEW →"
         />
 
@@ -257,18 +328,18 @@ export default function OverviewClient({
         <SectionHeader
           title="Bot Configuration"
           subtitle="Strategy parameters and operational status"
-          actionHref="/bot-status"
+          actionHref={link("/bot-status")}
           actionLabel="FULL STATUS →"
         />
 
-        {bot ? (
+        {botStatus ? (
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
             <KpiCard
               label="Total Sessions"
-              value={bot.total_sessions}
+              value={botStatus.total_sessions}
               sublabel={
-                bot.last_trade_at
-                  ? `Last: ${new Date(bot.last_trade_at).toLocaleDateString()}`
+                botStatus.last_trade_at
+                  ? `Last: ${new Date(botStatus.last_trade_at).toLocaleDateString()}`
                   : "No trades yet"
               }
               mode="neutral"
@@ -281,14 +352,14 @@ export default function OverviewClient({
             />
             <KpiCard
               label="Edge Range"
-              value={`${(bot.strategy.min_edge * 100).toFixed(0)}-${(bot.strategy.max_edge * 100).toFixed(0)}%`}
-              sublabel={`Price ${bot.strategy.min_price}-${bot.strategy.max_price}¢`}
+              value={`${(botStatus.strategy.min_edge * 100).toFixed(0)}-${(botStatus.strategy.max_edge * 100).toFixed(0)}%`}
+              sublabel={`Price ${botStatus.strategy.min_price}-${botStatus.strategy.max_price}¢`}
               mode="neutral"
             />
             <KpiCard
               label="Assets Tracked"
-              value={bot.strategy.assets.length}
-              sublabel={bot.strategy.assets.slice(0, 2).join(", ") + (bot.strategy.assets.length > 2 ? "..." : "")}
+              value={botStatus.strategy.assets.length}
+              sublabel={botStatus.strategy.assets.slice(0, 2).join(", ") + (botStatus.strategy.assets.length > 2 ? "..." : "")}
               mode="neutral"
             />
           </div>
@@ -300,9 +371,9 @@ export default function OverviewClient({
       {/* Recent Trades */}
       <section className="mb-6">
         <SectionHeader
-          title={`Recent ${mode.charAt(0).toUpperCase() + mode.slice(1)} Trades`}
+          title={`Recent ${mode.charAt(0).toUpperCase() + mode.slice(1)} Trades${bot !== "all" ? ` (${bot === "rl_crypto" ? "RL" : "Kalshi"})` : ""}`}
           subtitle={`Latest executions in ${mode} mode`}
-          actionHref="/positions"
+          actionHref={link("/positions")}
           actionLabel="ALL POSITIONS →"
         />
 
@@ -313,6 +384,7 @@ export default function OverviewClient({
               <table className="w-full text-sm font-mono">
                 <thead>
                   <tr className="text-gray-500 border-b border-gray-800/60 text-[10px] uppercase tracking-widest">
+                    {bot === "all" && <th className="text-left py-3 px-4 font-bold">Strategy</th>}
                     <th className="text-left py-3 px-4 font-bold">Ticker</th>
                     <th className="text-left py-3 px-4 font-bold">Side</th>
                     <th className="text-right py-3 px-4 font-bold">Price</th>
@@ -326,31 +398,44 @@ export default function OverviewClient({
                 <tbody>
                   {recentTrades.slice(0, 10).map((t: any, i: number) => (
                     <tr
-                      key={`${t.ticker}-${i}`}
+                      key={`${t.ticker ?? t.symbol}-${t.strategy ?? bot}-${i}`}
                       className="border-b border-gray-900/40 hover:bg-gray-900/40 transition-colors"
                     >
+                      {bot === "all" && (
+                        <td className="py-3 px-4">
+                          {t.strategy ? (
+                            <StrategyBadge strategy={t.strategy} />
+                          ) : (
+                            "—"
+                          )}
+                        </td>
+                      )}
                       <td className="py-3 px-4 text-xs font-bold">
-                        {t.ticker}
+                        {t.ticker ?? t.symbol}
                       </td>
                       <td className="py-3 px-4">
-                        <span
-                          className={`px-2 py-0.5 rounded-md text-[9px] font-bold uppercase ${
-                            t.side === "no"
-                              ? "bg-green-900/60 text-green-300"
-                              : "bg-red-900/60 text-red-300"
-                          }`}
-                        >
-                          {t.side}
-                        </span>
+                        {t.side != null ? (
+                          <span
+                            className={`px-2 py-0.5 rounded-md text-[9px] font-bold uppercase ${
+                              t.side === "no"
+                                ? "bg-green-900/60 text-green-300"
+                                : "bg-red-900/60 text-red-300"
+                            }`}
+                          >
+                            {t.side}
+                          </span>
+                        ) : (
+                          <span className="text-gray-500">—</span>
+                        )}
                       </td>
                       <td className="py-3 px-4 text-right tabular-nums">
-                        {t.entry_price_cents}¢
+                        {t.entry_price_cents != null ? `${t.entry_price_cents}¢` : t.entry_price != null ? `$${fmt(t.entry_price)}` : "—"}
                       </td>
                       <td className="py-3 px-4 text-right tabular-nums text-gray-400">
-                        {t.edge ? `${(t.edge * 100).toFixed(1)}%` : "—"}
+                        {t.edge != null ? `${(t.edge * 100).toFixed(1)}%` : "—"}
                       </td>
                       <td className="py-3 px-4 text-right tabular-nums">
-                        {t.contracts}
+                        {t.contracts ?? 1}
                       </td>
                       <td className="py-3 px-4 text-right tabular-nums">
                         ${fmt(t.cost)}
@@ -361,19 +446,19 @@ export default function OverviewClient({
                             t.status === "open" ? "text-amber-400" : "text-gray-500"
                           }`}
                         >
-                          {t.status}
+                          {t.status ?? "—"}
                         </span>
                       </td>
                       <td
                         className={`py-3 px-4 text-right font-bold tabular-nums ${
-                          t.pnl && t.pnl > 0
+                          t.pnl != null && t.pnl > 0
                             ? "text-green-400"
-                            : t.pnl && t.pnl < 0
+                            : t.pnl != null && t.pnl < 0
                               ? "text-red-400"
                               : "text-gray-400"
                         }`}
                       >
-                        {t.pnl !== null
+                        {t.pnl != null
                           ? `$${t.pnl >= 0 ? "+" : ""}${fmt(t.pnl)}`
                           : "—"}
                       </td>
@@ -387,34 +472,43 @@ export default function OverviewClient({
             <div className="md:hidden space-y-3">
               {recentTrades.slice(0, 10).map((t: any, i: number) => (
                 <div
-                  key={`${t.ticker}-${i}`}
+                  key={`${t.ticker ?? t.symbol}-${t.strategy ?? bot}-${i}`}
                   className="rounded-lg border border-gray-800/60 bg-gray-900/20 p-4"
                 >
                   <div className="flex items-start justify-between mb-3">
                     <div className="flex-1">
-                      <div className="font-mono text-sm font-bold mb-1">
-                        {t.ticker}
+                      <div className="flex items-center gap-2 flex-wrap mb-1">
+                        {bot === "all" && t.strategy && (
+                          <StrategyBadge strategy={t.strategy} />
+                        )}
+                        <div className="font-mono text-sm font-bold">
+                          {t.ticker ?? t.symbol}
+                        </div>
                       </div>
-                      <span
-                        className={`inline-block px-2 py-0.5 rounded-md text-[9px] font-bold uppercase ${
-                          t.side === "no"
-                            ? "bg-green-900/60 text-green-300"
-                            : "bg-red-900/60 text-red-300"
-                        }`}
-                      >
-                        {t.side}
-                      </span>
+                      {t.side != null ? (
+                        <span
+                          className={`inline-block px-2 py-0.5 rounded-md text-[9px] font-bold uppercase ${
+                            t.side === "no"
+                              ? "bg-green-900/60 text-green-300"
+                              : "bg-red-900/60 text-red-300"
+                          }`}
+                        >
+                          {t.side}
+                        </span>
+                      ) : (
+                        <span className="text-gray-500 text-[9px]">—</span>
+                      )}
                     </div>
                     <div
                       className={`text-lg font-mono font-bold tabular-nums ${
-                        t.pnl && t.pnl > 0
+                        t.pnl != null && t.pnl > 0
                           ? "text-green-400"
-                          : t.pnl && t.pnl < 0
+                          : t.pnl != null && t.pnl < 0
                             ? "text-red-400"
                             : "text-gray-400"
                       }`}
                     >
-                      {t.pnl !== null
+                      {t.pnl != null
                         ? `$${t.pnl >= 0 ? "+" : ""}${fmt(t.pnl)}`
                         : "—"}
                     </div>
@@ -424,21 +518,23 @@ export default function OverviewClient({
                       <div className="text-[10px] text-gray-600 uppercase mb-0.5">
                         Price
                       </div>
-                      <div className="tabular-nums">{t.entry_price_cents}¢</div>
+                      <div className="tabular-nums">
+                        {t.entry_price_cents != null ? `${t.entry_price_cents}¢` : t.entry_price != null ? `$${fmt(t.entry_price)}` : "—"}
+                      </div>
                     </div>
                     <div>
                       <div className="text-[10px] text-gray-600 uppercase mb-0.5">
                         Edge
                       </div>
                       <div className="tabular-nums text-gray-400">
-                        {t.edge ? `${(t.edge * 100).toFixed(1)}%` : "—"}
+                        {t.edge != null ? `${(t.edge * 100).toFixed(1)}%` : "—"}
                       </div>
                     </div>
                     <div>
                       <div className="text-[10px] text-gray-600 uppercase mb-0.5">
                         Qty
                       </div>
-                      <div className="tabular-nums">{t.contracts}</div>
+                      <div className="tabular-nums">{t.contracts ?? 1}</div>
                     </div>
                     <div>
                       <div className="text-[10px] text-gray-600 uppercase mb-0.5">

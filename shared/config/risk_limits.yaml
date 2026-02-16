@@ -1,0 +1,158 @@
+# Risk Management Configuration
+# These limits apply to LIVE trading only (paper trading has separate, looser limits)
+
+live_trading:
+  # ═══════════════════════════════════════════════════════════════
+  # CAPITAL LIMITS
+  # ═══════════════════════════════════════════════════════════════
+  
+  # Start VERY small - scale up only after proven success
+  max_total_capital: 500.00         # Maximum capital deployed
+  max_position_size: 50.00          # Maximum $ per position
+  max_open_positions: 5             # Maximum concurrent positions
+  
+  # Position concentration
+  max_pct_per_position: 0.20        # Max 20% of capital in one position
+  max_pct_per_asset: 0.40           # Max 40% of capital in one asset (e.g., BTC)
+  
+  
+  # ═══════════════════════════════════════════════════════════════
+  # LOSS LIMITS (Circuit Breakers)
+  # ═══════════════════════════════════════════════════════════════
+  
+  # Stop trading immediately if any of these are hit
+  max_daily_loss: 50.00             # -$50 in a day = STOP
+  max_weekly_loss: 100.00           # -$100 in a week = STOP
+  max_monthly_loss: 200.00          # -$200 in a month = STOP
+  max_single_trade_loss: 30.00      # Single trade loses $30 = flag
+  
+  # Drawdown limits (from peak equity)
+  max_drawdown_pct: 0.15            # Stop at 15% drawdown from peak
+  max_daily_drawdown_pct: 0.10      # Stop at 10% intraday drawdown
+  
+  # Consecutive loss protection
+  max_consecutive_losses: 5         # Stop after 5 losses in a row
+  consecutive_loss_cooldown_hours: 24  # Wait 24h after halt
+  
+  
+  # ═══════════════════════════════════════════════════════════════
+  # TRADE FREQUENCY LIMITS
+  # ═══════════════════════════════════════════════════════════════
+  
+  max_trades_per_day: 20
+  max_trades_per_hour: 5
+  max_trades_per_week: 100
+  min_seconds_between_trades: 60    # Cooldown between trades
+  
+  
+  # ═══════════════════════════════════════════════════════════════
+  # EDGE & CONFIDENCE REQUIREMENTS
+  # ═══════════════════════════════════════════════════════════════
+  
+  # Stricter than paper trading to reduce false positives
+  min_edge_threshold: 0.08          # 8% minimum edge (vs 5% paper)
+  min_confidence_score: 0.70        # Model confidence threshold
+  min_profit_probability: 0.55      # Estimated win probability
+  
+  # Price & liquidity sanity checks
+  max_price_cents: 95               # Don't buy if price > 95¢
+  min_price_cents: 5                # Don't buy if price < 5¢ (too illiquid)
+  min_market_liquidity: 100         # Minimum open interest/volume
+  
+  
+  # ═══════════════════════════════════════════════════════════════
+  # EXECUTION CONTROLS
+  # ═══════════════════════════════════════════════════════════════
+  
+  # Order execution
+  max_slippage_pct: 0.05            # Cancel if slippage > 5%
+  order_timeout_seconds: 30         # Cancel unfilled orders after 30s
+  require_maker_orders: false       # Allow taker orders (pay higher fees)
+  
+  # Position management
+  force_close_on_halt: true         # Close all positions if circuit breaker trips
+  max_position_hold_hours: 72       # Force close positions after 72h
+  check_positions_interval_minutes: 5  # How often to review open positions
+  
+  
+  # ═══════════════════════════════════════════════════════════════
+  # MONITORING & ALERTS
+  # ═══════════════════════════════════════════════════════════════
+  
+  alert_on_trade: true              # Alert every trade
+  alert_on_loss: true               # Alert on losing trades
+  alert_on_circuit_breaker: true    # Critical alert when limits hit
+  
+  # Warning thresholds (% of limit before alerting)
+  warning_threshold_pct: 0.80       # Warn at 80% of any limit
+  
+  # Performance monitoring
+  min_sharpe_ratio: 0.5             # Warn if Sharpe drops below 0.5
+  max_acceptable_fees_pct: 0.20     # Warn if fees exceed 20% of gross PnL
+  
+  
+  # ═══════════════════════════════════════════════════════════════
+  # EMERGENCY PROCEDURES
+  # ═══════════════════════════════════════════════════════════════
+  
+  emergency_shutdown:
+    api_failure_max_retries: 3
+    api_failure_halt_trading: true
+    unexpected_error_halt: true
+    manual_override_allowed: false  # Require code change to override
+  
+  recovery:
+    auto_resume_after_halt: false   # Require manual restart
+    require_health_check: true      # Check system health before resuming
+    log_all_decisions: true         # Comprehensive logging
+
+
+# ═══════════════════════════════════════════════════════════════
+# SCALING SCHEDULE (Reference Only)
+# ═══════════════════════════════════════════════════════════════
+
+scaling_phases:
+  micro:
+    capital: 100-500
+    max_position: 50
+    min_runtime_weeks: 2
+    success_criteria:
+      - "Profitable overall"
+      - "No infrastructure issues"
+      - "Risk limits enforced correctly"
+  
+  small:
+    capital: 1000
+    max_position: 100
+    min_runtime_weeks: 4
+    success_criteria:
+      - "Sharpe > 1.5"
+      - "Max drawdown < 10%"
+      - "Consistent profitability"
+  
+  medium:
+    capital: 2500
+    max_position: 200
+    min_runtime_weeks: 8
+    success_criteria:
+      - "Proven track record"
+      - "All metrics in target ranges"
+  
+  standard:
+    capital: 5000+
+    max_position: 500
+    min_runtime_weeks: 12
+    success_criteria:
+      - "Multi-month consistency"
+      - "Validated edge"
+
+
+# ═══════════════════════════════════════════════════════════════
+# NOTES
+# ═══════════════════════════════════════════════════════════════
+
+# 1. These limits are CONSERVATIVE by design. Start small, scale slowly.
+# 2. Never override limits in the heat of trading. Change config deliberately.
+# 3. Review and adjust limits monthly based on performance data.
+# 4. When in doubt, REDUCE risk, don't increase it.
+# 5. The goal is consistent small wins, not home runs.
