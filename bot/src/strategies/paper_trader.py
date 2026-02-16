@@ -27,6 +27,61 @@ logger = get_logger(__name__)
 
 LOG_DIR = Path(__file__).resolve().parent.parent.parent / "logs"
 
+
+# ---------------------------------------------------------------------------
+# Database persistence helpers
+# ---------------------------------------------------------------------------
+
+def _db_open_trade(pos: "PaperPosition", mode: str = "paper", session_id: str = ""):
+    """Persist an opened trade to the kalshi_trades table."""
+    try:
+        from ..data.database import get_db_session, KalshiTrade
+        sess = get_db_session()
+        trade = KalshiTrade(
+            ticker=pos.ticker,
+            event_ticker=pos.event_ticker,
+            series_ticker=pos.series_ticker,
+            side=pos.side,
+            entry_price_cents=pos.entry_price_cents,
+            fair_price_cents=pos.fair_price_cents,
+            edge_value=pos.edge_value,
+            edge_type=pos.edge_type,
+            contracts=pos.contracts,
+            cost_dollars=pos.cost_dollars,
+            reasoning=pos.reasoning,
+            status="open",
+            mode=mode,
+            session_id=session_id,
+            opened_at=datetime.fromisoformat(pos.opened_at) if isinstance(pos.opened_at, str) else pos.opened_at,
+        )
+        sess.add(trade)
+        sess.commit()
+        sess.close()
+    except Exception as e:
+        logger.debug(f"DB write (open) failed: {e}")
+
+
+def _db_settle_trade(ticker: str, outcome: str, pnl: float, mode: str = "paper", session_id: str = ""):
+    """Update a trade as settled in the kalshi_trades table."""
+    try:
+        from ..data.database import get_db_session, KalshiTrade
+        sess = get_db_session()
+        trade = (
+            sess.query(KalshiTrade)
+            .filter_by(ticker=ticker, status="open", mode=mode)
+            .order_by(KalshiTrade.id.desc())
+            .first()
+        )
+        if trade:
+            trade.status = "settled"
+            trade.outcome = outcome
+            trade.pnl = pnl
+            trade.settled_at = datetime.now(timezone.utc)
+            sess.commit()
+        sess.close()
+    except Exception as e:
+        logger.debug(f"DB write (settle) failed: {e}")
+
 CRYPTO_SERIES = ["KXBTC", "KXBTCD", "KXETH", "KXETHD", "KXSOLD", "KXDOGE", "KXXRP"]
 
 # Map series prefixes to canonical asset names
@@ -205,6 +260,7 @@ def _check_settlements(adapter, portfolio: PaperPortfolio, log_path: Path):
             "pnl": pos.pnl,
             "cumulative_pnl": portfolio.realized_pnl,
         })
+        _db_settle_trade(ticker, market.result, pos.pnl, mode="paper")
         logger.info(
             f"SETTLED {ticker}: {market.result} → "
             f"{'WIN' if pos.pnl > 0 else 'LOSS'} ${pos.pnl:+.2f}  "
@@ -250,6 +306,9 @@ def run_paper_trading(
 
     series_list = series or CRYPTO_SERIES
     log_path = LOG_DIR / "paper_trades.jsonl"
+
+    import uuid as _uuid
+    session_id = f"paper_{_uuid.uuid4().hex[:12]}"
 
     adapter = KalshiAdapter(demo=demo)
     detector = StatisticalEdgeDetector(
@@ -383,6 +442,7 @@ def run_paper_trading(
                 )
                 portfolio.open_positions[edge.ticker] = pos
                 new_trades += 1
+                _db_open_trade(pos, mode="paper", session_id=session_id)
 
                 _log_event(log_path, {
                     "type": "open_position",

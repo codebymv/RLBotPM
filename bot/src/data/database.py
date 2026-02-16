@@ -283,6 +283,44 @@ class KalshiSettledMarket(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
+class KalshiTrade(Base):
+    """
+    Stores paper and live Kalshi trades for dashboard monitoring.
+
+    Written by paper_trader and live_trader, read by the API/dashboard.
+    """
+    __tablename__ = "kalshi_trades"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ticker = Column(String(255), nullable=False, index=True)
+    event_ticker = Column(String(255), nullable=True)
+    series_ticker = Column(String(100), nullable=True)
+
+    # Trade info
+    side = Column(String(10), nullable=False)            # 'yes' or 'no'
+    entry_price_cents = Column(Float, nullable=False)     # market price at entry
+    fair_price_cents = Column(Float, nullable=True)       # model fair price
+    edge_value = Column(Float, nullable=True)             # detected edge
+    edge_type = Column(String(50), nullable=True)         # 'crypto_spot_mispricing', etc.
+    contracts = Column(Integer, nullable=False, default=1)
+    cost_dollars = Column(Float, nullable=False)
+    reasoning = Column(Text, nullable=True)
+
+    # Settlement
+    status = Column(String(20), nullable=False, default='open', index=True)  # 'open', 'settled'
+    outcome = Column(String(10), nullable=True)           # 'yes' or 'no'
+    pnl = Column(Float, nullable=True)
+
+    # Mode
+    mode = Column(String(20), nullable=False, default='paper', index=True)  # 'paper' or 'live'
+    session_id = Column(String(100), nullable=True, index=True)  # groups trades by session
+
+    # Timestamps
+    opened_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    settled_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 # Database engine and session factory
 def get_engine():
     """Create database engine from settings"""

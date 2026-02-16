@@ -32,7 +32,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 DB_ENGINE = create_engine(DATABASE_URL) if DATABASE_URL else None
 
 # Configure CORS
-origins = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
+origins = [o.strip() for o in os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",") if o.strip()]
 
 app.add_middleware(
     CORSMiddleware,
@@ -315,25 +315,300 @@ async def get_trades(
 @app.get("/api/paper-trading/metrics")
 async def get_paper_trading_metrics():
     """
-    Return latest paper trading metrics.
+    Return paper trading portfolio metrics from the kalshi_trades table.
     """
-    metrics_path = os.getenv("PAPER_TRADING_METRICS_PATH", "./logs/paper_trading/metrics.json")
-    if os.path.exists(metrics_path):
-        try:
-            with open(metrics_path, "r", encoding="utf-8") as handle:
-                return json.load(handle)
-        except Exception:
-            pass
+    if not DB_ENGINE:
+        raise HTTPException(status_code=503, detail="Database not configured")
 
-    return {
-        "capital": 0.0,
-        "total_return_pct": 0.0,
-        "win_rate": 0.0,
-        "num_trades": 0,
-        "open_positions": 0,
-        "recent_trades": [],
-        "timestamp": datetime.utcnow().isoformat(),
-    }
+    try:
+        with DB_ENGINE.connect() as conn:
+            # Overall stats
+            row = conn.execute(text("""
+                SELECT
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN status='settled' AND pnl > 0 THEN 1 ELSE 0 END) AS wins,
+                    SUM(CASE WHEN status='settled' AND pnl <= 0 THEN 1 ELSE 0 END) AS losses,
+                    COALESCE(SUM(CASE WHEN status='settled' THEN pnl END), 0) AS realized_pnl,
+                    SUM(CASE WHEN status='open' THEN 1 ELSE 0 END) AS open_count,
+                    COALESCE(SUM(CASE WHEN status='open' THEN cost_dollars END), 0) AS open_cost
+                FROM kalshi_trades
+                WHERE mode = 'paper'
+            """)).fetchone()
+
+            total = int(row[0] or 0)
+            wins = int(row[1] or 0)
+            losses = int(row[2] or 0)
+            realized_pnl = float(row[3] or 0)
+            open_count = int(row[4] or 0)
+            open_cost = float(row[5] or 0)
+            settled = wins + losses
+            win_rate = (wins / settled) if settled > 0 else 0.0
+
+            # Side breakdown
+            side_rows = conn.execute(text("""
+                SELECT
+                    side,
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) AS wins,
+                    COALESCE(SUM(pnl), 0) AS pnl
+                FROM kalshi_trades
+                WHERE mode = 'paper' AND status = 'settled'
+                GROUP BY side
+            """)).fetchall()
+            side_breakdown = {
+                r[0]: {"total": int(r[1]), "wins": int(r[2]), "pnl": float(r[3])}
+                for r in side_rows
+            }
+
+            # Recent trades (last 20)
+            recent = conn.execute(text("""
+                SELECT ticker, side, entry_price_cents, edge_value, contracts,
+                       cost_dollars, status, outcome, pnl,
+                       opened_at, settled_at, edge_type
+                FROM kalshi_trades
+                WHERE mode = 'paper'
+                ORDER BY id DESC
+                LIMIT 20
+            """)).fetchall()
+
+        recent_trades = [
+            {
+                "ticker": r[0],
+                "side": r[1],
+                "entry_price_cents": float(r[2]),
+                "edge": float(r[3]) if r[3] else None,
+                "contracts": int(r[4]),
+                "cost": float(r[5]),
+                "status": r[6],
+                "outcome": r[7],
+                "pnl": float(r[8]) if r[8] is not None else None,
+                "opened_at": r[9].isoformat() if r[9] else None,
+                "settled_at": r[10].isoformat() if r[10] else None,
+                "edge_type": r[11],
+            }
+            for r in recent
+        ]
+
+        return {
+            "total_trades": total,
+            "wins": wins,
+            "losses": losses,
+            "win_rate": win_rate,
+            "realized_pnl": realized_pnl,
+            "open_positions": open_count,
+            "open_cost": open_cost,
+            "side_breakdown": side_breakdown,
+            "recent_trades": recent_trades,
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/kalshi/trades")
+async def get_kalshi_trades(
+    mode: Optional[str] = Query(None, description="Filter by mode: paper or live"),
+    status: Optional[str] = Query(None, description="Filter by status: open or settled"),
+    side: Optional[str] = Query(None, description="Filter by side: yes or no"),
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
+    """Get Kalshi trades from the database."""
+    if not DB_ENGINE:
+        raise HTTPException(status_code=503, detail="Database not configured")
+
+    try:
+        conditions = []
+        params: dict = {"lim": limit, "off": offset}
+        if mode:
+            conditions.append("mode = :mode")
+            params["mode"] = mode
+        if status:
+            conditions.append("status = :status")
+            params["status"] = status
+        if side:
+            conditions.append("side = :side")
+            params["side"] = side
+
+        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+
+        with DB_ENGINE.connect() as conn:
+            total = conn.execute(
+                text(f"SELECT COUNT(*) FROM kalshi_trades {where}"), params
+            ).scalar() or 0
+
+            rows = conn.execute(text(f"""
+                SELECT id, ticker, event_ticker, series_ticker, side,
+                       entry_price_cents, fair_price_cents, edge_value, edge_type,
+                       contracts, cost_dollars, reasoning, status, outcome, pnl,
+                       mode, session_id, opened_at, settled_at
+                FROM kalshi_trades {where}
+                ORDER BY id DESC
+                LIMIT :lim OFFSET :off
+            """), params).fetchall()
+
+        trades = [
+            {
+                "id": r[0], "ticker": r[1], "event_ticker": r[2],
+                "series_ticker": r[3], "side": r[4],
+                "entry_price_cents": float(r[5]),
+                "fair_price_cents": float(r[6]) if r[6] else None,
+                "edge": float(r[7]) if r[7] else None,
+                "edge_type": r[8], "contracts": int(r[9]),
+                "cost": float(r[10]), "reasoning": r[11],
+                "status": r[12], "outcome": r[13],
+                "pnl": float(r[14]) if r[14] is not None else None,
+                "mode": r[15], "session_id": r[16],
+                "opened_at": r[17].isoformat() if r[17] else None,
+                "settled_at": r[18].isoformat() if r[18] else None,
+            }
+            for r in rows
+        ]
+        return {"trades": trades, "total": total, "limit": limit, "offset": offset}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/kalshi/positions")
+async def get_kalshi_positions(
+    mode: Optional[str] = Query("paper", description="paper or live"),
+):
+    """Get currently open Kalshi positions."""
+    if not DB_ENGINE:
+        raise HTTPException(status_code=503, detail="Database not configured")
+
+    try:
+        with DB_ENGINE.connect() as conn:
+            rows = conn.execute(text("""
+                SELECT ticker, side, entry_price_cents, fair_price_cents,
+                       edge_value, edge_type, contracts, cost_dollars,
+                       reasoning, opened_at, series_ticker
+                FROM kalshi_trades
+                WHERE status = 'open' AND mode = :mode
+                ORDER BY opened_at DESC
+            """), {"mode": mode}).fetchall()
+
+        positions = [
+            {
+                "ticker": r[0], "side": r[1],
+                "entry_price_cents": float(r[2]),
+                "fair_price_cents": float(r[3]) if r[3] else None,
+                "edge": float(r[4]) if r[4] else None,
+                "edge_type": r[5], "contracts": int(r[6]),
+                "cost": float(r[7]), "reasoning": r[8],
+                "opened_at": r[9].isoformat() if r[9] else None,
+                "series_ticker": r[10],
+            }
+            for r in rows
+        ]
+        return {"positions": positions, "count": len(positions)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/kalshi/pnl-series")
+async def get_kalshi_pnl_series(
+    mode: Optional[str] = Query("paper", description="paper or live"),
+):
+    """Get cumulative P&L time series for charting."""
+    if not DB_ENGINE:
+        raise HTTPException(status_code=503, detail="Database not configured")
+
+    try:
+        with DB_ENGINE.connect() as conn:
+            rows = conn.execute(text("""
+                SELECT settled_at, pnl, side, ticker
+                FROM kalshi_trades
+                WHERE status = 'settled' AND mode = :mode AND settled_at IS NOT NULL
+                ORDER BY settled_at ASC
+            """), {"mode": mode}).fetchall()
+
+        cumulative = 0.0
+        series = []
+        for r in rows:
+            cumulative += float(r[1] or 0)
+            series.append({
+                "timestamp": r[0].isoformat() if r[0] else None,
+                "pnl": float(r[1] or 0),
+                "cumulative_pnl": cumulative,
+                "side": r[2],
+                "ticker": r[3],
+            })
+        return {"series": series, "total_pnl": cumulative}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/kalshi/edge-health")
+async def get_kalshi_edge_health(
+    mode: Optional[str] = Query("paper", description="paper or live"),
+):
+    """Edge health metrics — rolling win rate and avg edge size."""
+    if not DB_ENGINE:
+        raise HTTPException(status_code=503, detail="Database not configured")
+
+    try:
+        with DB_ENGINE.connect() as conn:
+            # Overall settled stats by side
+            rows = conn.execute(text("""
+                SELECT
+                    side,
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) AS wins,
+                    AVG(edge_value) AS avg_edge,
+                    AVG(pnl) AS avg_pnl,
+                    SUM(pnl) AS total_pnl
+                FROM kalshi_trades
+                WHERE status = 'settled' AND mode = :mode
+                GROUP BY side
+            """), {"mode": mode}).fetchall()
+
+            by_side = {}
+            for r in rows:
+                total = int(r[1])
+                wins = int(r[2])
+                by_side[r[0]] = {
+                    "total": total,
+                    "wins": wins,
+                    "losses": total - wins,
+                    "win_rate": wins / total if total > 0 else 0,
+                    "avg_edge": float(r[3]) if r[3] else 0,
+                    "avg_pnl": float(r[4]) if r[4] else 0,
+                    "total_pnl": float(r[5]) if r[5] else 0,
+                }
+
+            # Edge type breakdown
+            edge_rows = conn.execute(text("""
+                SELECT
+                    edge_type,
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) AS wins,
+                    AVG(edge_value) AS avg_edge,
+                    SUM(pnl) AS total_pnl
+                FROM kalshi_trades
+                WHERE status = 'settled' AND mode = :mode
+                GROUP BY edge_type
+            """), {"mode": mode}).fetchall()
+
+            by_edge_type = {}
+            for r in edge_rows:
+                total = int(r[1])
+                wins = int(r[2])
+                by_edge_type[r[0] or "unknown"] = {
+                    "total": total,
+                    "wins": wins,
+                    "win_rate": wins / total if total > 0 else 0,
+                    "avg_edge": float(r[3]) if r[3] else 0,
+                    "total_pnl": float(r[4]) if r[4] else 0,
+                }
+
+        return {
+            "by_side": by_side,
+            "by_edge_type": by_edge_type,
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/trades/summary")
@@ -587,5 +862,5 @@ def _interval_to_seconds(interval: str) -> int:
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.getenv("API_PORT", 8000))
+    port = int(os.getenv("PORT", os.getenv("API_PORT", 8000)))
     uvicorn.run(app, host="0.0.0.0", port=port)
