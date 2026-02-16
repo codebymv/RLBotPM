@@ -1,4 +1,5 @@
-import Link from "next/link";
+import { SectionHeader } from "../components/SectionHeader";
+import { DataFreshness } from "../components/DataFreshness";
 
 const baseUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
@@ -36,7 +37,7 @@ async function getCandles(asset: string) {
   try {
     const res = await fetch(
       `${baseUrl}/api/crypto/candles/${asset}?interval=1h&limit=24`,
-      { cache: "no-store" },
+      { cache: "no-store" }
     );
     if (!res.ok) return [];
     const data = await res.json();
@@ -68,20 +69,45 @@ export default async function CryptoPage() {
   });
 
   return (
-    <main className="min-h-screen bg-gray-950 text-gray-100 p-4 sm:p-6 max-w-7xl mx-auto">
-      <h1 className="text-2xl font-bold mt-2 mb-1">Crypto Market Data</h1>
-      <p className="text-gray-500 text-sm mb-6">
-        Live spot prices from Coinbase &middot; calibrated volatilities from
-        Kalshi settlement history
-      </p>
+    <main className="min-h-screen bg-gray-950 text-gray-100 p-4 sm:p-6 max-w-7xl mx-auto grid-terminal">
+      {/* Header */}
+      <div className="mb-8 pb-6 border-b border-gray-800/60">
+        <div className="flex items-end justify-between">
+          <div>
+            <h1 className="text-3xl font-bold tracking-tight mb-2">
+              Market Data
+            </h1>
+            <p className="text-gray-500 text-sm font-mono">
+              Live spot prices from Coinbase · calibrated volatilities from
+              Kalshi
+            </p>
+          </div>
+          <DataFreshness lastUpdated={crypto?.last_updated} />
+        </div>
+      </div>
 
+      {/* Context Ribbon */}
+      <div className="mb-6 rounded-lg border border-blue-900/40 bg-blue-950/10 p-4">
+        <div className="flex items-center gap-2 mb-1">
+          <span className="text-blue-400 text-xs">ⓘ</span>
+          <span className="text-xs font-mono font-bold uppercase tracking-widest text-blue-400">
+            Context
+          </span>
+        </div>
+        <p className="text-xs text-gray-400 font-mono leading-relaxed">
+          Market data is for context only. Trading decisions are based on Kalshi
+          prediction markets, not spot crypto positions. Volatilities are
+          calibrated from historical settlement data.
+        </p>
+      </div>
+
+      {/* Asset Cards */}
       <div className="space-y-6">
         {ASSETS.map((asset) => {
           const p = prices[asset];
           const vol = vols[asset];
           const c = candles[asset] || [];
-          const decimals =
-            asset === "DOGE" || asset === "XRP" ? 4 : 2;
+          const decimals = asset === "DOGE" || asset === "XRP" ? 4 : 2;
 
           // 24h range from candles
           const highs = c.map((x) => x.high);
@@ -105,29 +131,33 @@ export default async function CryptoPage() {
           return (
             <div
               key={asset}
-              className="rounded-lg border border-gray-800 bg-gray-900/60 p-5"
+              className="rounded-lg border border-gray-800/60 bg-gray-900/30 p-6 hover:bg-gray-900/40 transition-colors"
             >
               {/* Header row */}
-              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between mb-4 gap-2">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between mb-5 gap-3">
                 <div className="flex items-center gap-3">
-                  <span className="text-xl font-bold">{asset}</span>
-                  <span className="text-gray-500 text-sm">
+                  <span className="text-2xl font-bold font-mono tracking-tight">
+                    {asset}
+                  </span>
+                  <span className="text-gray-600 text-xs font-mono">
                     {asset}-USD
                   </span>
                   {vol !== undefined && (
-                    <span className="text-xs px-2 py-0.5 rounded bg-gray-800 text-gray-400">
-                      σ = {(vol * 100).toFixed(0)}% ann.
+                    <span className="text-[9px] font-mono font-bold px-2.5 py-1 rounded-md bg-gray-800/60 text-gray-400 uppercase tracking-wider">
+                      σ {(vol * 100).toFixed(0)}% ANNUAL
                     </span>
                   )}
                 </div>
                 {p?.price ? (
-                  <div className="flex items-baseline gap-3">
-                    <span className="text-2xl font-mono font-bold">
+                  <div className="flex items-baseline gap-4">
+                    <span className="text-3xl font-mono font-bold tabular-nums">
                       ${fmt(p.price, decimals)}
                     </span>
                     {change24 !== null && (
                       <span
-                        className={`text-sm font-medium ${change24 >= 0 ? "text-green-400" : "text-red-400"}`}
+                        className={`text-sm font-mono font-bold ${
+                          change24 >= 0 ? "text-green-400" : "text-red-400"
+                        }`}
                       >
                         {change24 >= 0 ? "+" : ""}
                         {change24.toFixed(2)}%
@@ -135,16 +165,22 @@ export default async function CryptoPage() {
                     )}
                   </div>
                 ) : (
-                  <span className="text-red-400 text-sm">
+                  <span className="text-red-400 text-sm font-mono">
                     {p?.error || "unavailable"}
                   </span>
                 )}
               </div>
 
               {/* Stats row */}
-              <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 mb-4 text-sm">
-                <Stat label="Bid" value={p?.bid ? `$${fmt(p.bid, decimals)}` : "—"} />
-                <Stat label="Ask" value={p?.ask ? `$${fmt(p.ask, decimals)}` : "—"} />
+              <div className="grid grid-cols-2 sm:grid-cols-5 gap-4 mb-5">
+                <Stat
+                  label="Bid"
+                  value={p?.bid ? `$${fmt(p.bid, decimals)}` : "—"}
+                />
+                <Stat
+                  label="Ask"
+                  value={p?.ask ? `$${fmt(p.ask, decimals)}` : "—"}
+                />
                 <Stat
                   label="24h High"
                   value={high24 !== null ? `$${fmt(high24, decimals)}` : "—"}
@@ -161,20 +197,26 @@ export default async function CryptoPage() {
 
               {/* Sparkline */}
               {closes.length > 1 && (
-                <div className="h-16 flex items-end gap-px">
-                  {closes.map((v, i) => {
-                    const h = Math.max(4, ((v - minClose) / range) * 100);
-                    const isUp =
-                      i === 0 ? v >= closes[0] : v >= closes[i - 1];
-                    return (
-                      <div
-                        key={i}
-                        className={`flex-1 rounded-t ${isUp ? "bg-green-500/70" : "bg-red-500/70"}`}
-                        style={{ height: `${h}%` }}
-                        title={`${c[i]?.timestamp?.slice(11, 16)} — $${fmt(v, decimals)}`}
-                      />
-                    );
-                  })}
+                <div className="pt-4 border-t border-gray-800/40">
+                  <div className="text-[9px] text-gray-600 uppercase font-mono font-bold tracking-widest mb-2">
+                    24H Close Price Chart
+                  </div>
+                  <div className="h-20 flex items-end gap-0.5">
+                    {closes.map((v, i) => {
+                      const h = Math.max(4, ((v - minClose) / range) * 100);
+                      const isUp = i === 0 ? v >= closes[0] : v >= closes[i - 1];
+                      return (
+                        <div
+                          key={i}
+                          className={`flex-1 rounded-t transition-all hover:opacity-80 ${
+                            isUp ? "bg-green-500/70" : "bg-red-500/70"
+                          }`}
+                          style={{ height: `${h}%` }}
+                          title={`${c[i]?.timestamp?.slice(11, 16)} — $${fmt(v, decimals)}`}
+                        />
+                      );
+                    })}
+                  </div>
                 </div>
               )}
             </div>
@@ -188,8 +230,10 @@ export default async function CryptoPage() {
 function Stat({ label, value }: { label: string; value: string }) {
   return (
     <div>
-      <div className="text-[10px] text-gray-500 uppercase">{label}</div>
-      <div className="font-mono">{value}</div>
+      <div className="text-[10px] text-gray-600 uppercase tracking-widest font-mono font-bold mb-1">
+        {label}
+      </div>
+      <div className="font-mono font-medium tabular-nums">{value}</div>
     </div>
   );
 }

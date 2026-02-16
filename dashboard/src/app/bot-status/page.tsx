@@ -1,3 +1,7 @@
+import { SectionHeader } from "../components/SectionHeader";
+import { EmptyState } from "../components/EmptyState";
+import { KpiCard } from "../components/KpiCard";
+
 const baseUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 type Session = {
@@ -65,60 +69,60 @@ export default async function BotStatusPage() {
 
   if (!bot) {
     return (
-      <main className="min-h-screen bg-gray-950 text-gray-100 p-4 sm:p-6 max-w-7xl mx-auto">
-        <h1 className="text-2xl font-bold mt-2 mb-4">Bot Status</h1>
-        <div className="text-gray-500 py-12 text-center text-sm rounded-lg border border-gray-800/50 bg-gray-900/30">
-          Unable to load bot status.
-        </div>
+      <main className="min-h-screen bg-gray-950 text-gray-100 p-4 sm:p-6 max-w-7xl mx-auto grid-terminal">
+        <h1 className="text-3xl font-bold tracking-tight mb-6">Bot Status</h1>
+        <EmptyState message="Unable to load bot status" />
       </main>
     );
   }
 
   return (
-    <main className="min-h-screen bg-gray-950 text-gray-100 p-4 sm:p-6 max-w-7xl mx-auto">
-      <h1 className="text-2xl font-bold mt-2 mb-1">Bot Status</h1>
-      <p className="text-gray-500 text-sm mb-6">
-        Session history, strategy configuration, and data overview
-      </p>
+    <main className="min-h-screen bg-gray-950 text-gray-100 p-4 sm:p-6 max-w-7xl mx-auto grid-terminal">
+      {/* Header */}
+      <div className="mb-8 pb-6 border-b border-gray-800/60">
+        <h1 className="text-3xl font-bold tracking-tight mb-2">Bot Status</h1>
+        <p className="text-gray-500 text-sm font-mono">
+          Strategy configuration, session history, and operational timeline
+        </p>
+      </div>
 
       {/* Strategy Config */}
       <section className="mb-8">
-        <h2 className="text-lg font-semibold mb-3">Strategy Configuration</h2>
-        <div className="rounded-lg border border-gray-800 bg-gray-900/60 p-5">
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4 text-sm">
+        <SectionHeader
+          title="Strategy Configuration"
+          subtitle="Active trading parameters and risk controls"
+        />
+        <div className="rounded-lg border border-gray-800/60 bg-gray-900/30 p-6">
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4 text-sm font-mono">
             <Stat label="Strategy" value={bot.strategy.name} />
             <Stat
               label="Side Filter"
               value={`BUY_${bot.strategy.side_filter.toUpperCase()}`}
+              valueClass="text-green-400"
             />
             <Stat
               label="Edge Range"
               value={`${(bot.strategy.min_edge * 100).toFixed(0)}–${(bot.strategy.max_edge * 100).toFixed(0)}%`}
+              valueClass="text-cyan-400"
             />
             <Stat
               label="Price Range"
               value={`${bot.strategy.min_price}–${bot.strategy.max_price}¢`}
             />
-            <Stat
-              label="Assets"
-              value={bot.strategy.assets.join(", ")}
-            />
-            <Stat
-              label="Total Sessions"
-              value={String(bot.total_sessions)}
-            />
+            <Stat label="Assets" value={bot.strategy.assets.join(", ")} />
+            <Stat label="Total Sessions" value={String(bot.total_sessions)} />
           </div>
 
           {/* Volatilities */}
-          <div className="mt-4 pt-4 border-t border-gray-800">
-            <div className="text-[10px] text-gray-500 uppercase mb-2">
+          <div className="mt-6 pt-6 border-t border-gray-800/40">
+            <div className="text-[10px] text-gray-600 uppercase mb-3 font-mono font-bold tracking-widest">
               Calibrated Annual Volatilities
             </div>
             <div className="flex flex-wrap gap-2">
               {Object.entries(bot.strategy.volatilities).map(([asset, vol]) => (
                 <span
                   key={asset}
-                  className="px-2 py-1 rounded bg-gray-800 text-xs font-mono"
+                  className="px-3 py-1.5 rounded-md bg-gray-800/60 text-xs font-mono font-bold"
                 >
                   {asset}: {(vol * 100).toFixed(0)}%
                 </span>
@@ -131,21 +135,34 @@ export default async function BotStatusPage() {
       {/* Data Overview */}
       {mkt && (
         <section className="mb-8">
-          <h2 className="text-lg font-semibold mb-3">Data Overview</h2>
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-            <Card
+          <SectionHeader
+            title="Market Data Snapshot"
+            subtitle="Kalshi settled markets and historical coverage"
+          />
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+            <KpiCard
               label="Settled Markets"
               value={mkt.total_markets.toLocaleString()}
+              mode="neutral"
             />
-            <Card label="Events" value={mkt.total_events.toLocaleString()} />
-            <Card label="Series" value={mkt.total_series.toLocaleString()} />
-            <Card
+            <KpiCard
+              label="Events"
+              value={mkt.total_events.toLocaleString()}
+              mode="neutral"
+            />
+            <KpiCard
+              label="Series"
+              value={mkt.total_series.toLocaleString()}
+              mode="neutral"
+            />
+            <KpiCard
               label="Date Range"
               value={
                 mkt.earliest_close && mkt.latest_close
                   ? `${new Date(mkt.earliest_close).toLocaleDateString("en-US", { month: "short", day: "numeric" })} – ${new Date(mkt.latest_close).toLocaleDateString("en-US", { month: "short", day: "numeric" })}`
                   : "—"
               }
+              mode="neutral"
             />
           </div>
         </section>
@@ -153,11 +170,12 @@ export default async function BotStatusPage() {
 
       {/* Session History */}
       <section className="mb-8">
-        <h2 className="text-lg font-semibold mb-3">Recent Sessions</h2>
+        <SectionHeader
+          title="Session History"
+          subtitle={`${bot.sessions.length} recent trading sessions`}
+        />
         {bot.sessions.length === 0 ? (
-          <div className="text-gray-500 py-8 text-center text-sm rounded-lg border border-gray-800/50 bg-gray-900/30">
-            No sessions recorded.
-          </div>
+          <EmptyState message="No sessions recorded" />
         ) : (
           <div className="space-y-3">
             {bot.sessions.map((s) => {
@@ -169,21 +187,21 @@ export default async function BotStatusPage() {
               return (
                 <div
                   key={s.session_id}
-                  className="rounded-lg border border-gray-800 bg-gray-900/60 p-4"
+                  className="rounded-lg border border-gray-800/60 bg-gray-900/30 p-5 hover:bg-gray-900/40 transition-colors"
                 >
-                  <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center justify-between mb-4">
                     <div className="flex items-center gap-2">
-                      <span className="font-mono text-sm text-gray-300">
+                      <span className="font-mono text-sm font-bold">
                         {s.session_id}
                       </span>
                       {s.open_now > 0 && (
-                        <span className="text-[10px] px-2 py-0.5 rounded-full bg-yellow-900/60 text-yellow-300">
-                          {s.open_now} open
+                        <span className="text-[9px] font-mono font-bold px-2.5 py-1 rounded-md bg-amber-900/60 text-amber-300">
+                          {s.open_now} OPEN
                         </span>
                       )}
                     </div>
                     {s.started_at && (
-                      <span className="text-xs text-gray-500">
+                      <span className="text-[10px] font-mono text-gray-600">
                         {new Date(s.started_at).toLocaleString("en-US", {
                           month: "short",
                           day: "numeric",
@@ -193,14 +211,17 @@ export default async function BotStatusPage() {
                       </span>
                     )}
                   </div>
-                  <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 text-sm">
+                  <div className="grid grid-cols-2 sm:grid-cols-5 gap-4 text-sm font-mono">
                     <Stat label="Trades" value={String(s.trades_opened)} />
                     <Stat label="Record" value={`${s.wins}W / ${s.losses}L`} />
-                    <Stat label="Win Rate" value={wr === "—" ? "—" : `${wr}%`} />
+                    <Stat
+                      label="Win Rate"
+                      value={wr === "—" ? "—" : `${wr}%`}
+                    />
                     <Stat
                       label="Realized P&L"
                       value={`$${s.realized_pnl >= 0 ? "+" : ""}${fmt(s.realized_pnl)}`}
-                      className={
+                      valueClass={
                         s.realized_pnl > 0
                           ? "text-green-400"
                           : s.realized_pnl < 0
@@ -219,9 +240,9 @@ export default async function BotStatusPage() {
 
       {/* Timeline */}
       <section className="mb-8">
-        <h2 className="text-lg font-semibold mb-3">Timeline</h2>
-        <div className="grid grid-cols-2 gap-3 text-sm">
-          <Card
+        <SectionHeader title="Operational Timeline" subtitle="First and last trade timestamps" />
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <KpiCard
             label="First Trade"
             value={
               bot.first_trade_at
@@ -234,8 +255,9 @@ export default async function BotStatusPage() {
                   })
                 : "—"
             }
+            mode="neutral"
           />
-          <Card
+          <KpiCard
             label="Last Trade"
             value={
               bot.last_trade_at
@@ -248,6 +270,7 @@ export default async function BotStatusPage() {
                   })
                 : "—"
             }
+            mode="neutral"
           />
         </div>
       </section>
@@ -258,33 +281,20 @@ export default async function BotStatusPage() {
 function Stat({
   label,
   value,
-  className = "",
+  valueClass = "",
 }: {
   label: string;
   value: string;
-  className?: string;
+  valueClass?: string;
 }) {
   return (
     <div>
-      <div className="text-[10px] text-gray-500 uppercase">{label}</div>
-      <div className={`font-mono ${className}`}>{value}</div>
-    </div>
-  );
-}
-
-function Card({
-  label,
-  value,
-}: {
-  label: string;
-  value: string | number;
-}) {
-  return (
-    <div className="rounded-lg border border-gray-800 bg-gray-900/60 p-4">
-      <div className="text-[10px] text-gray-500 uppercase tracking-wide mb-1">
+      <div className="text-[10px] text-gray-600 uppercase tracking-widest font-mono font-bold mb-1">
         {label}
       </div>
-      <div className="text-xl font-bold">{value}</div>
+      <div className={`font-mono font-medium tabular-nums ${valueClass}`}>
+        {value}
+      </div>
     </div>
   );
 }
