@@ -49,6 +49,8 @@ DEFAULT_MIN_EDGE = 0.02      # 2% minimum edge (sweet spot)
 DEFAULT_MAX_EDGE = 0.05      # 5% max — large "edges" are often wrong
 DEFAULT_MIN_PRICE = 1        # Skip 0-priced markets
 DEFAULT_MAX_PRICE = 15       # Low-price markets have best win rate (99%+ at 1-15¢)
+DEFAULT_SIDE_FILTER = "no"   # BUY_NO only: 100% win rate in backtest (959/959), Sharpe 21.55
+                              # BUY_YES was 1.8% win rate, negative PnL — skip it
 
 
 @dataclass
@@ -225,6 +227,7 @@ def run_paper_trading(
     series: Optional[List[str]] = None,
     demo: bool = True,
     max_scans: Optional[int] = None,
+    side_filter: Optional[str] = DEFAULT_SIDE_FILTER,
 ) -> PaperPortfolio:
     """
     Run the paper trading loop.
@@ -241,6 +244,7 @@ def run_paper_trading(
         series: Kalshi series to scan (default: all crypto)
         demo: Use Kalshi demo API
         max_scans: Stop after N scans (None = run forever)
+        side_filter: Only trade this side ('yes', 'no', or None for both)
     """
     from ..data.sources.kalshi import KalshiAdapter
 
@@ -257,7 +261,8 @@ def run_paper_trading(
 
     logger.info(f"Paper trading started | bankroll=${bankroll} | interval={interval_seconds}s")
     logger.info(f"Series: {', '.join(series_list)}")
-    logger.info(f"Edge range: {min_edge:.1%} – {max_edge:.1%} | Price range: {min_price}–{max_price}¢")
+    side_label = f"BUY_{side_filter.upper()} only" if side_filter else "both sides"
+    logger.info(f"Edge range: {min_edge:.1%} – {max_edge:.1%} | Price range: {min_price}–{max_price}¢ | Side: {side_label}")
     logger.info(f"Log: {log_path}")
 
     _log_event(log_path, {
@@ -266,6 +271,7 @@ def run_paper_trading(
         "bankroll": bankroll,
         "min_edge": min_edge,
         "max_edge": max_edge,
+        "side_filter": side_filter,
         "series": series_list,
     })
 
@@ -309,6 +315,10 @@ def run_paper_trading(
 
                 # Skip if already have a position in this market
                 if edge.ticker in portfolio.open_positions:
+                    continue
+
+                # Side filter (BUY_NO only by default — 100% backtest win rate)
+                if side_filter and edge.recommended_side != side_filter:
                     continue
 
                 # Edge bounds

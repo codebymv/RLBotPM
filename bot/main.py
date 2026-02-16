@@ -1577,8 +1577,9 @@ def test_env():
 @click.option('--series', default=None, help='Comma-separated series (default: all crypto)')
 @click.option('--max-scans', default=None, type=int, help='Stop after N scans (default: forever)')
 @click.option('--live/--demo', default=True, help='Use live or demo API')
+@click.option('--side', default='no', type=click.Choice(['yes', 'no', 'both']), help='Side filter (default: no = BUY_NO only, 100%% backtest win rate)')
 def paper_trade_kalshi(interval, bankroll, min_edge, max_edge, min_price, max_price,
-                      max_contracts, max_positions, series, max_scans, live):
+                      max_contracts, max_positions, series, max_scans, live, side):
     """
     Paper trade the crypto edge detector on live markets.
 
@@ -1588,14 +1589,17 @@ def paper_trade_kalshi(interval, bankroll, min_edge, max_edge, min_price, max_pr
 
     No real orders are placed.
 
-    Defaults tuned for optimized thresholds (edge 2-5%, price 1-15c).
+    Defaults: BUY_NO only (100% backtest win rate, Sharpe 21.55).
+    BUY_YES had 1.8% win rate — disabled by default.
     """
     from src.strategies.paper_trader import run_paper_trading
 
     mode = "LIVE" if live else "DEMO"
+    side_filter = None if side == 'both' else side
+    side_label = f"BUY_{side.upper()} only" if side != 'both' else "both sides"
     console.print(f"\n[bold cyan]Kalshi Paper Trading ({mode})[/bold cyan]")
     console.print(f"Bankroll: ${bankroll:.2f} | Interval: {interval}s | Edge: {min_edge:.1%}-{max_edge:.1%}")
-    console.print(f"Price: {min_price}-{max_price}c | Max contracts: {max_contracts} | Mode: {mode}\n")
+    console.print(f"Price: {min_price}-{max_price}c | Side: {side_label} | Mode: {mode}\n")
 
     try:
         series_list = None
@@ -1614,6 +1618,7 @@ def paper_trade_kalshi(interval, bankroll, min_edge, max_edge, min_price, max_pr
             series=series_list,
             demo=not live,
             max_scans=max_scans,
+            side_filter=side_filter,
         )
         console.print(portfolio.summary())
     except Exception as e:
