@@ -69,15 +69,15 @@ export default async function CryptoPage() {
   });
 
   return (
-    <main className="min-h-screen bg-gray-950 text-gray-100 p-4 sm:p-6 max-w-7xl mx-auto grid-terminal">
+    <main className="min-h-screen bg-gray-950 text-gray-100 p-3 sm:p-4 max-w-6xl mx-auto grid-terminal">
       {/* Header */}
-      <div className="mb-8 pb-6 border-b border-gray-800/60">
+      <div className="mb-6 pb-4 border-b border-gray-800/60">
         <div className="flex items-end justify-between">
           <div>
-            <h1 className="text-3xl font-bold tracking-tight mb-2">
+            <h1 className="text-4xl font-bold tracking-tight mb-2">
               Market Data
             </h1>
-            <p className="text-gray-500 text-sm font-mono">
+            <p className="text-gray-500 text-base font-mono">
               Live spot prices from Coinbase · calibrated volatilities from
               Kalshi
             </p>
@@ -87,7 +87,7 @@ export default async function CryptoPage() {
       </div>
 
       {/* Context Ribbon */}
-      <div className="mb-6 rounded-lg border border-blue-900/40 bg-blue-950/10 p-4">
+      <div className="mb-5 rounded-lg border border-blue-900/40 bg-blue-950/10 p-4">
         <div className="flex items-center gap-2 mb-1">
           <span className="text-blue-400 text-xs">ⓘ</span>
           <span className="text-xs font-mono font-bold uppercase tracking-widest text-blue-400">
@@ -102,7 +102,7 @@ export default async function CryptoPage() {
       </div>
 
       {/* Asset Cards */}
-      <div className="space-y-6">
+      <div className="space-y-4">
         {ASSETS.map((asset) => {
           const p = prices[asset];
           const vol = vols[asset];

@@ -77,17 +77,17 @@ export default async function BotStatusPage() {
   }
 
   return (
-    <main className="min-h-screen bg-gray-950 text-gray-100 p-4 sm:p-6 max-w-7xl mx-auto grid-terminal">
+    <main className="min-h-screen bg-gray-950 text-gray-100 p-3 sm:p-4 max-w-6xl mx-auto grid-terminal">
       {/* Header */}
-      <div className="mb-8 pb-6 border-b border-gray-800/60">
-        <h1 className="text-3xl font-bold tracking-tight mb-2">Bot Status</h1>
-        <p className="text-gray-500 text-sm font-mono">
+      <div className="mb-6 pb-4 border-b border-gray-800/60">
+        <h1 className="text-4xl font-bold tracking-tight mb-2">Bot Status</h1>
+        <p className="text-gray-500 text-base font-mono">
           Strategy configuration, session history, and operational timeline
         </p>
       </div>
 
       {/* Strategy Config */}
-      <section className="mb-8">
+      <section className="mb-6">
         <SectionHeader
           title="Strategy Configuration"
           subtitle="Active trading parameters and risk controls"
@@ -134,12 +134,12 @@ export default async function BotStatusPage() {
 
       {/* Data Overview */}
       {mkt && (
-        <section className="mb-8">
+        <section className="mb-6">
           <SectionHeader
             title="Market Data Snapshot"
             subtitle="Kalshi settled markets and historical coverage"
           />
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             <KpiCard
               label="Settled Markets"
               value={mkt.total_markets.toLocaleString()}
@@ -169,7 +169,7 @@ export default async function BotStatusPage() {
       )}
 
       {/* Session History */}
-      <section className="mb-8">
+      <section className="mb-6">
         <SectionHeader
           title="Session History"
           subtitle={`${bot.sessions.length} recent trading sessions`}
@@ -239,9 +239,9 @@ export default async function BotStatusPage() {
       </section>
 
       {/* Timeline */}
-      <section className="mb-8">
+      <section className="mb-6">
         <SectionHeader title="Operational Timeline" subtitle="First and last trade timestamps" />
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <KpiCard
             label="First Trade"
             value={

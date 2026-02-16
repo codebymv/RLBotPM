@@ -55,17 +55,17 @@ export default function OverviewClient({
     : [];
 
   return (
-    <main className="min-h-screen bg-gray-950 text-gray-100 p-4 sm:p-6 max-w-7xl mx-auto grid-terminal">
+    <main className="min-h-screen bg-gray-950 text-gray-100 p-3 sm:p-4 max-w-6xl mx-auto grid-terminal">
       {/* Header with System Status */}
-      <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between mb-8 pb-6 border-b border-gray-800/60">
+      <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between mb-6 pb-4 border-b border-gray-800/60">
         <div>
-          <h1 className="text-4xl font-bold mb-2 tracking-tight">
+          <h1 className="text-5xl font-bold mb-2 tracking-tight">
             RL<span className="text-cyan-400">TRADE</span>
           </h1>
-          <p className="text-gray-500 text-sm font-mono tracking-wide">
+          <p className="text-gray-500 text-base font-mono tracking-wide">
             Reinforcement Learning Crypto Prediction Market Bot
           </p>
-          <p className="text-gray-600 text-xs font-mono mt-1">
+          <p className="text-gray-600 text-sm font-mono mt-1">
             Kalshi · Coinbase · PPO
           </p>
         </div>
@@ -90,7 +90,7 @@ export default function OverviewClient({
       </div>
 
       {/* Trading Performance */}
-      <section className="mb-8">
+      <section className="mb-6">
         <SectionHeader
           title="Trading Performance"
           subtitle={`Performance metrics for ${mode.toUpperCase()} trading mode`}
@@ -101,7 +101,7 @@ export default function OverviewClient({
         {metrics && modeData ? (
           <>
             {/* Primary KPIs */}
-            <div className="grid grid-cols-2 lg:grid-cols-5 gap-4 mb-6">
+            <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 mb-5">
               <KpiCard
                 label="Realized P&L"
                 value={`$${pnl >= 0 ? "+" : ""}${fmt(pnl)}`}
@@ -136,7 +136,7 @@ export default function OverviewClient({
 
             {/* Side Breakdown */}
             {sideBreakdown.length > 0 && (
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 {sideBreakdown.map((data: any) => {
                   const sideWins = data.wins || 0;
                   const sideTotal = data.total || 0;
@@ -188,7 +188,7 @@ export default function OverviewClient({
       </section>
 
       {/* Live Crypto Prices */}
-      <section className="mb-8">
+      <section className="mb-6">
         <SectionHeader
           title="Crypto Spot Prices"
           subtitle="Real-time market data from Coinbase"
@@ -197,7 +197,7 @@ export default function OverviewClient({
         />
 
         {crypto && crypto.prices ? (
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
             {Object.entries(
               crypto.prices as Record<
                 string,
@@ -239,7 +239,7 @@ export default function OverviewClient({
       </section>
 
       {/* Bot Operations */}
-      <section className="mb-8">
+      <section className="mb-6">
         <SectionHeader
           title="Bot Configuration"
           subtitle="Strategy parameters and operational status"
@@ -248,7 +248,7 @@ export default function OverviewClient({
         />
 
         {bot ? (
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
             <KpiCard
               label="Total Sessions"
               value={bot.total_sessions}
@@ -284,7 +284,7 @@ export default function OverviewClient({
       </section>
 
       {/* Recent Trades */}
-      <section className="mb-8">
+      <section className="mb-6">
         <SectionHeader
           title={`Recent ${mode.charAt(0).toUpperCase() + mode.slice(1)} Trades`}
           subtitle={`Latest executions in ${mode} mode`}

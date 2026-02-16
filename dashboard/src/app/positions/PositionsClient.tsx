@@ -79,14 +79,14 @@ export default function PositionsClient({ data, crypto }: Props) {
   );
 
   return (
-    <main className="min-h-screen bg-gray-950 text-gray-100 p-4 sm:p-6 max-w-7xl mx-auto grid-terminal">
+    <main className="min-h-screen bg-gray-950 text-gray-100 p-3 sm:p-4 max-w-6xl mx-auto grid-terminal">
       {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between mb-6 pb-6 border-b border-gray-800/60">
+      <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between mb-5 pb-4 border-b border-gray-800/60">
         <div>
-          <h1 className="text-3xl font-bold tracking-tight mb-2">
+          <h1 className="text-4xl font-bold tracking-tight mb-2">
             Open Positions
           </h1>
-          <p className="text-gray-500 text-sm font-mono">
+          <p className="text-gray-500 text-base font-mono">
             {filteredPositions.length} position{filteredPositions.length !== 1 ? "s" : ""} ·{" "}
             <span className="text-gray-300 font-bold">${fmt(totalCost)}</span>{" "}
             deployed · max profit{" "}
@@ -107,7 +107,7 @@ export default function PositionsClient({ data, crypto }: Props) {
           submessage="Positions will appear here once opened"
         />
       ) : (
-        <div className="space-y-6">
+        <div className="space-y-5">
           {assetGroups.map(([asset, groupPositions]) => {
             const groupCost = groupPositions.reduce((s, p) => s + p.cost, 0);
             const groupProfit = groupPositions.reduce((s, p) => {

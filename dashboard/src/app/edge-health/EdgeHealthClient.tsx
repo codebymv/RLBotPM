@@ -34,14 +34,14 @@ export default function EdgeHealthClient({ health, pnl }: Props) {
   const byEdgeType: Record<string, EdgeTypeStats> = health?.by_edge_type || {};
 
   return (
-    <main className="min-h-screen bg-gray-950 text-gray-100 p-4 sm:p-6 max-w-7xl mx-auto grid-terminal">
+    <main className="min-h-screen bg-gray-950 text-gray-100 p-3 sm:p-4 max-w-6xl mx-auto grid-terminal">
       {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between mb-8 pb-6 border-b border-gray-800/60">
+      <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between mb-6 pb-4 border-b border-gray-800/60">
         <div>
-          <h1 className="text-3xl font-bold tracking-tight mb-2">
+          <h1 className="text-4xl font-bold tracking-tight mb-2">
             Edge Health
           </h1>
-          <p className="text-gray-500 text-sm font-mono">
+          <p className="text-gray-500 text-base font-mono">
             Statistical edge validation and performance diagnostics
           </p>
         </div>
@@ -52,12 +52,12 @@ export default function EdgeHealthClient({ health, pnl }: Props) {
 
       {/* By Side */}
       {Object.keys(bySide).length > 0 ? (
-        <section className="mb-8">
+        <section className="mb-6">
           <SectionHeader
             title="Performance by Side"
             subtitle="Win rate, edge realization, and P&L breakdown"
           />
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {Object.entries(bySide).map(([side, s]) => (
               <div
                 key={side}
@@ -129,7 +129,7 @@ export default function EdgeHealthClient({ health, pnl }: Props) {
 
       {/* By Edge Type */}
       {Object.keys(byEdgeType).length > 0 && (
-        <section className="mb-8">
+        <section className="mb-6">
           <SectionHeader
             title="Performance by Edge Type"
             subtitle="Model variant effectiveness analysis"
@@ -179,7 +179,7 @@ export default function EdgeHealthClient({ health, pnl }: Props) {
 
       {/* P&L Series */}
       {pnl && pnl.series && pnl.series.length > 0 && (
-        <section className="mb-8">
+        <section className="mb-6">
           <SectionHeader
             title="Cumulative P&L Series"
             subtitle={`Total: $${pnl.total_pnl >= 0 ? "+" : ""}${pnl.total_pnl.toFixed(2)} across ${pnl.series.length} settled trades`}
