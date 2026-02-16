@@ -307,32 +307,96 @@ export default function OverviewClient({
         />
 
         {recentTrades.length > 0 ? (
-          <div className="overflow-x-auto rounded-lg border border-gray-800/60 bg-gray-900/20">
-            <table className="w-full text-sm font-mono">
-              <thead>
-                <tr className="text-gray-500 border-b border-gray-800/60 text-[10px] uppercase tracking-widest">
-                  <th className="text-left py-3 px-4 font-bold">Ticker</th>
-                  <th className="text-left py-3 px-4 font-bold">Side</th>
-                  <th className="text-right py-3 px-4 font-bold">Price</th>
-                  <th className="text-right py-3 px-4 font-bold">Edge</th>
-                  <th className="text-right py-3 px-4 font-bold">Qty</th>
-                  <th className="text-right py-3 px-4 font-bold">Cost</th>
-                  <th className="text-left py-3 px-4 font-bold">Status</th>
-                  <th className="text-right py-3 px-4 font-bold">P&L</th>
-                </tr>
-              </thead>
-              <tbody>
-                {recentTrades.slice(0, 10).map((t: any, i: number) => (
-                  <tr
-                    key={`${t.ticker}-${i}`}
-                    className="border-b border-gray-900/40 hover:bg-gray-900/40 transition-colors"
-                  >
-                    <td className="py-3 px-4 text-xs font-bold">
-                      {t.ticker}
-                    </td>
-                    <td className="py-3 px-4">
+          <>
+            {/* Desktop Table View */}
+            <div className="hidden md:block overflow-x-auto rounded-lg border border-gray-800/60 bg-gray-900/20">
+              <table className="w-full text-sm font-mono">
+                <thead>
+                  <tr className="text-gray-500 border-b border-gray-800/60 text-[10px] uppercase tracking-widest">
+                    <th className="text-left py-3 px-4 font-bold">Ticker</th>
+                    <th className="text-left py-3 px-4 font-bold">Side</th>
+                    <th className="text-right py-3 px-4 font-bold">Price</th>
+                    <th className="text-right py-3 px-4 font-bold">Edge</th>
+                    <th className="text-right py-3 px-4 font-bold">Qty</th>
+                    <th className="text-right py-3 px-4 font-bold">Cost</th>
+                    <th className="text-left py-3 px-4 font-bold">Status</th>
+                    <th className="text-right py-3 px-4 font-bold">P&L</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {recentTrades.slice(0, 10).map((t: any, i: number) => (
+                    <tr
+                      key={`${t.ticker}-${i}`}
+                      className="border-b border-gray-900/40 hover:bg-gray-900/40 transition-colors"
+                    >
+                      <td className="py-3 px-4 text-xs font-bold">
+                        {t.ticker}
+                      </td>
+                      <td className="py-3 px-4">
+                        <span
+                          className={`px-2 py-0.5 rounded-md text-[9px] font-bold uppercase ${
+                            t.side === "no"
+                              ? "bg-green-900/60 text-green-300"
+                              : "bg-red-900/60 text-red-300"
+                          }`}
+                        >
+                          {t.side}
+                        </span>
+                      </td>
+                      <td className="py-3 px-4 text-right tabular-nums">
+                        {t.entry_price_cents}¢
+                      </td>
+                      <td className="py-3 px-4 text-right tabular-nums text-gray-400">
+                        {t.edge ? `${(t.edge * 100).toFixed(1)}%` : "—"}
+                      </td>
+                      <td className="py-3 px-4 text-right tabular-nums">
+                        {t.contracts}
+                      </td>
+                      <td className="py-3 px-4 text-right tabular-nums">
+                        ${fmt(t.cost)}
+                      </td>
+                      <td className="py-3 px-4">
+                        <span
+                          className={`text-[9px] uppercase font-bold ${
+                            t.status === "open" ? "text-amber-400" : "text-gray-500"
+                          }`}
+                        >
+                          {t.status}
+                        </span>
+                      </td>
+                      <td
+                        className={`py-3 px-4 text-right font-bold tabular-nums ${
+                          t.pnl && t.pnl > 0
+                            ? "text-green-400"
+                            : t.pnl && t.pnl < 0
+                              ? "text-red-400"
+                              : "text-gray-400"
+                        }`}
+                      >
+                        {t.pnl !== null
+                          ? `$${t.pnl >= 0 ? "+" : ""}${fmt(t.pnl)}`
+                          : "—"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Mobile Card View */}
+            <div className="md:hidden space-y-3">
+              {recentTrades.slice(0, 10).map((t: any, i: number) => (
+                <div
+                  key={`${t.ticker}-${i}`}
+                  className="rounded-lg border border-gray-800/60 bg-gray-900/20 p-4"
+                >
+                  <div className="flex items-start justify-between mb-3">
+                    <div className="flex-1">
+                      <div className="font-mono text-sm font-bold mb-1">
+                        {t.ticker}
+                      </div>
                       <span
-                        className={`px-2 py-0.5 rounded-md text-[9px] font-bold uppercase ${
+                        className={`inline-block px-2 py-0.5 rounded-md text-[9px] font-bold uppercase ${
                           t.side === "no"
                             ? "bg-green-900/60 text-green-300"
                             : "bg-red-900/60 text-red-300"
@@ -340,30 +404,9 @@ export default function OverviewClient({
                       >
                         {t.side}
                       </span>
-                    </td>
-                    <td className="py-3 px-4 text-right tabular-nums">
-                      {t.entry_price_cents}¢
-                    </td>
-                    <td className="py-3 px-4 text-right tabular-nums text-gray-400">
-                      {t.edge ? `${(t.edge * 100).toFixed(1)}%` : "—"}
-                    </td>
-                    <td className="py-3 px-4 text-right tabular-nums">
-                      {t.contracts}
-                    </td>
-                    <td className="py-3 px-4 text-right tabular-nums">
-                      ${fmt(t.cost)}
-                    </td>
-                    <td className="py-3 px-4">
-                      <span
-                        className={`text-[9px] uppercase font-bold ${
-                          t.status === "open" ? "text-amber-400" : "text-gray-500"
-                        }`}
-                      >
-                        {t.status}
-                      </span>
-                    </td>
-                    <td
-                      className={`py-3 px-4 text-right font-bold tabular-nums ${
+                    </div>
+                    <div
+                      className={`text-lg font-mono font-bold tabular-nums ${
                         t.pnl && t.pnl > 0
                           ? "text-green-400"
                           : t.pnl && t.pnl < 0
@@ -374,12 +417,40 @@ export default function OverviewClient({
                       {t.pnl !== null
                         ? `$${t.pnl >= 0 ? "+" : ""}${fmt(t.pnl)}`
                         : "—"}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3 text-sm font-mono">
+                    <div>
+                      <div className="text-[10px] text-gray-600 uppercase mb-0.5">
+                        Price
+                      </div>
+                      <div className="tabular-nums">{t.entry_price_cents}¢</div>
+                    </div>
+                    <div>
+                      <div className="text-[10px] text-gray-600 uppercase mb-0.5">
+                        Edge
+                      </div>
+                      <div className="tabular-nums text-gray-400">
+                        {t.edge ? `${(t.edge * 100).toFixed(1)}%` : "—"}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-[10px] text-gray-600 uppercase mb-0.5">
+                        Qty
+                      </div>
+                      <div className="tabular-nums">{t.contracts}</div>
+                    </div>
+                    <div>
+                      <div className="text-[10px] text-gray-600 uppercase mb-0.5">
+                        Cost
+                      </div>
+                      <div className="tabular-nums">${fmt(t.cost)}</div>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </>
         ) : (
           <EmptyState
             message={`No ${mode} trades recorded`}

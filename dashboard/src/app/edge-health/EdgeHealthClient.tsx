@@ -134,7 +134,7 @@ export default function EdgeHealthClient({ health, pnl }: Props) {
             title="Performance by Edge Type"
             subtitle="Model variant effectiveness analysis"
           />
-          <div className="overflow-x-auto rounded-lg border border-gray-800/60 bg-gray-900/20">
+          <div className="hidden md:block overflow-x-auto rounded-lg border border-gray-800/60 bg-gray-900/20">
             <table className="w-full text-sm font-mono">
               <thead>
                 <tr className="text-gray-500 border-b border-gray-800/60 text-[10px] uppercase tracking-widest">
@@ -173,6 +173,57 @@ export default function EdgeHealthClient({ health, pnl }: Props) {
                 ))}
               </tbody>
             </table>
+          </div>
+
+          {/* Mobile Card View */}
+          <div className="md:hidden space-y-3">
+            {Object.entries(byEdgeType).map(([etype, s]) => (
+              <div
+                key={etype}
+                className="rounded-lg border border-gray-800/60 bg-gray-900/20 p-4"
+              >
+                <div className="flex items-center justify-between mb-3">
+                  <div className="text-sm font-bold font-mono">{etype}</div>
+                  <div
+                    className={`text-lg font-mono font-bold tabular-nums ${
+                      s.total_pnl >= 0 ? "text-green-400" : "text-red-400"
+                    }`}
+                  >
+                    ${s.total_pnl >= 0 ? "+" : ""}
+                    {s.total_pnl.toFixed(2)}
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-3 text-sm font-mono">
+                  <div>
+                    <div className="text-[10px] text-gray-600 uppercase mb-0.5">
+                      Trades
+                    </div>
+                    <div className="tabular-nums">{s.total}</div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] text-gray-600 uppercase mb-0.5">
+                      Win Rate
+                    </div>
+                    <div className="tabular-nums">
+                      {(s.win_rate * 100).toFixed(0)}%
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] text-gray-600 uppercase mb-0.5">
+                      Avg Edge
+                    </div>
+                    <div className="tabular-nums text-cyan-400">
+                      {(s.avg_edge * 100).toFixed(1)}%
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] text-gray-600 uppercase mb-0.5">
+                      {s.total} Total
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ))}
           </div>
         </section>
       )}

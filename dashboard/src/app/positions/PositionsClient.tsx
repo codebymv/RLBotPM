@@ -86,14 +86,20 @@ export default function PositionsClient({ data, crypto }: Props) {
           <h1 className="text-4xl font-bold tracking-tight mb-2">
             Open Positions
           </h1>
-          <p className="text-gray-500 text-base font-mono">
-            {filteredPositions.length} position{filteredPositions.length !== 1 ? "s" : ""} ·{" "}
-            <span className="text-gray-300 font-bold">${fmt(totalCost)}</span>{" "}
-            deployed · max profit{" "}
-            <span className="text-green-400 font-bold">
-              ${fmt(totalExpectedProfit)}
-            </span>
-          </p>
+          <div className="text-gray-500 text-base font-mono space-y-1">
+            <div>
+              {filteredPositions.length} position{filteredPositions.length !== 1 ? "s" : ""} ·{" "}
+              <span className="text-gray-300 font-bold">${fmt(totalCost)}</span>{" "}
+              deployed
+            </div>
+            <div className="md:inline md:ml-1">
+              <span className="hidden md:inline">· </span>
+              max profit{" "}
+              <span className="text-green-400 font-bold">
+                ${fmt(totalExpectedProfit)}
+              </span>
+            </div>
+          </div>
         </div>
         <div className="mt-4 sm:mt-0">
           <StatusPill mode={mode} />
@@ -119,11 +125,18 @@ export default function PositionsClient({ data, crypto }: Props) {
 
             return (
               <section key={asset}>
-                <SectionHeader
-                  title={asset}
-                  subtitle={`${groupPositions.length} position${groupPositions.length !== 1 ? "s" : ""} · $${fmt(groupCost)} deployed · max profit $${fmt(groupProfit)}`}
-                  className="mb-3"
-                />
+                <div className="mb-3">
+                  <h2 className="text-xl font-bold tracking-tight">{asset}</h2>
+                  <div className="text-sm text-gray-500 mt-0.5 space-y-0.5">
+                    <div>
+                      {groupPositions.length} position{groupPositions.length !== 1 ? "s" : ""} · ${fmt(groupCost)} deployed
+                    </div>
+                    <div className="md:inline md:ml-1">
+                      <span className="hidden md:inline">· </span>
+                      max profit ${fmt(groupProfit)}
+                    </div>
+                  </div>
+                </div>
 
                 <div className="space-y-3">
                   {groupPositions.map((p, idx) => {
@@ -182,7 +195,7 @@ export default function PositionsClient({ data, crypto }: Props) {
                           </div>
                         </div>
 
-                        <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-6 gap-4 mb-3">
+                        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 mb-3">
                           <Stat label="Entry" value={`${p.entry_price_cents}¢`} />
                           <Stat
                             label="Fair Value"
