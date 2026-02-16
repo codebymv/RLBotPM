@@ -26,7 +26,7 @@ export default function Nav() {
         <Link
           href="/"
           aria-label="RLTrade home"
-          className="flex items-center gap-2 shrink-0 hover:opacity-80 transition-opacity focus:outline-none focus:ring-2 focus:ring-cyan-500/50 focus:ring-offset-2 focus:ring-offset-gray-950 rounded-sm"
+          className="flex items-center shrink-0 hover:opacity-80 transition-opacity focus:outline-none focus:ring-2 focus:ring-cyan-500/50 focus:ring-offset-2 focus:ring-offset-gray-950 rounded-sm"
         >
           <Image
             src="/rltrade-icon.png"
@@ -34,13 +34,6 @@ export default function Nav() {
             width={32}
             height={32}
             className="w-8 h-8"
-          />
-          <Image
-            src="/rltrade-text.png"
-            alt="RLTrade"
-            width={120}
-            height={32}
-            className="h-7 w-auto hidden sm:block"
           />
         </Link>
 
