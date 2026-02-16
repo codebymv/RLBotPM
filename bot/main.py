@@ -1643,7 +1643,24 @@ def paper_status():
     console.print(f"Open: {status['open_positions']} | Closed: {status['closed_positions']}")
 
     if status['win_rate'] is not None:
-        console.print(f"Win rate: {status['win_rate']:.1%} ({status['wins']}W/{status['losses']}L)")
+        console.print(f"Win rate (all): {status['win_rate']:.1%} ({status['wins']}W/{status['losses']}L)")
+
+    # Break down by side (BUY_NO vs BUY_YES)
+    no_closed = [p for p in status['closed'] if p.get('side') == 'no']
+    yes_closed = [p for p in status['closed'] if p.get('side') == 'yes']
+    no_wins = sum(1 for p in no_closed if p.get('pnl', 0) > 0)
+    no_losses = len(no_closed) - no_wins
+    yes_wins = sum(1 for p in yes_closed if p.get('pnl', 0) > 0)
+    yes_losses = len(yes_closed) - yes_wins
+    no_pnl = sum(p.get('pnl', 0) for p in no_closed)
+    yes_pnl = sum(p.get('pnl', 0) for p in yes_closed)
+
+    if no_closed:
+        no_wr = no_wins / len(no_closed)
+        console.print(f"  [bold green]BUY_NO:  {no_wr:.0%} ({no_wins}W/{no_losses}L)  P&L=${no_pnl:+.2f}[/bold green]")
+    if yes_closed:
+        yes_wr = yes_wins / len(yes_closed) if yes_closed else 0
+        console.print(f"  [bold red]BUY_YES: {yes_wr:.0%} ({yes_wins}W/{yes_losses}L)  P&L=${yes_pnl:+.2f}[/bold red]")
 
     console.print(f"Realized P&L: ${status['realized_pnl']:+.2f}")
     console.print(f"Open cost: ${status['open_cost']:.2f}")
@@ -1661,7 +1678,80 @@ def paper_status():
     if status['closed']:
         console.print(f"\n[bold]Settled positions ({len(status['closed'])}):[/bold]")
         for p in status['closed']:
-            console.print(f"  {p['ticker']}  {p['outcome']}  P&L=${p['pnl']:+.2f}")
+            side_tag = f"[green]NO[/green]" if p.get('side') == 'no' else f"[red]YES[/red]"
+            pnl_color = "green" if p.get('pnl', 0) > 0 else "red"
+            console.print(f"  {p['ticker']}  {side_tag}  {p['outcome']}  [{pnl_color}]P&L=${p['pnl']:+.2f}[/{pnl_color}]")
+
+
+@kalshi.command("live-trade")
+@click.option('--interval', default=300, type=int, help='Seconds between scans')
+@click.option('--max-cost', default=1.0, type=float, help='Max cost per trade in dollars (default $1)')
+@click.option('--max-total', default=10.0, type=float, help='Max total capital deployed (default $10)')
+@click.option('--max-positions', default=10, type=int, help='Max simultaneous positions')
+@click.option('--max-loss-streak', default=3, type=int, help='Kill switch after N consecutive losses')
+@click.option('--max-daily-loss', default=5.0, type=float, help='Kill switch at daily loss threshold')
+@click.option('--min-edge', default=0.02, type=float, help='Min edge (default 2%%)')
+@click.option('--max-edge', default=0.05, type=float, help='Max edge (default 5%%)')
+@click.option('--min-price', default=1, type=int, help='Min price in cents')
+@click.option('--max-price', default=15, type=int, help='Max price in cents')
+@click.option('--max-scans', default=None, type=int, help='Stop after N scans')
+@click.option('--series', default=None, help='Comma-separated series')
+@click.option('--dry-run', is_flag=True, help='Find edges + log but do NOT place orders')
+@click.confirmation_option(
+    prompt='\n⚠️  WARNING: This places REAL orders with REAL money on Kalshi.\n'
+           '   Safety limits: $1/trade, $10 total, kill switch at 3 losses.\n'
+           '   Proceed?'
+)
+def live_trade(interval, max_cost, max_total, max_positions, max_loss_streak,
+               max_daily_loss, min_edge, max_edge, min_price, max_price,
+               max_scans, series, dry_run):
+    """
+    Live trade the crypto edge detector on Kalshi.
+
+    Places REAL limit orders. BUY_NO only (100% backtest win rate).
+
+    Safety limits:
+      - $1 max per trade (--max-cost)
+      - $10 max total deployed (--max-total)
+      - Kill switch at 3 consecutive losses (--max-loss-streak)
+      - Kill switch at $5 daily loss (--max-daily-loss)
+
+    Use --dry-run to see what trades would be placed without risking money.
+    """
+    from src.strategies.live_trader import run_live_trading
+
+    mode = "DRY RUN" if dry_run else "LIVE"
+    console.print(f"\n[bold {'cyan' if dry_run else 'red'}]Kalshi Live Trading ({mode})[/bold {'cyan' if dry_run else 'red'}]")
+    console.print(f"Max per trade: ${max_cost:.2f} | Max total: ${max_total:.2f}")
+    console.print(f"Edge: {min_edge:.1%}-{max_edge:.1%} | Price: {min_price}-{max_price}c")
+    console.print(f"Kill switch: {max_loss_streak} losses or ${max_daily_loss:.2f} daily loss")
+    console.print(f"Side: BUY_NO only | Interval: {interval}s\n")
+
+    try:
+        series_list = None
+        if series:
+            series_list = [s.strip().upper() for s in series.split(",") if s.strip()]
+
+        portfolio = run_live_trading(
+            interval_seconds=interval,
+            min_edge=min_edge,
+            max_edge=max_edge,
+            min_price=min_price,
+            max_price=max_price,
+            max_cost_per_trade=max_cost,
+            max_total_deployed=max_total,
+            max_positions=max_positions,
+            max_loss_streak=max_loss_streak,
+            max_daily_loss=max_daily_loss,
+            series=series_list,
+            max_scans=max_scans,
+            dry_run=dry_run,
+        )
+        console.print(portfolio.summary())
+    except Exception as e:
+        console.print(f"\n[red]Error:[/red] {e}")
+        import traceback
+        traceback.print_exc()
 
 
 if __name__ == '__main__':

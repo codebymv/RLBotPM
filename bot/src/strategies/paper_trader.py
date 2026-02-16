@@ -469,9 +469,9 @@ def read_paper_status(log_path: Optional[Path] = None) -> Dict:
                 except json.JSONDecodeError:
                     continue
 
-    # Walk through events to reconstruct state
+    # Walk through events — only track the LATEST session's positions
+    # (older sessions may have been killed, leaving stale "open" positions)
     sessions = []
-    current_session = None
     open_positions = {}
     closed_positions = []
     realized_pnl = 0.0
@@ -485,7 +485,9 @@ def read_paper_status(log_path: Optional[Path] = None) -> Dict:
         etype = ev.get("type")
 
         if etype == "session_start":
-            current_session = ev
+            # New session → reset open positions (old session was killed)
+            # Keep cumulative closed/pnl stats across all sessions
+            open_positions = {}
             bankroll = ev.get("bankroll", 100.0)
             sessions.append(ev)
 
