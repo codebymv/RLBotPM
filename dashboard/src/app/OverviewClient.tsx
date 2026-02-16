@@ -121,7 +121,7 @@ export default function OverviewClient({
         <div className="flex flex-col gap-2 mt-4 sm:mt-0">
           <div className="flex gap-2 items-center">
             <StatusPill mode={mode} />
-            <DataFreshness lastUpdated={metrics?.last_updated} />
+            <DataFreshness lastUpdated={combinedMetrics?.timestamp} />
           </div>
           <div className="flex gap-2 text-xs">
             <SystemStatus
