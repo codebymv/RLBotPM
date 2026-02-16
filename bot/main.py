@@ -1466,6 +1466,49 @@ def backtest_crypto(min_edge, min_price, max_price, hours_before, seed, series):
         traceback.print_exc()
 
 
+@kalshi.command("walk-forward")
+@click.option('--windows', default=10, type=int, help='Number of chronological windows')
+@click.option('--min-edge', default=0.02, type=float, help='Min edge threshold (0.02 = 2%)')
+@click.option('--max-edge', default=0.05, type=float, help='Max edge threshold (0.05 = 5%)')
+@click.option('--min-price', default=1, type=int, help='Min market price in cents')
+@click.option('--max-price', default=15, type=int, help='Max market price in cents')
+@click.option('--hours-before', default=1.0, type=float, help='Simulated hours before settlement')
+@click.option('--seed', default=42, type=int, help='Random seed')
+@click.option('--series', default=None, help='Comma-separated series filter')
+def walk_forward(windows, min_edge, max_edge, min_price, max_price, hours_before, seed, series):
+    """
+    Walk-forward backtest: split data chronologically into windows.
+
+    Tests whether the crypto edge persists across different time periods,
+    catching regime changes and look-ahead bias.
+    """
+    from src.strategies.walk_forward_crypto import run_walk_forward
+
+    console.print(f"\n[bold cyan]Walk-Forward Backtest[/bold cyan]")
+    console.print(f"{windows} windows | edge {min_edge:.1%}–{max_edge:.1%} | price {min_price}–{max_price}¢\n")
+
+    try:
+        series_filter = None
+        if series:
+            series_filter = [s.strip().upper() for s in series.split(",") if s.strip()]
+
+        report = run_walk_forward(
+            n_windows=windows,
+            min_edge=min_edge,
+            max_edge=max_edge,
+            min_tradeable_price=min_price,
+            max_tradeable_price=max_price,
+            hours_before=hours_before,
+            seed=seed,
+            series_filter=series_filter,
+        )
+        console.print(report.summary())
+    except Exception as e:
+        console.print(f"\n[red]Error:[/red] {e}")
+        import traceback
+        traceback.print_exc()
+
+
 @cli.command()
 def test_env():
     """Test the Gym environment setup"""
@@ -1525,17 +1568,17 @@ def test_env():
 @kalshi.command("paper-trade")
 @click.option('--interval', default=300, type=int, help='Seconds between scans (default 5 min)')
 @click.option('--bankroll', default=100.0, type=float, help='Starting capital')
-@click.option('--min-edge', default=0.01, type=float, help='Min edge threshold (0.01 = 1%%)')
-@click.option('--max-edge', default=0.20, type=float, help='Max edge (large edges are often wrong)')
+@click.option('--min-edge', default=0.02, type=float, help='Min edge threshold (0.02 = 2%%)')
+@click.option('--max-edge', default=0.05, type=float, help='Max edge (large edges are often wrong)')
 @click.option('--min-price', default=1, type=int, help='Min market price in cents')
-@click.option('--max-price', default=50, type=int, help='Max market price in cents')
+@click.option('--max-price', default=15, type=int, help='Max market price in cents')
 @click.option('--max-contracts', default=10, type=int, help='Max contracts per trade')
 @click.option('--max-positions', default=20, type=int, help='Max simultaneous positions')
 @click.option('--series', default=None, help='Comma-separated series (default: all crypto)')
 @click.option('--max-scans', default=None, type=int, help='Stop after N scans (default: forever)')
-@click.option('--demo/--live', default=True, help='Use demo or live API')
-def paper_trade(interval, bankroll, min_edge, max_edge, min_price, max_price,
-                max_contracts, max_positions, series, max_scans, demo):
+@click.option('--live/--demo', default=True, help='Use live or demo API')
+def paper_trade_kalshi(interval, bankroll, min_edge, max_edge, min_price, max_price,
+                      max_contracts, max_positions, series, max_scans, live):
     """
     Paper trade the crypto edge detector on live markets.
 
@@ -1544,12 +1587,15 @@ def paper_trade(interval, bankroll, min_edge, max_edge, min_price, max_price,
     bot/logs/paper_trades.jsonl.
 
     No real orders are placed.
+
+    Defaults tuned for optimized thresholds (edge 2-5%, price 1-15c).
     """
     from src.strategies.paper_trader import run_paper_trading
 
-    console.print(f"\n[bold cyan]Kalshi Paper Trading[/bold cyan]")
+    mode = "LIVE" if live else "DEMO"
+    console.print(f"\n[bold cyan]Kalshi Paper Trading ({mode})[/bold cyan]")
     console.print(f"Bankroll: ${bankroll:.2f} | Interval: {interval}s | Edge: {min_edge:.1%}-{max_edge:.1%}")
-    console.print(f"Price: {min_price}-{max_price}c | Max contracts: {max_contracts} | Demo: {demo}\n")
+    console.print(f"Price: {min_price}-{max_price}c | Max contracts: {max_contracts} | Mode: {mode}\n")
 
     try:
         series_list = None
@@ -1566,7 +1612,7 @@ def paper_trade(interval, bankroll, min_edge, max_edge, min_price, max_price,
             max_contracts_per_trade=max_contracts,
             max_open_positions=max_positions,
             series=series_list,
-            demo=demo,
+            demo=not live,
             max_scans=max_scans,
         )
         console.print(portfolio.summary())
@@ -1574,6 +1620,43 @@ def paper_trade(interval, bankroll, min_edge, max_edge, min_price, max_price,
         console.print(f"\n[red]Error:[/red] {e}")
         import traceback
         traceback.print_exc()
+
+
+@kalshi.command("paper-status")
+def paper_status():
+    """Show current paper trading portfolio status from log."""
+    from src.strategies.paper_trader import read_paper_status
+
+    status = read_paper_status()
+
+    if "error" in status:
+        console.print(f"\n[red]{status['error']}[/red]")
+        return
+
+    console.print("\n[bold cyan]Paper Trading Status[/bold cyan]")
+    console.print(f"Sessions: {status['sessions']} | Trades: {status['total_trades']}")
+    console.print(f"Open: {status['open_positions']} | Closed: {status['closed_positions']}")
+
+    if status['win_rate'] is not None:
+        console.print(f"Win rate: {status['win_rate']:.1%} ({status['wins']}W/{status['losses']}L)")
+
+    console.print(f"Realized P&L: ${status['realized_pnl']:+.2f}")
+    console.print(f"Open cost: ${status['open_cost']:.2f}")
+
+    if status.get('last_scan'):
+        ls = status['last_scan']
+        console.print(f"\nLast scan: {ls.get('timestamp', '?')}")
+        console.print(f"  Markets: {ls.get('markets_scanned', '?')} | Edges: {ls.get('edges_found', '?')} | New trades: {ls.get('new_trades', '?')}")
+
+    if status['open']:
+        console.print(f"\n[bold]Open positions ({len(status['open'])}):[/bold]")
+        for p in status['open']:
+            console.print(f"  {p['ticker']}  {p['side'].upper()} {p['contracts']}@{p['price']:.0f}¢  edge={p['edge']:.1%}  ${p['cost']:.2f}")
+
+    if status['closed']:
+        console.print(f"\n[bold]Settled positions ({len(status['closed'])}):[/bold]")
+        for p in status['closed']:
+            console.print(f"  {p['ticker']}  {p['outcome']}  P&L=${p['pnl']:+.2f}")
 
 
 if __name__ == '__main__':

@@ -29,11 +29,26 @@ LOG_DIR = Path(__file__).resolve().parent.parent.parent / "logs"
 
 CRYPTO_SERIES = ["KXBTC", "KXBTCD", "KXETH", "KXETHD", "KXSOLD", "KXDOGE", "KXXRP"]
 
-# Backtest-validated parameters
-DEFAULT_MIN_EDGE = 0.01      # 1% minimum edge
-DEFAULT_MAX_EDGE = 0.20      # Skip large "edge" (12% win rate at 40%+)
+# Map series prefixes to canonical asset names
+_ASSET_MAP = {
+    "KXBTC": "BTC", "KXBTCD": "BTC",
+    "KXETH": "ETH", "KXETHD": "ETH",
+    "KXSOLD": "SOL", "KXDOGE": "DOGE", "KXXRP": "XRP",
+    "KXINXU": "INXU", "KXEURUSDH": "EURUSD",
+}
+
+def _extract_asset(ticker: str) -> str:
+    """Extract canonical asset name from a Kalshi ticker."""
+    for prefix, asset in _ASSET_MAP.items():
+        if ticker.startswith(prefix):
+            return asset
+    return ticker.split("-")[0]
+
+# Backtest-validated parameters (sweep: 98.2% win, Sharpe 2.36)
+DEFAULT_MIN_EDGE = 0.02      # 2% minimum edge (sweet spot)
+DEFAULT_MAX_EDGE = 0.05      # 5% max — large "edges" are often wrong
 DEFAULT_MIN_PRICE = 1        # Skip 0-priced markets
-DEFAULT_MAX_PRICE = 50       # Low-price markets have best win rate (86.9% at 1-5¢)
+DEFAULT_MAX_PRICE = 15       # Low-price markets have best win rate (99%+ at 1-15¢)
 
 
 @dataclass
@@ -283,8 +298,8 @@ def run_paper_trading(
                 time.sleep(interval_seconds)
                 continue
 
-            # 3. Run edge detection
-            edges = detector.scan_series(markets, top_n=50)
+            # 3. Run edge detection (request many so small edges aren't crowded out)
+            edges = detector.scan_series(markets, top_n=500)
 
             # 4. Filter and open new positions
             new_trades = 0
@@ -308,6 +323,15 @@ def run_paper_trading(
                 # Position limit
                 if len(portfolio.open_positions) >= max_open_positions:
                     break
+
+                # Concentration limit: max 40% of capital per asset
+                asset = _extract_asset(edge.ticker)
+                asset_cost = sum(
+                    p.cost_dollars for p in portfolio.open_positions.values()
+                    if _extract_asset(p.ticker) == asset
+                )
+                if asset_cost >= portfolio.initial_capital * 0.40:
+                    continue
 
                 # Size the trade
                 if edge.recommended_side == "yes":
@@ -412,3 +436,111 @@ def run_paper_trading(
     })
 
     return portfolio
+
+
+def read_paper_status(log_path: Optional[Path] = None) -> Dict:
+    """
+    Parse paper_trades.jsonl and reconstruct current portfolio state.
+    Returns a dict with session info, open positions, closed positions, and P&L.
+    """
+    if log_path is None:
+        log_path = LOG_DIR / "paper_trades.jsonl"
+
+    if not log_path.exists():
+        return {"error": "No paper trade log found"}
+
+    events = []
+    with open(log_path) as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                try:
+                    events.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+
+    # Walk through events to reconstruct state
+    sessions = []
+    current_session = None
+    open_positions = {}
+    closed_positions = []
+    realized_pnl = 0.0
+    total_trades = 0
+    wins = 0
+    losses = 0
+    last_scan = None
+    bankroll = 100.0
+
+    for ev in events:
+        etype = ev.get("type")
+
+        if etype == "session_start":
+            current_session = ev
+            bankroll = ev.get("bankroll", 100.0)
+            sessions.append(ev)
+
+        elif etype == "open_position":
+            ticker = ev.get("ticker", "")
+            open_positions[ticker] = ev
+            total_trades += 1
+
+        elif etype == "settlement":
+            ticker = ev.get("ticker", "")
+            pnl = ev.get("pnl", 0.0)
+            realized_pnl += pnl
+            if pnl > 0:
+                wins += 1
+            else:
+                losses += 1
+            if ticker in open_positions:
+                settled_pos = open_positions.pop(ticker)
+                settled_pos["settled"] = True
+                settled_pos["outcome"] = ev.get("outcome")
+                settled_pos["pnl"] = pnl
+                closed_positions.append(settled_pos)
+
+        elif etype == "scan_summary":
+            last_scan = ev
+
+        elif etype == "session_end":
+            pass
+
+    open_cost = sum(p.get("cost", 0) for p in open_positions.values())
+    cash = bankroll - open_cost - sum(p.get("cost", 0) for p in closed_positions) + sum(
+        (1.0 * p.get("contracts", 0)) if p.get("pnl", 0) > 0 else 0.0
+        for p in closed_positions
+    )
+
+    return {
+        "sessions": len(sessions),
+        "total_trades": total_trades,
+        "open_positions": len(open_positions),
+        "closed_positions": len(closed_positions),
+        "wins": wins,
+        "losses": losses,
+        "win_rate": wins / (wins + losses) if (wins + losses) > 0 else None,
+        "realized_pnl": realized_pnl,
+        "open_cost": open_cost,
+        "last_scan": last_scan,
+        "open": [
+            {
+                "ticker": p.get("ticker"),
+                "side": p.get("side"),
+                "price": p.get("entry_price"),
+                "edge": p.get("edge"),
+                "contracts": p.get("contracts"),
+                "cost": p.get("cost"),
+                "edge_type": p.get("edge_type"),
+            }
+            for p in open_positions.values()
+        ],
+        "closed": [
+            {
+                "ticker": p.get("ticker"),
+                "side": p.get("side"),
+                "outcome": p.get("outcome"),
+                "pnl": p.get("pnl"),
+            }
+            for p in closed_positions
+        ],
+    }
