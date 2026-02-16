@@ -169,10 +169,10 @@ def _check_settlements(adapter, portfolio: PaperPortfolio, log_path: Path):
         except Exception:
             continue
 
-        if market.status != "settled" or market.result is None:
+        if market.status not in ("settled", "finalized") or market.result is None:
             continue
 
-        # Market has settled
+        # Market has settled / finalized
         pos.settled = True
         pos.outcome = market.result
         pos.settled_at = datetime.now(timezone.utc).isoformat()
