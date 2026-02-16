@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import Image from "next/image";
 import { usePathname } from "next/navigation";
 import { ModeToggle } from "./ModeToggle";
 
@@ -25,10 +26,22 @@ export default function Nav() {
         <Link
           href="/"
           aria-label="RLTrade home"
-          className="font-bold text-xl tracking-tighter text-white shrink-0 hover:text-cyan-300 transition-colors focus:outline-none focus:ring-2 focus:ring-cyan-500/50 focus:ring-offset-2 focus:ring-offset-gray-950 rounded-sm"
+          className="flex items-center gap-2 shrink-0 hover:opacity-80 transition-opacity focus:outline-none focus:ring-2 focus:ring-cyan-500/50 focus:ring-offset-2 focus:ring-offset-gray-950 rounded-sm"
         >
-          <span className="font-mono">RL</span>
-          <span className="text-cyan-400">TRADE</span>
+          <Image
+            src="/rltrade-icon.png"
+            alt="RLTrade"
+            width={32}
+            height={32}
+            className="w-8 h-8"
+          />
+          <Image
+            src="/rltrade-text.png"
+            alt="RLTrade"
+            width={120}
+            height={32}
+            className="h-7 w-auto hidden sm:block"
+          />
         </Link>
 
         {/* Navigation Links */}

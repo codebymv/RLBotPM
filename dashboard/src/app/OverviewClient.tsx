@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import { useMode } from "./components/ModeToggle";
 import { KpiCard } from "./components/KpiCard";
 import { StatusPill } from "./components/StatusPill";
@@ -59,9 +60,22 @@ export default function OverviewClient({
       {/* Header with System Status */}
       <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between mb-6 pb-4 border-b border-gray-800/60">
         <div>
-          <h1 className="text-5xl font-bold mb-2 tracking-tight">
-            RL<span className="text-cyan-400">TRADE</span>
-          </h1>
+          <div className="flex items-center gap-3 mb-3">
+            <Image
+              src="/rltrade-icon.png"
+              alt="RLTrade"
+              width={56}
+              height={56}
+              className="w-14 h-14"
+            />
+            <Image
+              src="/rltrade-text.png"
+              alt="RLTrade"
+              width={200}
+              height={56}
+              className="h-12 w-auto"
+            />
+          </div>
           <p className="text-gray-500 text-base font-mono tracking-wide">
             Reinforcement Learning Crypto Prediction Market Bot
           </p>
