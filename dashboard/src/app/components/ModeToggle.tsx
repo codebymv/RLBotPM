@@ -11,7 +11,7 @@ export function ModeToggle() {
   const currentMode = (searchParams.get("mode") || "paper") as TradingMode;
 
   const setMode = (mode: TradingMode) => {
-    const params = new URLSearchParams(searchParams);
+    const params = new URLSearchParams(searchParams.toString());
     params.set("mode", mode);
     router.push(`${pathname}?${params.toString()}`);
   };
