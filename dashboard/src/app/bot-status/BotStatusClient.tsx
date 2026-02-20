@@ -325,7 +325,7 @@ export default function BotStatusClient({
               <EmptyState message="No sessions recorded" />
             ) : (
               <div className="space-y-3">
-                {kalshiBot.sessions.map((s) => {
+                {(kalshiBot.sessions as Session[]).map((s) => {
                   const totalSettled = s.wins + s.losses;
                   const wr =
                     totalSettled > 0

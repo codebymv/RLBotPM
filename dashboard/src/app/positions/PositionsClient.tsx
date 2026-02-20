@@ -117,10 +117,14 @@ export default function PositionsClient({
 
   const prices: Record<string, PriceData> = (crypto as any)?.prices || {};
 
-  const kalshiPositions: KalshiPosition[] = (kalshiData.positions || [])
+  const kalshiPositions: KalshiPosition[] = (
+    (kalshiData as { positions?: Omit<KalshiPosition, "strategy">[] })?.positions || []
+  )
     .filter((p) => (p.mode || "paper") === mode)
     .map((p) => ({ ...p, strategy: "kalshi" as const }));
-  const rlPositions: RLPosition[] = (rlData.positions || []).map((p) => ({
+  const rlPositions: RLPosition[] = (
+    (rlData as { positions?: Omit<RLPosition, "strategy">[] })?.positions || []
+  ).map((p) => ({
     ...p,
     strategy: "rl_crypto" as const,
   }));
