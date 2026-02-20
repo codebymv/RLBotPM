@@ -12,7 +12,7 @@ import {
   fetchHealth,
   fetchPnlSeries,
   fetchCombinedMetrics,
-} from "../../../lib/api";
+} from "../../lib/api";
 
 type SideStats = {
   total: number;

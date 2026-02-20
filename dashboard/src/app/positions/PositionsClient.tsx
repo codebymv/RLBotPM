@@ -11,7 +11,7 @@ import {
   fetchKalshiPositions,
   fetchRLPositions,
   fetchCryptoPrices,
-} from "../../../lib/api";
+} from "../../lib/api";
 
 type KalshiPosition = {
   strategy: "kalshi";

@@ -11,7 +11,7 @@ import {
   fetchBotStatus,
   fetchMarketStats,
   fetchTrainingRuns,
-} from "../../../lib/api";
+} from "../../lib/api";
 
 type Session = {
   session_id: string;

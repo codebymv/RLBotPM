@@ -17,7 +17,7 @@ import {
   fetchCryptoPrices,
   fetchBotStatus,
   fetchMarketStats,
-} from "../../lib/api";
+} from "../lib/api";
 
 function fmt(n: number, decimals = 2) {
   return n.toLocaleString("en-US", {
