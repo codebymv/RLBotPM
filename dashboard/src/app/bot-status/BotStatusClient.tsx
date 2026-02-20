@@ -266,7 +266,7 @@ export default function BotStatusClient({
                   Calibrated Annual Volatilities
                 </div>
                 <div className="flex flex-wrap gap-2">
-                  {Object.entries(kalshiBot.strategy.volatilities).map(([asset, vol]) => (
+                  {(Object.entries(kalshiBot.strategy.volatilities) as [string, number][]).map(([asset, vol]) => (
                     <span
                       key={asset}
                       className="px-3 py-1.5 rounded-md bg-gray-800/60 text-xs font-mono font-bold"
