@@ -262,7 +262,7 @@ def _check_settlements(adapter, portfolio: PaperPortfolio, log_path: Path):
         })
         _db_settle_trade(ticker, market.result, pos.pnl, mode="paper")
         logger.info(
-            f"SETTLED {ticker}: {market.result} → "
+            f"SETTLED {ticker}: {market.result} -> "
             f"{'WIN' if pos.pnl > 0 else 'LOSS'} ${pos.pnl:+.2f}  "
             f"(cumulative: ${portfolio.realized_pnl:+.2f})"
         )

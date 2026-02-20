@@ -1,10 +1,17 @@
 "use client";
 
+import { useQuery } from "@tanstack/react-query";
 import { useBot } from "../components/BotSelector";
 import { SectionHeader } from "../components/SectionHeader";
 import { EmptyState } from "../components/EmptyState";
 import { KpiCard } from "../components/KpiCard";
 import { StrategyBadge } from "../components/StrategyBadge";
+import { DataFreshness } from "../components/DataFreshness";
+import {
+  fetchBotStatus,
+  fetchMarketStats,
+  fetchTrainingRuns,
+} from "../../../lib/api";
 
 type Session = {
   session_id: string;
@@ -81,11 +88,34 @@ type Props = {
 };
 
 export default function BotStatusClient({
-  kalshiBot,
-  mkt,
-  trainingRuns,
+  kalshiBot: initialKalshiBot,
+  mkt: initialMkt,
+  trainingRuns: initialTrainingRuns,
 }: Props) {
   const bot = useBot();
+
+  const { data: kalshiBot, dataUpdatedAt: botUpdatedAt } = useQuery({
+    queryKey: ["botStatus"],
+    queryFn: fetchBotStatus,
+    initialData: initialKalshiBot,
+    refetchInterval: 60_000,
+  });
+
+  const { data: mkt } = useQuery({
+    queryKey: ["marketStats"],
+    queryFn: fetchMarketStats,
+    initialData: initialMkt,
+    refetchInterval: 60_000,
+  });
+
+  const { data: trainingRunsData } = useQuery({
+    queryKey: ["trainingRuns"],
+    queryFn: () => fetchTrainingRuns(10),
+    initialData: initialTrainingRuns,
+    refetchInterval: 60_000,
+  });
+  const trainingRuns = (trainingRunsData as TrainingRun[] | null) ?? [];
+
   const showKalshi = bot === "all" || bot === "kalshi";
   const showRL = bot === "all" || bot === "rl_crypto";
 
@@ -101,13 +131,22 @@ export default function BotStatusClient({
   return (
     <main className="min-h-screen bg-gray-950 text-gray-100 p-3 sm:p-4 max-w-6xl mx-auto grid-terminal">
       {/* Header */}
-      <div className="mb-6 pb-4 border-b border-gray-800/60">
-        <h1 className="text-4xl font-bold tracking-tight mb-2">
-          Bot Status{bot !== "all" ? (bot === "rl_crypto" ? " (RL Crypto)" : " (Kalshi)") : ""}
-        </h1>
-        <p className="text-gray-500 text-base font-mono">
-          Strategy configuration, session history, and operational timeline
-        </p>
+      <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between mb-6 pb-4 border-b border-gray-800/60">
+        <div>
+          <h1 className="text-4xl font-bold tracking-tight mb-2">
+            Bot Status{bot !== "all" ? (bot === "rl_crypto" ? " (RL Crypto)" : " (Kalshi)") : ""}
+          </h1>
+          <p className="text-gray-500 text-base font-mono">
+            Strategy configuration, session history, and operational timeline
+          </p>
+        </div>
+        <div className="mt-4 sm:mt-0">
+          <DataFreshness
+            lastUpdated={
+              botUpdatedAt ? new Date(botUpdatedAt).toISOString() : undefined
+            }
+          />
+        </div>
       </div>
 
       {/* RL Crypto — Training Runs */}

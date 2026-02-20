@@ -1,11 +1,18 @@
 "use client";
 
+import { useQuery } from "@tanstack/react-query";
 import { useMode } from "../components/ModeToggle";
 import { useBot } from "../components/BotSelector";
 import { StatusPill } from "../components/StatusPill";
 import { SectionHeader } from "../components/SectionHeader";
 import { EmptyState } from "../components/EmptyState";
 import { StrategyBadge } from "../components/StrategyBadge";
+import { DataFreshness } from "../components/DataFreshness";
+import {
+  fetchHealth,
+  fetchPnlSeries,
+  fetchCombinedMetrics,
+} from "../../../lib/api";
 
 type SideStats = {
   total: number;
@@ -31,12 +38,38 @@ type Props = {
   combinedMetrics: any;
 };
 
-export default function EdgeHealthClient({ health, pnl, combinedMetrics }: Props) {
+export default function EdgeHealthClient({
+  health: initialHealth,
+  pnl: initialPnl,
+  combinedMetrics: initialCombinedMetrics,
+}: Props) {
   const mode = useMode();
   const bot = useBot();
-  const bySide: Record<string, SideStats> = health?.by_side || {};
-  const byEdgeType: Record<string, EdgeTypeStats> = health?.by_edge_type || {};
-  const rlMetrics = combinedMetrics?.by_strategy?.rl_crypto || {};
+
+  const { data: health, dataUpdatedAt: healthUpdatedAt } = useQuery({
+    queryKey: ["edgeHealth", mode],
+    queryFn: () => fetchHealth(),
+    initialData: initialHealth,
+    refetchInterval: 30_000,
+  });
+
+  const { data: pnl } = useQuery({
+    queryKey: ["pnlSeries", mode],
+    queryFn: () => fetchPnlSeries(mode),
+    initialData: initialPnl,
+    refetchInterval: 30_000,
+  });
+
+  const { data: combinedMetrics } = useQuery({
+    queryKey: ["combinedMetrics", mode],
+    queryFn: () => fetchCombinedMetrics(mode),
+    initialData: initialCombinedMetrics,
+    refetchInterval: 15_000,
+  });
+
+  const bySide: Record<string, SideStats> = (health as any)?.by_side || {};
+  const byEdgeType: Record<string, EdgeTypeStats> = (health as any)?.by_edge_type || {};
+  const rlMetrics = (combinedMetrics as any)?.by_strategy?.rl_crypto || {};
   const showKalshi = bot === "all" || bot === "kalshi";
   const showRL = bot === "all" || bot === "rl_crypto";
 
@@ -56,8 +89,13 @@ export default function EdgeHealthClient({ health, pnl, combinedMetrics }: Props
                 : "Statistical edge validation and performance diagnostics"}
           </p>
         </div>
-        <div className="mt-4 sm:mt-0">
+        <div className="mt-4 sm:mt-0 flex flex-col items-end gap-2">
           <StatusPill mode={mode} />
+          <DataFreshness
+            lastUpdated={
+              healthUpdatedAt ? new Date(healthUpdatedAt).toISOString() : undefined
+            }
+          />
         </div>
       </div>
 

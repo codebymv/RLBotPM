@@ -1,10 +1,17 @@
 "use client";
 
+import { useQuery } from "@tanstack/react-query";
 import { useMode } from "../components/ModeToggle";
 import { useBot } from "../components/BotSelector";
 import { StatusPill } from "../components/StatusPill";
 import { EmptyState } from "../components/EmptyState";
 import { StrategyBadge } from "../components/StrategyBadge";
+import { DataFreshness } from "../components/DataFreshness";
+import {
+  fetchKalshiPositions,
+  fetchRLPositions,
+  fetchCryptoPrices,
+} from "../../../lib/api";
 
 type KalshiPosition = {
   strategy: "kalshi";
@@ -79,10 +86,36 @@ type Props = {
   crypto: any;
 };
 
-export default function PositionsClient({ kalshiData, rlData, crypto }: Props) {
+export default function PositionsClient({
+  kalshiData: initialKalshiData,
+  rlData: initialRlData,
+  crypto: initialCrypto,
+}: Props) {
   const mode = useMode();
   const bot = useBot();
-  const prices: Record<string, PriceData> = crypto?.prices || {};
+
+  const { data: kalshiData, dataUpdatedAt: positionsUpdatedAt } = useQuery({
+    queryKey: ["kalshiPositions"],
+    queryFn: () => fetchKalshiPositions(),
+    initialData: initialKalshiData,
+    refetchInterval: 15_000,
+  });
+
+  const { data: rlData } = useQuery({
+    queryKey: ["rlPositions", mode],
+    queryFn: () => fetchRLPositions(mode),
+    initialData: initialRlData,
+    refetchInterval: 15_000,
+  });
+
+  const { data: crypto } = useQuery({
+    queryKey: ["cryptoPrices"],
+    queryFn: fetchCryptoPrices,
+    initialData: initialCrypto,
+    refetchInterval: 60_000,
+  });
+
+  const prices: Record<string, PriceData> = (crypto as any)?.prices || {};
 
   const kalshiPositions: KalshiPosition[] = (kalshiData.positions || [])
     .filter((p) => (p.mode || "paper") === mode)
@@ -147,8 +180,13 @@ export default function PositionsClient({ kalshiData, rlData, crypto }: Props) {
             )}
           </div>
         </div>
-        <div className="mt-4 sm:mt-0">
+        <div className="mt-4 sm:mt-0 flex flex-col items-end gap-2">
           <StatusPill mode={mode} />
+          <DataFreshness
+            lastUpdated={
+              positionsUpdatedAt ? new Date(positionsUpdatedAt).toISOString() : undefined
+            }
+          />
         </div>
       </div>
 

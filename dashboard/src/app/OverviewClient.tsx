@@ -2,6 +2,7 @@
 
 import Image from "next/image";
 import { useSearchParams } from "next/navigation";
+import { useQuery } from "@tanstack/react-query";
 import { useMode } from "./components/ModeToggle";
 import { useBot } from "./components/BotSelector";
 import { KpiCard } from "./components/KpiCard";
@@ -10,6 +11,13 @@ import { SectionHeader } from "./components/SectionHeader";
 import { EmptyState } from "./components/EmptyState";
 import { DataFreshness } from "./components/DataFreshness";
 import { StrategyBadge } from "./components/StrategyBadge";
+import {
+  fetchCombinedMetrics,
+  fetchHealth,
+  fetchCryptoPrices,
+  fetchBotStatus,
+  fetchMarketStats,
+} from "../../lib/api";
 
 function fmt(n: number, decimals = 2) {
   return n.toLocaleString("en-US", {
@@ -27,17 +35,52 @@ type Props = {
 };
 
 export default function OverviewClient({
-  health,
-  combinedMetrics,
-  crypto,
-  bot: botStatus,
-  mktStats,
+  health: initialHealth,
+  combinedMetrics: initialCombinedMetrics,
+  crypto: initialCrypto,
+  bot: initialBotStatus,
+  mktStats: initialMktStats,
 }: Props) {
   const mode = useMode();
   const bot = useBot();
   const searchParams = useSearchParams();
   const queryString = searchParams.toString();
   const link = (path: string) => (queryString ? `${path}?${queryString}` : path);
+
+  const { data: combinedMetrics, dataUpdatedAt: metricsUpdatedAt } = useQuery({
+    queryKey: ["combinedMetrics", mode],
+    queryFn: () => fetchCombinedMetrics(mode),
+    initialData: initialCombinedMetrics,
+    refetchInterval: 15_000,
+  });
+
+  const { data: health } = useQuery({
+    queryKey: ["health"],
+    queryFn: fetchHealth,
+    initialData: initialHealth,
+    refetchInterval: 60_000,
+  });
+
+  const { data: crypto } = useQuery({
+    queryKey: ["cryptoPrices"],
+    queryFn: fetchCryptoPrices,
+    initialData: initialCrypto,
+    refetchInterval: 60_000,
+  });
+
+  const { data: botStatus } = useQuery({
+    queryKey: ["botStatus"],
+    queryFn: fetchBotStatus,
+    initialData: initialBotStatus,
+    refetchInterval: 60_000,
+  });
+
+  const { data: mktStats } = useQuery({
+    queryKey: ["marketStats"],
+    queryFn: fetchMarketStats,
+    initialData: initialMktStats,
+    refetchInterval: 60_000,
+  });
 
   // Select data by bot
   const byStrategy = combinedMetrics?.by_strategy || {};
@@ -121,7 +164,13 @@ export default function OverviewClient({
         <div className="flex flex-col gap-2 mt-4 sm:mt-0">
           <div className="flex gap-2 items-center">
             <StatusPill mode={mode} />
-            <DataFreshness lastUpdated={combinedMetrics?.timestamp} />
+            <DataFreshness
+              lastUpdated={
+                metricsUpdatedAt
+                  ? new Date(metricsUpdatedAt).toISOString()
+                  : combinedMetrics?.timestamp
+              }
+            />
           </div>
           <div className="flex gap-2 text-xs">
             <SystemStatus

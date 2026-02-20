@@ -202,7 +202,7 @@ def _check_live_settlements(client, portfolio: LivePortfolio, log_path: Path):
         })
         win_label = "WIN" if pos.pnl > 0 else "LOSS"
         logger.info(
-            f"SETTLED {ticker}: {market.result} → {win_label} ${pos.pnl:+.2f}  "
+            f"SETTLED {ticker}: {market.result} -> {win_label} ${pos.pnl:+.2f}  "
             f"(cumulative: ${portfolio.realized_pnl:+.2f})"
         )
 
