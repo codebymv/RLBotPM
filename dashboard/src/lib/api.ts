@@ -96,5 +96,11 @@ export async function fetchRLPositions(mode = "paper") {
 // ---------------------------------------------------------------------------
 
 export async function fetchTrainingRuns(limit = 10) {
-  return get(`/api/training/runs?limit=${limit}`);
+  const data = await get<{
+    runs?: unknown[];
+    total?: number;
+    limit?: number;
+    offset?: number;
+  }>(`/api/training/runs?limit=${limit}`);
+  return data?.runs ?? [];
 }

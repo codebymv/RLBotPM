@@ -114,7 +114,11 @@ export default function BotStatusClient({
     initialData: initialTrainingRuns,
     refetchInterval: 60_000,
   });
-  const trainingRuns = (trainingRunsData as TrainingRun[] | null) ?? [];
+  const trainingRuns = Array.isArray(trainingRunsData)
+    ? (trainingRunsData as TrainingRun[])
+    : Array.isArray((trainingRunsData as { runs?: unknown[] } | null)?.runs)
+      ? ((trainingRunsData as { runs: TrainingRun[] }).runs ?? [])
+      : [];
 
   const showKalshi = bot === "all" || bot === "kalshi";
   const showRL = bot === "all" || bot === "rl_crypto";
