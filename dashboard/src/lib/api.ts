@@ -6,7 +6,8 @@
 const BASE_URL =
   process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
-async function get<T>(path: string): Promise<T | null> {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function get<T = any>(path: string): Promise<T | null> {
   try {
     const res = await fetch(`${BASE_URL}${path}`, { cache: "no-store" });
     if (!res.ok) return null;
