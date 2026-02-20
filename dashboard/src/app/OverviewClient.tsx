@@ -95,13 +95,24 @@ export default function OverviewClient({
         ? kalshiData
         : rlData;
 
+  // KPI semantics:
+  // - totalTrades: all records (open + settled/closed)
+  // - settledTrades: wins + losses only
+  // - settledWinRate: wins / settledTrades
   const totalTrades = strategyData?.total_trades ?? 0;
   const wins = strategyData?.wins ?? 0;
   const losses = strategyData?.losses ?? 0;
+  const settledTrades = strategyData?.settled_trades ?? wins + losses;
   const pnl = strategyData?.realized_pnl ?? 0;
   const openPositions = strategyData?.open_positions ?? 0;
   const openCost = strategyData?.open_cost ?? 0;
-  const winRate = totalTrades > 0 ? (wins / totalTrades) * 100 : 0;
+  const apiSettledWinRate = strategyData?.win_rate;
+  const settledWinRate =
+    typeof apiSettledWinRate === "number"
+      ? apiSettledWinRate * 100
+      : settledTrades > 0
+        ? (wins / settledTrades) * 100
+        : 0;
 
   // Recent trades: merge when "all", otherwise filter by bot
   const kalshiTrades = (kalshiData.recent_trades || []).filter(
@@ -215,7 +226,8 @@ export default function OverviewClient({
                     {fmt(rlData.realized_pnl ?? 0)}
                   </div>
                   <div className="text-sm font-mono text-gray-400">
-                    {(rlData.total_trades ?? 0)} trades · {(rlData.win_rate ?? 0) * 100}% win rate
+                    {((rlData.settled_trades ?? (rlData.wins ?? 0) + (rlData.losses ?? 0)) || 0)} settled ·{" "}
+                    {((rlData.win_rate ?? 0) * 100).toFixed(1)}% settled win rate
                   </div>
                 </div>
                 <div className="rounded-lg border border-blue-800/40 bg-blue-950/10 p-4">
@@ -228,7 +240,8 @@ export default function OverviewClient({
                     {fmt(kalshiData.realized_pnl ?? 0)}
                   </div>
                   <div className="text-sm font-mono text-gray-400">
-                    {(kalshiData.total_trades ?? 0)} trades · {(kalshiData.win_rate ?? 0) * 100}% win rate
+                    {((kalshiData.settled_trades ?? (kalshiData.wins ?? 0) + (kalshiData.losses ?? 0)) || 0)} settled ·{" "}
+                    {((kalshiData.win_rate ?? 0) * 100).toFixed(1)}% settled win rate
                   </div>
                 </div>
               </div>
@@ -243,15 +256,15 @@ export default function OverviewClient({
                 trend={pnl > 0 ? "up" : pnl < 0 ? "down" : "flat"}
               />
               <KpiCard
-                label="Total Trades"
+                label="Total Trades (All)"
                 value={totalTrades}
-                sublabel={`${wins}W · ${losses}L`}
+                sublabel={`${settledTrades} settled · ${openPositions} open`}
                 mode="neutral"
               />
               <KpiCard
-                label="Win Rate"
-                value={totalTrades > 0 ? `${winRate.toFixed(1)}%` : "—"}
-                sublabel={totalTrades > 0 ? `${wins} wins` : "No trades yet"}
+                label="Settled Win Rate"
+                value={settledTrades > 0 ? `${settledWinRate.toFixed(1)}%` : "—"}
+                sublabel={settledTrades > 0 ? `${wins}W · ${losses}L settled` : "No settled trades yet"}
                 mode="neutral"
               />
               <KpiCard
@@ -261,9 +274,9 @@ export default function OverviewClient({
                 mode="neutral"
               />
               <KpiCard
-                label="Settled Markets"
+                label="Kalshi Settled Markets"
                 value={mktStats ? mktStats.total_markets.toLocaleString() : "—"}
-                sublabel={mktStats ? `${mktStats.total_events} events` : "Kalshi data"}
+                sublabel={mktStats ? `${mktStats.total_events} events · dataset coverage` : "Kalshi dataset coverage"}
                 mode="neutral"
               />
             </div>

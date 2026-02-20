@@ -382,6 +382,7 @@ async def get_paper_trading_metrics(
             mode_breakdown = {
                 r[0]: {
                     "total": int(r[1]), "wins": int(r[2]), "losses": int(r[3]),
+                    "settled_trades": int(r[2] or 0) + int(r[3] or 0),
                     "realized_pnl": float(r[4]), "open_positions": int(r[5]),
                     "open_cost": float(r[6]),
                 }
@@ -422,6 +423,7 @@ async def get_paper_trading_metrics(
             "total_trades": total,
             "wins": wins,
             "losses": losses,
+            "settled_trades": settled,
             "win_rate": win_rate,
             "realized_pnl": realized_pnl,
             "open_positions": open_count,
@@ -509,12 +511,14 @@ async def get_combined_metrics(
         ]
 
         rl_losses = rl_total - rl_wins
+        rl_settled = rl_wins + rl_losses
         rl_win_rate = (rl_wins / rl_total) if rl_total > 0 else 0.0
 
         combined_trades = kalshi_metrics["total_trades"] + rl_total
         combined_pnl = kalshi_metrics["realized_pnl"] + rl_pnl
         combined_wins = kalshi_metrics["wins"] + rl_wins
         combined_losses = kalshi_metrics["losses"] + rl_losses
+        combined_settled = combined_wins + combined_losses
         combined_win_rate = (
             (combined_wins / combined_trades) if combined_trades > 0 else 0.0
         )
@@ -524,6 +528,7 @@ async def get_combined_metrics(
                 "total_trades": combined_trades,
                 "wins": combined_wins,
                 "losses": combined_losses,
+                "settled_trades": combined_settled,
                 "win_rate": combined_win_rate,
                 "realized_pnl": combined_pnl,
                 "open_positions": kalshi_metrics["open_positions"] + rl_open,
@@ -534,6 +539,7 @@ async def get_combined_metrics(
                     "total_trades": kalshi_metrics["total_trades"],
                     "wins": kalshi_metrics["wins"],
                     "losses": kalshi_metrics["losses"],
+                    "settled_trades": kalshi_metrics.get("settled_trades", kalshi_metrics["wins"] + kalshi_metrics["losses"]),
                     "win_rate": kalshi_metrics["win_rate"],
                     "realized_pnl": kalshi_metrics["realized_pnl"],
                     "open_positions": kalshi_metrics["open_positions"],
@@ -549,6 +555,7 @@ async def get_combined_metrics(
                     "total_trades": rl_total,
                     "wins": rl_wins,
                     "losses": rl_losses,
+                    "settled_trades": rl_settled,
                     "win_rate": rl_win_rate,
                     "realized_pnl": rl_pnl,
                     "open_positions": rl_open,

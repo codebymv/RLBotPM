@@ -118,13 +118,13 @@ export default function EdgeHealthClient({
                 <div className="text-2xl font-mono font-bold tabular-nums">
                   {rlMetrics.total_trades ?? 0}
                 </div>
-                <div className="text-[10px] text-gray-600 uppercase tracking-widest font-mono">Total Trades</div>
+                <div className="text-[10px] text-gray-600 uppercase tracking-widest font-mono">Closed Trades</div>
               </div>
               <div>
                 <div className="text-2xl font-mono font-bold tabular-nums">
                   {((rlMetrics.win_rate ?? 0) * 100).toFixed(0)}%
                 </div>
-                <div className="text-[10px] text-gray-600 uppercase tracking-widest font-mono">Win Rate</div>
+                <div className="text-[10px] text-gray-600 uppercase tracking-widest font-mono">Closed Win Rate</div>
               </div>
               <div>
                 <div className="text-2xl font-mono font-bold tabular-nums">
