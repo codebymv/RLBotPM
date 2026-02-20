@@ -72,6 +72,9 @@ out/
 build/
 dist/
 
+# Un-ignore dashboard source lib (overrides the Python lib/ rule above)
+!dashboard/src/lib/
+
 # Testing
 .coverage
 htmlcov/
