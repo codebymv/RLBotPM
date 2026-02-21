@@ -6,6 +6,11 @@ import { Providers } from "./providers";
 export const metadata: Metadata = {
   title: "RLTrade Dashboard",
   description: "Crypto prediction market trading bot dashboard",
+  icons: {
+    icon: "/rltrade-icon.png",
+    shortcut: "/rltrade-icon.png",
+    apple: "/rltrade-icon.png",
+  },
 };
 
 export default function RootLayout({
