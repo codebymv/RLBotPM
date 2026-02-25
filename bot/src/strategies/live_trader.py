@@ -19,6 +19,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -222,6 +223,7 @@ def run_live_trading(
     max_loss_streak: int = DEFAULT_MAX_LOSS_STREAK,
     max_daily_loss: float = DEFAULT_MAX_DAILY_LOSS,
     series: Optional[List[str]] = None,
+    allowed_sides: Optional[List[str]] = None,
     max_scans: Optional[int] = None,
     dry_run: bool = False,
 ) -> LivePortfolio:
@@ -236,12 +238,49 @@ def run_live_trading(
     """
     from ..data.sources.kalshi import KalshiAdapter
     from ..execution.kalshi_client import KalshiExecutionClient, OrderSide
+    from ..monitoring import AlertSystem
 
     series_list = series or CRYPTO_SERIES
     log_path = LOG_DIR / "live_trades.jsonl"
 
+    env_allowed_sides = os.getenv("LIVE_ALLOWED_SIDES", "no")
+    configured_sides = allowed_sides or [
+        side.strip().lower() for side in env_allowed_sides.split(",") if side.strip()
+    ]
+    allowed_side_set = {side for side in configured_sides if side in {"yes", "no"}}
+    if not allowed_side_set:
+        allowed_side_set = {"no"}
+
+    allow_buy_yes = os.getenv("LIVE_ALLOW_BUY_YES", "false").lower() == "true"
+    if "yes" in allowed_side_set and not allow_buy_yes:
+        logger.warning("Removing BUY_YES from allowed sides (set LIVE_ALLOW_BUY_YES=true to override)")
+        allowed_side_set.discard("yes")
+    if not allowed_side_set:
+        allowed_side_set = {"no"}
+
+    alert_recipients_raw = os.getenv("ALERT_EMAIL_TO", "")
+    alert_recipients = [email.strip() for email in alert_recipients_raw.split(",") if email.strip()]
+    alerter = AlertSystem(alert_recipients) if alert_recipients else None
+
+    def _send_alert(subject: str, message: str, severity: str) -> None:
+        if alerter is None:
+            return
+        try:
+            alerter.send_alert(subject, message, severity=severity)
+        except Exception as exc:
+            logger.error("Failed to send alert '%s': %s", subject, exc)
+
     adapter = KalshiAdapter(demo=False)
-    client = KalshiExecutionClient(demo=False)
+
+    def _cb_alert(event) -> None:
+        """Bridge CircuitBreaker events into the alert system."""
+        _send_alert(
+            f"Circuit breaker: {event.rule_violated}",
+            event.description,
+            event.severity,
+        )
+
+    client = KalshiExecutionClient(demo=False, alert_callback=_cb_alert)
 
     detector = StatisticalEdgeDetector(
         min_edge=min_edge,
@@ -278,8 +317,19 @@ def run_live_trading(
     logger.info(f"Kill switch:   {max_loss_streak} consecutive losses or ${max_daily_loss:.2f} daily loss")
     logger.info(f"Edge range:    {min_edge:.1%} – {max_edge:.1%}")
     logger.info(f"Price range:   {min_price}–{max_price}¢")
-    logger.info(f"Side:          BUY_NO only")
+    logger.info(f"Sides:         {', '.join(sorted(f'BUY_{s.upper()}' for s in allowed_side_set))}")
     logger.info(f"Series:        {', '.join(series_list)}")
+
+    _send_alert(
+        "Live trading session started",
+        (
+            f"Mode={mode_label} | MaxCost=${max_cost_per_trade:.2f} | "
+            f"MaxDeployed=${max_total_deployed:.2f} | "
+            f"Sides={','.join(sorted(allowed_side_set))} | "
+            f"Edge={min_edge:.1%}-{max_edge:.1%}"
+        ),
+        severity="info",
+    )
 
     _log_event(log_path, {
         "type": "session_start",
@@ -292,6 +342,7 @@ def run_live_trading(
         "max_daily_loss": max_daily_loss,
         "min_edge": min_edge,
         "max_edge": max_edge,
+        "allowed_sides": sorted(allowed_side_set),
         "series": series_list,
     })
 
@@ -308,6 +359,11 @@ def run_live_trading(
             # Kill switch check
             if portfolio.check_kill_switch():
                 logger.warning(f"KILL SWITCH: {portfolio.kill_reason}")
+                _send_alert(
+                    "Live trading kill switch triggered",
+                    portfolio.kill_reason,
+                    severity="critical",
+                )
                 _log_event(log_path, {
                     "type": "kill_switch",
                     "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -344,7 +400,7 @@ def run_live_trading(
                     continue
 
                 # BUY_NO only
-                if edge.recommended_side != "no":
+                if edge.recommended_side not in allowed_side_set:
                     continue
 
                 if edge.ticker in portfolio.open_positions:
@@ -370,7 +426,10 @@ def run_live_trading(
                     continue
 
                 # Size: how many contracts can we afford?
-                cost_per_contract = (100 - price) / 100.0
+                if edge.recommended_side == "yes":
+                    cost_per_contract = price / 100.0
+                else:
+                    cost_per_contract = (100 - price) / 100.0
                 max_by_trade_limit = int(max_cost_per_trade / cost_per_contract) if cost_per_contract > 0 else 0
                 max_by_capital = int(portfolio.available_to_deploy / cost_per_contract) if cost_per_contract > 0 else 0
                 contracts = min(max_by_trade_limit, max_by_capital)
@@ -382,14 +441,14 @@ def run_live_trading(
 
                 if dry_run:
                     logger.info(
-                        f"DRY RUN: would place BUY_NO {contracts}@{price}¢ on {edge.ticker} "
+                        f"DRY RUN: would place BUY_{edge.recommended_side.upper()} {contracts}@{price}¢ on {edge.ticker} "
                         f"edge={edge.edge_value:.1%} cost=${total_cost:.2f}"
                     )
                     _log_event(log_path, {
                         "type": "dry_run_signal",
                         "timestamp": scan_ts,
                         "ticker": edge.ticker,
-                        "side": "no",
+                        "side": edge.recommended_side,
                         "price_cents": price,
                         "contracts": contracts,
                         "cost": total_cost,
@@ -400,27 +459,35 @@ def run_live_trading(
 
                 # PLACE REAL ORDER
                 logger.info(
-                    f"PLACING ORDER: BUY_NO {contracts}@{price}¢ on {edge.ticker} "
+                    f"PLACING ORDER: BUY_{edge.recommended_side.upper()} {contracts}@{price}¢ on {edge.ticker} "
                     f"edge={edge.edge_value:.1%} cost=${total_cost:.2f}"
                 )
 
+                order_side = OrderSide.YES if edge.recommended_side == "yes" else OrderSide.NO
+                order_price = price if edge.recommended_side == "yes" else (100 - price)
+
                 order = client.place_limit_order(
                     ticker=edge.ticker,
-                    side=OrderSide.NO,
-                    price=100 - price,  # NO price = 100 - YES price
+                    side=order_side,
+                    price=order_price,
                     contracts=contracts,
                     expiration_seconds=interval_seconds,  # Cancel if not filled by next scan
                 )
 
                 if order is None:
                     logger.warning(f"Order failed for {edge.ticker}")
+                    _send_alert(
+                        "Live order failed",
+                        f"Ticker={edge.ticker} side={edge.recommended_side} price={price} contracts={contracts}",
+                        severity="warning",
+                    )
                     continue
 
                 portfolio.trades_taken += 1
                 pos = LivePosition(
                     ticker=edge.ticker,
                     event_ticker=edge.event_ticker,
-                    side="no",
+                    side=edge.recommended_side,
                     order_id=order.order_id,
                     price_cents=price,
                     contracts=contracts,
@@ -438,7 +505,7 @@ def run_live_trading(
                     "timestamp": scan_ts,
                     "ticker": edge.ticker,
                     "event_ticker": edge.event_ticker,
-                    "side": "no",
+                    "side": edge.recommended_side,
                     "price_cents": price,
                     "contracts": contracts,
                     "cost": total_cost,
@@ -449,7 +516,7 @@ def run_live_trading(
                 })
 
                 logger.info(
-                    f"ORDER FILLED: {edge.ticker} BUY_NO {contracts}@{price}¢ "
+                    f"ORDER FILLED: {edge.ticker} BUY_{edge.recommended_side.upper()} {contracts}@{price}¢ "
                     f"cost=${total_cost:.2f} order={order.order_id[:8]}"
                 )
 
@@ -478,6 +545,14 @@ def run_live_trading(
 
     except KeyboardInterrupt:
         logger.info("Live trading interrupted by user.")
+    except Exception as e:
+        logger.error("Live trading crashed: %s", e)
+        _send_alert(
+            "Live trading crashed",
+            f"Unhandled exception: {e}",
+            severity="critical",
+        )
+        raise
 
     _log_event(log_path, {
         "type": "session_end",

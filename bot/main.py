@@ -1708,7 +1708,11 @@ def live_trade(interval, max_cost, max_total, max_positions, max_loss_streak,
     """
     Live trade the crypto edge detector on Kalshi.
 
-    Places REAL limit orders. BUY_NO only (100% backtest win rate).
+        Places REAL limit orders.
+
+        Default side policy is BUY_NO only. To allow BUY_YES, set:
+            LIVE_ALLOWED_SIDES=yes,no
+            LIVE_ALLOW_BUY_YES=true
 
     Safety limits:
       - $1 max per trade (--max-cost)
@@ -1725,7 +1729,7 @@ def live_trade(interval, max_cost, max_total, max_positions, max_loss_streak,
     console.print(f"Max per trade: ${max_cost:.2f} | Max total: ${max_total:.2f}")
     console.print(f"Edge: {min_edge:.1%}-{max_edge:.1%} | Price: {min_price}-{max_price}c")
     console.print(f"Kill switch: {max_loss_streak} losses or ${max_daily_loss:.2f} daily loss")
-    console.print(f"Side: BUY_NO only | Interval: {interval}s\n")
+    console.print(f"Side policy: LIVE_ALLOWED_SIDES (default BUY_NO) | Interval: {interval}s\n")
 
     try:
         series_list = None
