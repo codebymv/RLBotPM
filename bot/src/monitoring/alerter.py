@@ -38,7 +38,11 @@ class AlertSystem:
         self.webhook_url = os.getenv("ALERT_WEBHOOK_URL")
         self.webhook_bearer_token = os.getenv("ALERT_WEBHOOK_BEARER_TOKEN")
         self.webhook_timeout_seconds = float(os.getenv("ALERT_WEBHOOK_TIMEOUT_SECONDS", "5"))
-        # Gleam event-alert trigger (2 env vars only)
+        # Gleam event-alert trigger.
+        # Primary (no-code): GLEAM_WEBHOOK_URL — full URL with key embedded, no headers needed.
+        #   e.g. https://backend.up.railway.app/api/trigger/trg_live_xxxx
+        # Fallback (developer): GLEAM_TRIGGER_URL + GLEAM_TRIGGER_KEY (Bearer header).
+        self.gleam_webhook_url = (os.getenv("GLEAM_WEBHOOK_URL") or "").rstrip("/")
         self.gleam_trigger_url = (os.getenv("GLEAM_TRIGGER_URL") or "").rstrip("/")
         self.gleam_trigger_key = os.getenv("GLEAM_TRIGGER_KEY", "")
 
@@ -95,12 +99,9 @@ class AlertSystem:
     def _send_via_gleam_trigger(self, subject: str, message: str, severity: str) -> bool:
         """Trigger an outbound voice alert call via the Gleam EVENT_ALERTS endpoint.
 
-        POST GLEAM_TRIGGER_URL with Authorization: Bearer <GLEAM_TRIGGER_KEY>.
-        The Gleam agent handles calling the configured alertRecipientPhone.
+        Primary path: POST GLEAM_WEBHOOK_URL (key embedded in URL, no headers).
+        Fallback path: POST GLEAM_TRIGGER_URL with Authorization: Bearer <GLEAM_TRIGGER_KEY>.
         """
-        if not self.gleam_trigger_url or not self.gleam_trigger_key:
-            return False
-
         payload = json.dumps({
             "event_type": subject,
             "severity": severity,
@@ -108,17 +109,28 @@ class AlertSystem:
             "source": "rlbot",
         }).encode("utf-8")
 
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.gleam_trigger_key}",
-        }
+        if self.gleam_webhook_url:
+            # No-code path: key is already embedded in the URL
+            req = urllib.request.Request(
+                self.gleam_webhook_url,
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+        elif self.gleam_trigger_url and self.gleam_trigger_key:
+            # Legacy developer path: separate URL + Bearer header
+            req = urllib.request.Request(
+                self.gleam_trigger_url,
+                data=payload,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {self.gleam_trigger_key}",
+                },
+                method="POST",
+            )
+        else:
+            return False
 
-        req = urllib.request.Request(
-            self.gleam_trigger_url,
-            data=payload,
-            headers=headers,
-            method="POST",
-        )
         with urllib.request.urlopen(req, timeout=15) as resp:
             resp_body = json.loads(resp.read().decode("utf-8"))
             te_id = resp_body.get("data", {}).get("triggerEventId", "unknown")
@@ -126,7 +138,6 @@ class AlertSystem:
                 "Gleam trigger alert sent (triggerEventId=%s, severity=%s): %s",
                 te_id, severity, subject,
             )
-        return True
         return True
 
     def send_alert(self, subject: str, message: str, severity: str = "info") -> None:
