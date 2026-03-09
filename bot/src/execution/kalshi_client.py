@@ -99,12 +99,13 @@ class KalshiExecutionClient:
     PROD_URL = "https://api.elections.kalshi.com/trade-api/v2"
     DEMO_URL = "https://demo-api.kalshi.co/trade-api/v2"
     
-    def __init__(self, demo: bool = True):
+    def __init__(self, demo: bool = True, alert_callback=None):
         """
         Initialize execution client.
         
         Args:
             demo: If True, use demo API (paper trading)
+            alert_callback: Optional callable(CircuitBreakerEvent) for alerts
         """
         prod_url = os.getenv("KALSHI_API_BASE_URL", self.PROD_URL).rstrip("/")
         demo_url = os.getenv("KALSHI_DEMO_API_BASE_URL", self.DEMO_URL).rstrip("/")
@@ -139,7 +140,7 @@ class KalshiExecutionClient:
         self._filled_orders: List[KalshiOrder] = []
         
         # Risk: circuit breaker and Kalshi-specific rules
-        self._circuit_breaker = CircuitBreaker()
+        self._circuit_breaker = CircuitBreaker(on_trigger=alert_callback)
         self._risk_config = self._load_risk_config()
         self._kalshi_config = self._load_kalshi_config()
         

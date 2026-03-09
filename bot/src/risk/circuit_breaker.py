@@ -13,7 +13,7 @@ Circuit breakers protect against:
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 from enum import Enum
 
 from ..core.logger import get_logger
@@ -57,9 +57,20 @@ class CircuitBreaker:
         breaker.record_trade(pnl=50.0, capital=1050.0)
     """
     
-    def __init__(self):
-        """Initialize circuit breaker with configuration from settings"""
+    def __init__(
+        self,
+        on_trigger: Optional[Callable[["CircuitBreakerEvent"], None]] = None,
+    ):
+        """Initialize circuit breaker with configuration from settings.
+
+        Args:
+            on_trigger: Optional callback invoked with the
+                :class:`CircuitBreakerEvent` every time a rule fires in
+                live (non-training) mode.  Use this to plug in external
+                alert systems without coupling the risk module to them.
+        """
         self.settings = get_settings()
+        self._on_trigger = on_trigger
         
         # Status
         self.status = CircuitBreakerStatus.ACTIVE
@@ -370,3 +381,9 @@ class CircuitBreaker:
 
         logger.critical(f"CIRCUIT BREAKER TRIGGERED: {description}")
         logger.critical("Trading PAUSED - Human review required")
+
+        if self._on_trigger is not None:
+            try:
+                self._on_trigger(event)
+            except Exception as cb_exc:
+                logger.error("on_trigger callback failed: %s", cb_exc)

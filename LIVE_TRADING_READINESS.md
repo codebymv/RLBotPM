@@ -143,19 +143,86 @@ class LiveTradingSafety:
 - [ ] Performance vs risk limits
 
 ### 3.2 Alert System
-**Create `bot/src/monitoring/alerts.py`**
+**Implemented: `bot/src/monitoring/alerter.py`**
 
-**Critical Alerts** (SMS/Call):
-- Circuit breaker triggered
-- Daily loss limit approaching (80%)
-- API connection lost
-- Unexpected behavior detected
+The `AlertSystem` class supports three transports (tried in order):
 
-**Warning Alerts** (Email/Discord):
-- Trade executed (with details)
-- Position opened/closed
-- Performance milestone (good or bad)
-- Approaching risk limits (60%)
+| Transport | Trigger | Config |
+|-----------|---------|--------|
+| **AICallerSaaS voice call** | All severities — phone rings | `AICALLER_*` env vars |
+| **Generic webhook POST** | All severities | `ALERT_WEBHOOK_URL` |
+| **SMTP email** | All severities | `ALERT_SMTP_*` env vars |
+
+**Alert events wired in `live_trader.py`:**
+| Event | Severity | Description |
+|-------|----------|-------------|
+| Session started | info | Mode, limits, sides |
+| Kill switch triggered | critical | Consecutive losses or daily loss |
+| Order failure | warning | Ticker, side, price |
+| Unhandled crash | critical | Exception details |
+
+**Circuit breaker events** (wired via callback in `circuit_breaker.py`):
+| Rule | Severity |
+|------|----------|
+| MAX_DAILY_LOSS_USD / PCT | critical |
+| MAX_WEEKLY_LOSS_USD / PCT | critical |
+| MAX_TOTAL_DRAWDOWN | critical |
+| MAX_CONSECUTIVE_LOSSES | critical |
+| MIN_WIN_RATE_THRESHOLD | critical |
+| API_ERROR_THRESHOLD | critical |
+
+### 3.2.1 AICallerSaaS Voice Alert Setup
+
+Your phone will ring when any alert fires. Set up as follows:
+
+#### A. Configure the AICallerSaaS Agent
+1. Open your AICallerSaaS dashboard (Gleam)
+2. Create a new Agent with these settings:
+   - **Name:** `RLBot Alert`
+   - **Mode:** `OUTBOUND`
+   - **Communication Channel:** `VOICE_ONLY`
+   - **System Prompt:**
+     ```
+     You are an emergency alert system for an automated trading bot
+     called RLBot. When a call connects, immediately say: "ALERT.
+     Your RLBot trading system has triggered a safety event. Please
+     check your trading dashboard immediately. Do you acknowledge?"
+     If the user acknowledges, say "Acknowledged. Goodbye." and end
+     the call. If no response after 10 seconds, repeat the alert
+     once, then end. Keep the tone urgent but calm.
+     ```
+   - **Call Window:** `00:00` – `23:59` (24/7 for trading alerts)
+   - **Max Call Duration:** `60` seconds
+   - **Voicemail Message:**
+     ```
+     URGENT: Your RLBot trading system triggered a safety alert.
+     Check your dashboard immediately.
+     ```
+   - **Voice:** Pick a clear, authoritative ElevenLabs voice
+3. Assign a Twilio phone number to the agent
+4. Note the **Agent ID** from the URL (UUID)
+
+#### B. Generate an API Key
+1. Go to **API Keys** in the AICallerSaaS dashboard
+2. Create a key — copy the `sk_live_…` value (shown only once)
+
+#### C. Set Environment Variables
+```bash
+AICALLER_BASE_URL=https://your-gleam-instance.railway.app
+AICALLER_API_KEY=<your-api-key-here>
+AICALLER_AGENT_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+AICALLER_PHONE_TO=+14155551234
+```
+
+#### D. Test
+```bash
+python -c "
+from bot.src.monitoring.alerter import AlertSystem
+a = AlertSystem([])
+a.send_alert('Test Alert', 'Integration test call', 'info')
+"
+```
+Your phone should ring within seconds.
 
 **Info Notifications** (Dashboard):
 - Specialist routing changes
