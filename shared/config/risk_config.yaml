@@ -1,5 +1,7 @@
 # Risk Management Configuration
-# These are HARD LIMITS that cannot be bypassed
+# These are RL/live risk limits.
+# Paper-trading defaults are centralized in `shared/config/kalshi_config.yaml`
+# under `strategy.paper_trading`.
 
 # Loss limits
 loss_limits:

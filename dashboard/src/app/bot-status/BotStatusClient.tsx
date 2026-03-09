@@ -8,39 +8,17 @@ import { KpiCard } from "../components/KpiCard";
 import { StrategyBadge } from "../components/StrategyBadge";
 import { DataFreshness } from "../components/DataFreshness";
 import {
+  type BotStatusResponse,
+  type BotSession,
+  type CurrentSessionSnapshot,
   fetchBotStatus,
   fetchMarketStats,
   fetchTrainingRuns,
 } from "../../lib/api";
 
-type Session = {
-  session_id: string;
-  started_at: string | null;
-  last_trade_at: string | null;
-  trades_opened: number;
-  open_now: number;
-  wins: number;
-  losses: number;
-  realized_pnl: number;
-};
+type Session = BotSession;
 
-type BotData = {
-  sessions: Session[];
-  total_sessions: number;
-  total_trades: number;
-  first_trade_at: string | null;
-  last_trade_at: string | null;
-  strategy: {
-    name: string;
-    side_filter: string;
-    min_edge: number;
-    max_edge: number;
-    min_price: number;
-    max_price: number;
-    assets: string[];
-    volatilities: Record<string, number>;
-  };
-};
+type BotData = BotStatusResponse;
 
 type TrainingRun = {
   id: number;
@@ -249,8 +227,14 @@ export default function BotStatusClient({
                 <Stat label="Strategy" value={kalshiBot.strategy.name} />
                 <Stat
                   label="Side Filter"
-                  value={`BUY_${kalshiBot.strategy.side_filter.toUpperCase()}`}
-                  valueClass="text-green-400"
+                  value={
+                    kalshiBot.strategy.side_filter === "both"
+                      ? "BUY_BOTH"
+                      : `BUY_${kalshiBot.strategy.side_filter.toUpperCase()}`
+                  }
+                  valueClass={
+                    kalshiBot.strategy.allow_buy_yes ? "text-amber-300" : "text-green-400"
+                  }
                 />
                 <Stat
                   label="Edge Range"
@@ -266,6 +250,73 @@ export default function BotStatusClient({
               </div>
 
               <div className="mt-6 pt-6 border-t border-gray-800/40">
+                {kalshiBot.current_session && (() => {
+                  const cs = kalshiBot.current_session as CurrentSessionSnapshot;
+                  const pnl = cs.realized_pnl;
+                  const wr = cs.win_rate !== null ? `${(cs.win_rate * 100).toFixed(1)}%` : "—";
+                  return (
+                    <div className="mb-5 rounded-lg border border-cyan-900/50 bg-cyan-950/20 p-4">
+                      <div className="text-[10px] text-cyan-600 uppercase mb-2 font-mono font-bold tracking-widest">
+                        Current Session · {cs.session_id}
+                      </div>
+                      <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 text-sm font-mono">
+                        <Stat
+                          label="Session P&L"
+                          value={`$${pnl >= 0 ? "+" : ""}${fmt(pnl)}`}
+                          valueClass={pnl > 0 ? "text-green-400" : pnl < 0 ? "text-red-400" : "text-gray-400"}
+                        />
+                        <Stat
+                          label="Settled"
+                          value={String(cs.settled_trades)}
+                          valueClass="text-gray-200"
+                        />
+                        <Stat
+                          label="Win Rate"
+                          value={wr}
+                          valueClass="text-cyan-300"
+                        />
+                        <Stat
+                          label="Open Positions"
+                          value={String(cs.open_positions)}
+                        />
+                        <Stat
+                          label="Open Cost"
+                          value={`$${fmt(cs.open_cost)}`}
+                        />
+                      </div>
+                    </div>
+                  );
+                })()}
+                {kalshiBot.session_reconciliation && (
+                  <div className="mb-5 rounded-lg border border-gray-800/60 bg-gray-900/30 p-4">
+                    <div className="text-[10px] text-gray-600 uppercase mb-2 font-mono font-bold tracking-widest">
+                      Session Reconciliation
+                    </div>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-sm font-mono">
+                      <Stat
+                        label="DB Sessions"
+                        value={String(kalshiBot.session_reconciliation.db_sessions)}
+                      />
+                      <Stat
+                        label="JSONL Starts"
+                        value={String(kalshiBot.session_reconciliation.jsonl_session_starts)}
+                      />
+                      <Stat
+                        label="JSONL Ends"
+                        value={String(kalshiBot.session_reconciliation.jsonl_session_ends)}
+                      />
+                      <Stat
+                        label="Delta (DB-JSONL)"
+                        value={String(kalshiBot.session_reconciliation.delta_db_minus_jsonl)}
+                        valueClass={
+                          kalshiBot.session_reconciliation.delta_db_minus_jsonl === 0
+                            ? "text-green-400"
+                            : "text-amber-300"
+                        }
+                      />
+                    </div>
+                  </div>
+                )}
                 <div className="text-[10px] text-gray-600 uppercase mb-3 font-mono font-bold tracking-widest">
                   Calibrated Annual Volatilities
                 </div>

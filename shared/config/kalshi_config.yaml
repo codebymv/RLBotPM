@@ -62,6 +62,23 @@ trading:
   max_concurrent_positions: 10 # Diversify
 
 strategy:
+  # Canonical defaults for `python main.py kalshi paper-trade`
+  # Keep paper risk controls centralized here to avoid drift.
+  paper_trading:
+    interval_seconds: 300
+    bankroll: 100.0
+    min_edge: 0.02
+    max_edge: 0.05
+    min_price_cents: 1
+    max_price_cents: 15
+    max_contracts_per_trade: 10
+    max_open_positions: 10
+    max_new_trades_per_scan: 4
+    per_asset_cap_pct: 0.25
+    max_session_loss_dollars: 5.0
+    enable_buy_yes: false
+    strategy_mode: "buy_no"
+
   # Signal sources for crypto markets
   crypto_signals:
     # Use existing PPO model prediction

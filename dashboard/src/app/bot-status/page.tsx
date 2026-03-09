@@ -2,37 +2,11 @@ import { Suspense } from "react";
 import { SectionHeader } from "../components/SectionHeader";
 import { EmptyState } from "../components/EmptyState";
 import BotStatusClient from "./BotStatusClient";
+import type { BotStatusResponse } from "../../lib/api";
 
 const baseUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
-type Session = {
-  session_id: string;
-  started_at: string | null;
-  last_trade_at: string | null;
-  trades_opened: number;
-  open_now: number;
-  wins: number;
-  losses: number;
-  realized_pnl: number;
-};
-
-type BotData = {
-  sessions: Session[];
-  total_sessions: number;
-  total_trades: number;
-  first_trade_at: string | null;
-  last_trade_at: string | null;
-  strategy: {
-    name: string;
-    side_filter: string;
-    min_edge: number;
-    max_edge: number;
-    min_price: number;
-    max_price: number;
-    assets: string[];
-    volatilities: Record<string, number>;
-  };
-};
+type BotData = BotStatusResponse;
 
 type TrainingRun = {
   id: number;

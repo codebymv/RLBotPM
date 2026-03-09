@@ -16,6 +16,7 @@ import os
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 import json
+from pathlib import Path
 
 # Load environment variables
 load_dotenv()
@@ -30,6 +31,12 @@ app = FastAPI(
 # Database connection (for data source health)
 DATABASE_URL = os.getenv("DATABASE_URL")
 DB_ENGINE = create_engine(DATABASE_URL) if DATABASE_URL else None
+PAPER_TRADES_LOG_PATH = Path(
+    os.getenv(
+        "PAPER_TRADES_LOG_PATH",
+        str(Path(__file__).resolve().parent.parent / "bot" / "logs" / "paper_trades.jsonl"),
+    )
+)
 
 # Configure CORS
 origins = [o.strip() for o in os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",") if o.strip()]
@@ -41,6 +48,112 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def _read_paper_log_metadata(log_path: Path) -> dict:
+    """
+    Read session metadata from paper_trades.jsonl.
+
+    Returns session counts for reconciliation AND a full current-session
+    snapshot (PnL, wins, losses, open/settled trade counts) rebuilt from
+    the log so it always matches what the bot actually recorded.
+    """
+    empty = {
+        "jsonl_session_starts": 0,
+        "jsonl_session_ends": 0,
+        "latest_session_start": None,
+        "current_session": None,
+    }
+    if not log_path.exists():
+        return empty
+
+    starts = 0
+    ends = 0
+    latest_start = None
+
+    # Current-session running state (reset on every session_start)
+    cur_session_id: str | None = None
+    cur_open: dict = {}
+    cur_settled: int = 0
+    cur_wins: int = 0
+    cur_losses: int = 0
+    cur_realized_pnl: float = 0.0
+    cur_start_ts: str | None = None
+    last_scan: dict | None = None
+
+    try:
+        with open(log_path, encoding="utf-8") as f:
+            for raw in f:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    event = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                etype = event.get("type")
+
+                if etype == "session_start":
+                    starts += 1
+                    latest_start = event
+                    cur_session_id = event.get("session_id")
+                    cur_start_ts = event.get("timestamp")
+                    cur_open = {}
+                    cur_settled = 0
+                    cur_wins = 0
+                    cur_losses = 0
+                    cur_realized_pnl = 0.0
+                    last_scan = None
+
+                elif etype == "session_end":
+                    ends += 1
+
+                elif etype == "open_position":
+                    if event.get("session_id") == cur_session_id:
+                        cur_open[event.get("ticker", "")] = event
+
+                elif etype == "settlement":
+                    if event.get("session_id") == cur_session_id:
+                        ticker = event.get("ticker", "")
+                        pnl = float(event.get("pnl", 0) or 0)
+                        cur_realized_pnl += pnl
+                        cur_settled += 1
+                        if pnl > 0:
+                            cur_wins += 1
+                        else:
+                            cur_losses += 1
+                        cur_open.pop(ticker, None)
+
+                elif etype == "scan_summary":
+                    if event.get("session_id") == cur_session_id:
+                        last_scan = event
+
+    except OSError:
+        return empty
+
+    current_session = None
+    if cur_session_id:
+        open_cost = sum(float(p.get("cost", 0)) for p in cur_open.values())
+        settled_wr = (cur_wins / cur_settled) if cur_settled > 0 else None
+        current_session = {
+            "session_id": cur_session_id,
+            "started_at": cur_start_ts,
+            "open_positions": len(cur_open),
+            "open_cost": open_cost,
+            "settled_trades": cur_settled,
+            "wins": cur_wins,
+            "losses": cur_losses,
+            "win_rate": settled_wr,
+            "realized_pnl": cur_realized_pnl,
+            "last_scan": last_scan,
+        }
+
+    return {
+        "jsonl_session_starts": starts,
+        "jsonl_session_ends": ends,
+        "latest_session_start": latest_start,
+        "current_session": current_session,
+    }
 
 
 # Health check endpoint
@@ -512,7 +625,12 @@ async def get_combined_metrics(
 
         rl_losses = rl_total - rl_wins
         rl_settled = rl_wins + rl_losses
-        rl_win_rate = (rl_wins / rl_total) if rl_total > 0 else 0.0
+        rl_win_rate = (rl_wins / rl_settled) if rl_settled > 0 else 0.0
+
+        # Pull current-session snapshot straight from the JSONL log so the
+        # dashboard can show "this run" PnL separately from the DB lifetime total.
+        log_meta = _read_paper_log_metadata(PAPER_TRADES_LOG_PATH)
+        current_session_snapshot = log_meta.get("current_session")
 
         combined_trades = kalshi_metrics["total_trades"] + rl_total
         combined_pnl = kalshi_metrics["realized_pnl"] + rl_pnl
@@ -520,7 +638,7 @@ async def get_combined_metrics(
         combined_losses = kalshi_metrics["losses"] + rl_losses
         combined_settled = combined_wins + combined_losses
         combined_win_rate = (
-            (combined_wins / combined_trades) if combined_trades > 0 else 0.0
+            (combined_wins / combined_settled) if combined_settled > 0 else 0.0
         )
 
         return {
@@ -534,6 +652,7 @@ async def get_combined_metrics(
                 "open_positions": kalshi_metrics["open_positions"] + rl_open,
                 "open_cost": kalshi_metrics["open_cost"] + rl_open_cost,
             },
+            "current_session": current_session_snapshot,
             "by_strategy": {
                 "kalshi": {
                     "total_trades": kalshi_metrics["total_trades"],
@@ -1219,6 +1338,9 @@ async def get_bot_status():
         raise HTTPException(status_code=503, detail="Database not configured")
 
     try:
+        log_meta = _read_paper_log_metadata(PAPER_TRADES_LOG_PATH)
+        latest_log_start = log_meta.get("latest_session_start") or {}
+
         with DB_ENGINE.connect() as conn:
             # Latest session
             sess = conn.execute(text("""
@@ -1260,21 +1382,41 @@ async def get_bot_status():
                 WHERE mode = 'paper'
             """)).fetchone()
 
+        db_sessions = int(totals[0] or 0)
+        jsonl_starts = int(log_meta.get("jsonl_session_starts") or 0)
+        jsonl_ends = int(log_meta.get("jsonl_session_ends") or 0)
+        side_filter = latest_log_start.get("side_filter", "no")
+        side_filter_label = "both" if side_filter is None else str(side_filter)
+        series = latest_log_start.get("series") or CRYPTO_ASSETS
+        min_edge = float(latest_log_start.get("min_edge", 0.02))
+        max_edge = float(latest_log_start.get("max_edge", 0.05))
+        min_price = int(latest_log_start.get("min_price", 1))
+        max_price = int(latest_log_start.get("max_price", 15))
+
         return {
             "sessions": sessions,
-            "total_sessions": int(totals[0] or 0),
+            "total_sessions": db_sessions,
             "total_trades": int(totals[1] or 0),
             "first_trade_at": totals[2].isoformat() if totals[2] else None,
             "last_trade_at": totals[3].isoformat() if totals[3] else None,
+            "current_session": log_meta.get("current_session"),
             "strategy": {
                 "name": "BUY_NO Lognormal Edge",
-                "side_filter": "no",
-                "min_edge": 0.02,
-                "max_edge": 0.05,
-                "min_price": 1,
-                "max_price": 15,
-                "assets": CRYPTO_ASSETS,
+                "side_filter": side_filter_label,
+                "allow_buy_yes": side_filter_label in {"yes", "both"},
+                "min_edge": min_edge,
+                "max_edge": max_edge,
+                "min_price": min_price,
+                "max_price": max_price,
+                "assets": series,
                 "volatilities": CALIBRATED_VOLS,
+            },
+            "session_reconciliation": {
+                "db_sessions": db_sessions,
+                "jsonl_session_starts": jsonl_starts,
+                "jsonl_session_ends": jsonl_ends,
+                "delta_db_minus_jsonl": db_sessions - jsonl_starts,
+                "jsonl_log_path": str(PAPER_TRADES_LOG_PATH),
             },
             "timestamp": datetime.utcnow().isoformat(),
         }

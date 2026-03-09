@@ -10,6 +10,7 @@ import click
 import numpy as np
 import json
 import re
+from pathlib import Path
 from rich.console import Console
 from rich.panel import Panel
 from dotenv import load_dotenv
@@ -984,6 +985,41 @@ def _get_kalshi_ppo_obs():
         return None
 
 
+def _load_kalshi_paper_defaults() -> dict:
+    """Load paper-trading defaults from shared Kalshi config."""
+    defaults = {
+        "interval_seconds": 300,
+        "bankroll": 100.0,
+        "min_edge": 0.02,
+        "max_edge": 0.05,
+        "min_price_cents": 1,
+        "max_price_cents": 15,
+        "max_contracts_per_trade": 10,
+        "max_open_positions": 20,
+        "max_new_trades_per_scan": 4,
+        "per_asset_cap_pct": 0.40,
+        "max_session_loss_dollars": None,
+        "enable_buy_yes": False,
+        "strategy_mode": "buy_no",
+    }
+    cfg_path = Path(__file__).parent.parent / "shared" / "config" / "kalshi_config.yaml"
+    if not cfg_path.exists():
+        return defaults
+    try:
+        import yaml
+
+        with open(cfg_path, encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        paper_cfg = data.get("strategy", {}).get("paper_trading", {})
+        if isinstance(paper_cfg, dict):
+            defaults.update(
+                {k: v for k, v in paper_cfg.items() if k in defaults and v is not None}
+            )
+    except Exception as e:
+        console.print(f"[yellow]Warning:[/yellow] failed to load paper config defaults: {e}")
+    return defaults
+
+
 @kalshi.command()
 @click.option('--min-edge', default=0.10, help='Minimum edge to show (0.10 = 10%)')
 @click.option('--limit', default=20, help='Max opportunities to show')
@@ -1566,20 +1602,25 @@ def test_env():
 
 
 @kalshi.command("paper-trade")
-@click.option('--interval', default=300, type=int, help='Seconds between scans (default 5 min)')
-@click.option('--bankroll', default=100.0, type=float, help='Starting capital')
-@click.option('--min-edge', default=0.02, type=float, help='Min edge threshold (0.02 = 2%%)')
-@click.option('--max-edge', default=0.05, type=float, help='Max edge (large edges are often wrong)')
-@click.option('--min-price', default=1, type=int, help='Min market price in cents')
-@click.option('--max-price', default=15, type=int, help='Max market price in cents')
-@click.option('--max-contracts', default=10, type=int, help='Max contracts per trade')
-@click.option('--max-positions', default=20, type=int, help='Max simultaneous positions')
+@click.option('--interval', default=None, type=int, help='Seconds between scans (default from config)')
+@click.option('--bankroll', default=None, type=float, help='Starting capital (default from config)')
+@click.option('--min-edge', default=None, type=float, help='Min edge threshold (default from config)')
+@click.option('--max-edge', default=None, type=float, help='Max edge threshold (default from config)')
+@click.option('--min-price', default=None, type=int, help='Min market price in cents (default from config)')
+@click.option('--max-price', default=None, type=int, help='Max market price in cents (default from config)')
+@click.option('--max-contracts', default=None, type=int, help='Max contracts per trade (default from config)')
+@click.option('--max-positions', default=None, type=int, help='Max simultaneous positions (default from config)')
+@click.option('--max-new-trades-per-scan', default=None, type=int, help='Max new positions opened in a single scan (default from config)')
+@click.option('--per-asset-cap', default=None, type=float, help='Max per-asset deployed fraction (0.40 = 40%%)')
+@click.option('--max-session-loss', default=None, type=float, help='Stop if realized session loss reaches this dollar amount')
 @click.option('--series', default=None, help='Comma-separated series (default: all crypto)')
 @click.option('--max-scans', default=None, type=int, help='Stop after N scans (default: forever)')
 @click.option('--live/--demo', default=True, help='Use live or demo API')
-@click.option('--side', default='no', type=click.Choice(['yes', 'no', 'both']), help='Side filter (default: no = BUY_NO only, 100%% backtest win rate)')
+@click.option('--strategy-mode', default=None, type=click.Choice(['buy_no', 'buy_yes', 'both']), help='Strategy side mode (default from config)')
+@click.option('--enable-buy-yes', is_flag=True, help='Required safety gate for BUY_YES (yes-only or both modes)')
 def paper_trade_kalshi(interval, bankroll, min_edge, max_edge, min_price, max_price,
-                      max_contracts, max_positions, series, max_scans, live, side):
+                      max_contracts, max_positions, max_new_trades_per_scan, per_asset_cap, max_session_loss,
+                      series, max_scans, live, strategy_mode, enable_buy_yes):
     """
     Paper trade the crypto edge detector on live markets.
 
@@ -1594,12 +1635,45 @@ def paper_trade_kalshi(interval, bankroll, min_edge, max_edge, min_price, max_pr
     """
     from src.strategies.paper_trader import run_paper_trading
 
+    defaults = _load_kalshi_paper_defaults()
+    interval = defaults["interval_seconds"] if interval is None else interval
+    bankroll = defaults["bankroll"] if bankroll is None else bankroll
+    min_edge = defaults["min_edge"] if min_edge is None else min_edge
+    max_edge = defaults["max_edge"] if max_edge is None else max_edge
+    min_price = defaults["min_price_cents"] if min_price is None else min_price
+    max_price = defaults["max_price_cents"] if max_price is None else max_price
+    max_contracts = defaults["max_contracts_per_trade"] if max_contracts is None else max_contracts
+    max_positions = defaults["max_open_positions"] if max_positions is None else max_positions
+    if max_new_trades_per_scan is None:
+        max_new_trades_per_scan = defaults["max_new_trades_per_scan"]
+    per_asset_cap = defaults["per_asset_cap_pct"] if per_asset_cap is None else per_asset_cap
+    if max_session_loss is None:
+        max_session_loss = defaults["max_session_loss_dollars"]
+    if strategy_mode is None:
+        strategy_mode = defaults["strategy_mode"]
+    enable_buy_yes = bool(enable_buy_yes or defaults.get("enable_buy_yes", False))
+
+    strategy_to_side = {"buy_no": "no", "buy_yes": "yes", "both": None}
+    side_filter = strategy_to_side[strategy_mode]
+    if strategy_mode in {"buy_yes", "both"} and not enable_buy_yes:
+        console.print(
+            "\n[bold red]Safety gate blocked run:[/bold red] "
+            "BUY_YES modes require --enable-buy-yes."
+        )
+        return
+
     mode = "LIVE" if live else "DEMO"
-    side_filter = None if side == 'both' else side
-    side_label = f"BUY_{side.upper()} only" if side != 'both' else "both sides"
+    side_label = f"BUY_{side_filter.upper()} only" if side_filter else "both sides"
     console.print(f"\n[bold cyan]Kalshi Paper Trading ({mode})[/bold cyan]")
     console.print(f"Bankroll: ${bankroll:.2f} | Interval: {interval}s | Edge: {min_edge:.1%}-{max_edge:.1%}")
-    console.print(f"Price: {min_price}-{max_price}c | Side: {side_label} | Mode: {mode}\n")
+    console.print(
+        f"Price: {min_price}-{max_price}c | Side: {side_label} | "
+        f"Per-asset cap: {per_asset_cap:.0%} | Per-scan cap: {max_new_trades_per_scan} | "
+        f"BUY_YES enabled: {enable_buy_yes}"
+    )
+    if max_session_loss is not None:
+        console.print(f"Session loss stop: ${float(max_session_loss):.2f}")
+    console.print(f"Mode: {mode}\n")
 
     try:
         series_list = None
@@ -1615,10 +1689,14 @@ def paper_trade_kalshi(interval, bankroll, min_edge, max_edge, min_price, max_pr
             max_price=max_price,
             max_contracts_per_trade=max_contracts,
             max_open_positions=max_positions,
+            max_new_trades_per_scan=max_new_trades_per_scan,
+            per_asset_cap_pct=per_asset_cap,
+            max_session_loss_dollars=max_session_loss,
             series=series_list,
             demo=not live,
             max_scans=max_scans,
             side_filter=side_filter,
+            enable_buy_yes=enable_buy_yes,
         )
         console.print(portfolio.summary())
     except Exception as e:
@@ -1640,6 +1718,11 @@ def paper_status():
 
     console.print("\n[bold cyan]Paper Trading Status[/bold cyan]")
     console.print(f"Sessions: {status['sessions']} | Trades: {status['total_trades']}")
+    if status.get("latest_session_start"):
+        console.print(
+            f"Current session: {status.get('latest_session_id', '?')} "
+            f"started {status['latest_session_start']}"
+        )
     console.print(f"Open: {status['open_positions']} | Closed: {status['closed_positions']}")
 
     if status['win_rate'] is not None:
@@ -1663,6 +1746,7 @@ def paper_status():
         console.print(f"  [bold red]BUY_YES: {yes_wr:.0%} ({yes_wins}W/{yes_losses}L)  P&L=${yes_pnl:+.2f}[/bold red]")
 
     console.print(f"Realized P&L: ${status['realized_pnl']:+.2f}")
+    console.print(f"Lifetime realized P&L: ${status['lifetime_realized_pnl']:+.2f}")
     console.print(f"Open cost: ${status['open_cost']:.2f}")
 
     if status.get('last_scan'):

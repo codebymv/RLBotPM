@@ -66,18 +66,23 @@ def _db_settle_trade(ticker: str, outcome: str, pnl: float, mode: str = "paper",
     try:
         from ..data.database import get_db_session, KalshiTrade
         sess = get_db_session()
-        trade = (
-            sess.query(KalshiTrade)
-            .filter_by(ticker=ticker, status="open", mode=mode)
-            .order_by(KalshiTrade.id.desc())
-            .first()
-        )
+        query = sess.query(KalshiTrade).filter_by(ticker=ticker, status="open", mode=mode)
+        if session_id:
+            query = query.filter_by(session_id=session_id)
+        trade = query.order_by(KalshiTrade.id.desc()).first()
         if trade:
             trade.status = "settled"
             trade.outcome = outcome
             trade.pnl = pnl
             trade.settled_at = datetime.now(timezone.utc)
             sess.commit()
+        else:
+            logger.debug(
+                "DB settle skipped: no open row for ticker=%s mode=%s session_id=%s",
+                ticker,
+                mode,
+                session_id or "<none>",
+            )
         sess.close()
     except Exception as e:
         logger.debug(f"DB write (settle) failed: {e}")
@@ -180,8 +185,9 @@ class PaperPortfolio:
 def _log_event(log_path: Path, event: Dict):
     """Append a JSON event to the paper trade log."""
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(log_path, "a") as f:
+    with open(log_path, "a", encoding="utf-8") as f:
         f.write(json.dumps(event, default=str) + "\n")
+        f.flush()
 
 
 def _fetch_live_markets(adapter, series_list: List[str]) -> List[Dict]:
@@ -217,7 +223,7 @@ def _fetch_live_markets(adapter, series_list: List[str]) -> List[Dict]:
     return all_markets
 
 
-def _check_settlements(adapter, portfolio: PaperPortfolio, log_path: Path):
+def _check_settlements(adapter, portfolio: PaperPortfolio, log_path: Path, session_id: str):
     """Check if any open positions have settled."""
     settled_tickers = []
     for ticker, pos in portfolio.open_positions.items():
@@ -253,14 +259,20 @@ def _check_settlements(adapter, portfolio: PaperPortfolio, log_path: Path):
         _log_event(log_path, {
             "type": "settlement",
             "timestamp": pos.settled_at,
+            "session_id": session_id,
             "ticker": ticker,
             "side": pos.side,
             "entry_price": pos.entry_price_cents,
             "outcome": market.result,
             "pnl": pos.pnl,
             "cumulative_pnl": portfolio.realized_pnl,
+            "asset": _extract_asset(ticker),
+            "contracts": pos.contracts,
+            "cost": pos.cost_dollars,
+            "edge": pos.edge_value,
+            "edge_type": pos.edge_type,
         })
-        _db_settle_trade(ticker, market.result, pos.pnl, mode="paper")
+        _db_settle_trade(ticker, market.result, pos.pnl, mode="paper", session_id=session_id)
         logger.info(
             f"SETTLED {ticker}: {market.result} -> "
             f"{'WIN' if pos.pnl > 0 else 'LOSS'} ${pos.pnl:+.2f}  "
@@ -280,10 +292,14 @@ def run_paper_trading(
     max_price: int = DEFAULT_MAX_PRICE,
     max_contracts_per_trade: int = 10,
     max_open_positions: int = 20,
+    max_new_trades_per_scan: int = 4,
+    per_asset_cap_pct: float = 0.40,
+    max_session_loss_dollars: Optional[float] = None,
     series: Optional[List[str]] = None,
     demo: bool = True,
     max_scans: Optional[int] = None,
     side_filter: Optional[str] = DEFAULT_SIDE_FILTER,
+    enable_buy_yes: bool = False,
 ) -> PaperPortfolio:
     """
     Run the paper trading loop.
@@ -297,10 +313,14 @@ def run_paper_trading(
         max_price: Maximum market price in cents to trade
         max_contracts_per_trade: Max contracts per trade
         max_open_positions: Max simultaneous open positions
+        max_new_trades_per_scan: Max new positions to open in a single scan
+        per_asset_cap_pct: Max deployed fraction per asset (0.40 = 40%)
+        max_session_loss_dollars: Stop if realized session loss reaches this absolute amount
         series: Kalshi series to scan (default: all crypto)
         demo: Use Kalshi demo API
         max_scans: Stop after N scans (None = run forever)
         side_filter: Only trade this side ('yes', 'no', or None for both)
+        enable_buy_yes: Must be True to allow BUY_YES trades
     """
     from ..data.sources.kalshi import KalshiAdapter
 
@@ -318,6 +338,15 @@ def run_paper_trading(
     )
     portfolio = PaperPortfolio(initial_capital=bankroll, cash=bankroll)
 
+    if side_filter == "yes" and not enable_buy_yes:
+        raise ValueError("BUY_YES is disabled by default. Pass enable_buy_yes=True to run YES-only sessions.")
+    if side_filter is None and not enable_buy_yes:
+        raise ValueError("Both-side mode requires enable_buy_yes=True because it allows BUY_YES entries.")
+    if per_asset_cap_pct <= 0 or per_asset_cap_pct > 1:
+        raise ValueError("per_asset_cap_pct must be within (0, 1].")
+    if max_new_trades_per_scan <= 0:
+        raise ValueError("max_new_trades_per_scan must be at least 1.")
+
     logger.info(f"Paper trading started | bankroll=${bankroll} | interval={interval_seconds}s")
     logger.info(f"Series: {', '.join(series_list)}")
     side_label = f"BUY_{side_filter.upper()} only" if side_filter else "both sides"
@@ -328,13 +357,22 @@ def run_paper_trading(
         "type": "session_start",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "bankroll": bankroll,
+        "session_id": session_id,
         "min_edge": min_edge,
         "max_edge": max_edge,
+        "min_price": min_price,
+        "max_price": max_price,
+        "max_open_positions": max_open_positions,
+        "max_new_trades_per_scan": max_new_trades_per_scan,
+        "per_asset_cap_pct": per_asset_cap_pct,
+        "max_session_loss_dollars": max_session_loss_dollars,
+        "enable_buy_yes": enable_buy_yes,
         "side_filter": side_filter,
         "series": series_list,
     })
 
     scan_n = 0
+    stop_reason = "completed"
     try:
         while True:
             scan_n += 1
@@ -342,13 +380,26 @@ def run_paper_trading(
 
             if max_scans and scan_n > max_scans:
                 logger.info(f"Reached max_scans={max_scans}, stopping.")
+                stop_reason = "max_scans_reached"
                 break
 
             scan_ts = datetime.now(timezone.utc).isoformat()
 
             # 1. Check settlements on open positions
             if portfolio.open_positions:
-                _check_settlements(adapter, portfolio, log_path)
+                _check_settlements(adapter, portfolio, log_path, session_id=session_id)
+
+            if (
+                max_session_loss_dollars is not None
+                and portfolio.realized_pnl <= -abs(max_session_loss_dollars)
+            ):
+                logger.warning(
+                    "Session loss stop triggered after settlements: realized_pnl=%+.2f <= -$%.2f",
+                    portfolio.realized_pnl,
+                    abs(max_session_loss_dollars),
+                )
+                stop_reason = "max_session_loss_reached"
+                break
 
             # 2. Fetch live markets
             try:
@@ -369,6 +420,9 @@ def run_paper_trading(
             # 4. Filter and open new positions
             new_trades = 0
             for edge in edges:
+                if new_trades >= max_new_trades_per_scan:
+                    break
+
                 if edge.edge_type not in ("crypto_spot_mispricing", "strike_dominance"):
                     continue
 
@@ -377,6 +431,8 @@ def run_paper_trading(
                     continue
 
                 # Side filter (BUY_NO only by default — 100% backtest win rate)
+                if edge.recommended_side == "yes" and not enable_buy_yes:
+                    continue
                 if side_filter and edge.recommended_side != side_filter:
                     continue
 
@@ -399,8 +455,6 @@ def run_paper_trading(
                     p.cost_dollars for p in portfolio.open_positions.values()
                     if _extract_asset(p.ticker) == asset
                 )
-                if asset_cost >= portfolio.initial_capital * 0.40:
-                    continue
 
                 # Size the trade
                 if edge.recommended_side == "yes":
@@ -420,6 +474,8 @@ def run_paper_trading(
 
                 total_cost = contracts * cost_per_contract
                 if total_cost > portfolio.cash:
+                    continue
+                if asset_cost + total_cost > portfolio.initial_capital * per_asset_cap_pct:
                     continue
 
                 # Open position
@@ -447,8 +503,10 @@ def run_paper_trading(
                 _log_event(log_path, {
                     "type": "open_position",
                     "timestamp": scan_ts,
+                    "session_id": session_id,
                     "ticker": edge.ticker,
                     "event_ticker": edge.event_ticker,
+                    "series_ticker": edge.market_data.get("series_ticker", ""),
                     "side": edge.recommended_side,
                     "entry_price": price,
                     "fair_price": edge.fair_price,
@@ -457,6 +515,23 @@ def run_paper_trading(
                     "contracts": contracts,
                     "cost": total_cost,
                     "reasoning": edge.reasoning,
+                    "asset": asset,
+                    "spot_timestamp": edge.market_data.get("spot_timestamp") or scan_ts,
+                    "market_snapshot": {
+                        "yes_bid": edge.market_data.get("yes_bid"),
+                        "yes_ask": edge.market_data.get("yes_ask"),
+                        "no_bid": edge.market_data.get("no_bid"),
+                        "no_ask": edge.market_data.get("no_ask"),
+                        "liquidity": edge.market_data.get("liquidity"),
+                        "volume": edge.market_data.get("volume"),
+                        "open_interest": edge.market_data.get("open_interest"),
+                    },
+                    "edge_inputs": {
+                        "market_price_cents": edge.market_price,
+                        "fair_price_cents": edge.fair_price,
+                        "edge_value": edge.edge_value,
+                        "edge_type": edge.edge_type,
+                    },
                 })
 
                 logger.info(
@@ -478,6 +553,7 @@ def run_paper_trading(
             _log_event(log_path, {
                 "type": "scan_summary",
                 "timestamp": scan_ts,
+                "session_id": session_id,
                 "scan": scan_n,
                 "markets_scanned": len(markets),
                 "edges_found": len(edges),
@@ -492,18 +568,26 @@ def run_paper_trading(
 
     except KeyboardInterrupt:
         logger.info("Paper trading interrupted by user.")
-
-    _log_event(log_path, {
-        "type": "session_end",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "scans": scan_n,
-        "trades_taken": portfolio.trades_taken,
-        "trades_won": portfolio.trades_won,
-        "trades_lost": portfolio.trades_lost,
-        "realized_pnl": portfolio.realized_pnl,
-        "cash": portfolio.cash,
-        "open_positions": len(portfolio.open_positions),
-    })
+        stop_reason = "keyboard_interrupt"
+    except Exception as e:
+        logger.exception("Paper trading crashed: %s", e)
+        stop_reason = f"exception:{type(e).__name__}"
+        raise
+    finally:
+        _log_event(log_path, {
+            "type": "session_end",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "session_id": session_id,
+            "stop_reason": stop_reason,
+            "scans": scan_n,
+            "trades_taken": portfolio.trades_taken,
+            "trades_won": portfolio.trades_won,
+            "trades_lost": portfolio.trades_lost,
+            "realized_pnl": portfolio.realized_pnl,
+            "cash": portfolio.cash,
+            "open_positions": len(portfolio.open_positions),
+            "allow_buy_yes": enable_buy_yes,
+        })
 
     return portfolio
 
@@ -529,9 +613,11 @@ def read_paper_status(log_path: Optional[Path] = None) -> Dict:
                 except json.JSONDecodeError:
                     continue
 
-    # Walk through events — only track the LATEST session's positions
-    # (older sessions may have been killed, leaving stale "open" positions)
+    # Track lifetime session count, but reconstruct portfolio state from the
+    # latest session only so the status command matches the current run.
     sessions = []
+    latest_session_id = None
+    latest_session_start = None
     open_positions = {}
     closed_positions = []
     realized_pnl = 0.0
@@ -540,25 +626,46 @@ def read_paper_status(log_path: Optional[Path] = None) -> Dict:
     losses = 0
     last_scan = None
     bankroll = 100.0
+    lifetime_realized_pnl = 0.0
+    lifetime_wins = 0
+    lifetime_losses = 0
 
     for ev in events:
         etype = ev.get("type")
 
         if etype == "session_start":
-            # New session → reset open positions (old session was killed)
-            # Keep cumulative closed/pnl stats across all sessions
+            # New session → reset to the state for the latest run.
+            latest_session_id = ev.get("session_id")
+            latest_session_start = ev.get("timestamp")
             open_positions = {}
+            closed_positions = []
+            realized_pnl = 0.0
+            total_trades = 0
+            wins = 0
+            losses = 0
+            last_scan = None
             bankroll = ev.get("bankroll", 100.0)
             sessions.append(ev)
 
         elif etype == "open_position":
+            if latest_session_id and ev.get("session_id") != latest_session_id:
+                continue
             ticker = ev.get("ticker", "")
             open_positions[ticker] = ev
             total_trades += 1
 
         elif etype == "settlement":
-            ticker = ev.get("ticker", "")
             pnl = ev.get("pnl", 0.0)
+            lifetime_realized_pnl += pnl
+            if pnl > 0:
+                lifetime_wins += 1
+            else:
+                lifetime_losses += 1
+
+            if latest_session_id and ev.get("session_id") != latest_session_id:
+                continue
+
+            ticker = ev.get("ticker", "")
             realized_pnl += pnl
             if pnl > 0:
                 wins += 1
@@ -572,6 +679,8 @@ def read_paper_status(log_path: Optional[Path] = None) -> Dict:
                 closed_positions.append(settled_pos)
 
         elif etype == "scan_summary":
+            if latest_session_id and ev.get("session_id") != latest_session_id:
+                continue
             last_scan = ev
 
         elif etype == "session_end":
@@ -585,6 +694,8 @@ def read_paper_status(log_path: Optional[Path] = None) -> Dict:
 
     return {
         "sessions": len(sessions),
+        "latest_session_id": latest_session_id,
+        "latest_session_start": latest_session_start,
         "total_trades": total_trades,
         "open_positions": len(open_positions),
         "closed_positions": len(closed_positions),
@@ -592,6 +703,9 @@ def read_paper_status(log_path: Optional[Path] = None) -> Dict:
         "losses": losses,
         "win_rate": wins / (wins + losses) if (wins + losses) > 0 else None,
         "realized_pnl": realized_pnl,
+        "lifetime_realized_pnl": lifetime_realized_pnl,
+        "lifetime_wins": lifetime_wins,
+        "lifetime_losses": lifetime_losses,
         "open_cost": open_cost,
         "last_scan": last_scan,
         "open": [

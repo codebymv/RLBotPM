@@ -12,6 +12,8 @@ import { EmptyState } from "./components/EmptyState";
 import { DataFreshness } from "./components/DataFreshness";
 import { StrategyBadge } from "./components/StrategyBadge";
 import {
+  type BotStatusResponse,
+  type CombinedMetricsResponse,
   fetchCombinedMetrics,
   fetchHealth,
   fetchCryptoPrices,
@@ -28,9 +30,9 @@ function fmt(n: number, decimals = 2) {
 
 type Props = {
   health: any;
-  combinedMetrics: any;
+  combinedMetrics: CombinedMetricsResponse | null;
   crypto: any;
-  bot: any;
+  bot: BotStatusResponse | null;
   mktStats: any;
 };
 
@@ -82,13 +84,12 @@ export default function OverviewClient({
     refetchInterval: 60_000,
   });
 
-  // Select data by bot
-  const byStrategy = combinedMetrics?.by_strategy || {};
-  const kalshiData = byStrategy.kalshi || {};
-  const rlData = byStrategy.rl_crypto || {};
-  const combinedData = combinedMetrics?.combined || {};
+  // Select data by bot — fall back to empty objects so downstream ?. access is safe
+  const kalshiData = combinedMetrics?.by_strategy?.kalshi ?? null;
+  const rlData = combinedMetrics?.by_strategy?.rl_crypto ?? null;
+  const combinedData = combinedMetrics?.combined ?? null;
 
-  const strategyData =
+  const strategyData: import("../lib/api").StrategyMetrics | null =
     bot === "all"
       ? combinedData
       : bot === "kalshi"
@@ -99,6 +100,8 @@ export default function OverviewClient({
   // - totalTrades: all records (open + settled/closed)
   // - settledTrades: wins + losses only
   // - settledWinRate: wins / settledTrades
+  // pnl / wins / losses come from the DB (lifetime across all sessions).
+  // currentSession comes from the JSONL log and reflects only the active run.
   const totalTrades = strategyData?.total_trades ?? 0;
   const wins = strategyData?.wins ?? 0;
   const losses = strategyData?.losses ?? 0;
@@ -106,6 +109,8 @@ export default function OverviewClient({
   const pnl = strategyData?.realized_pnl ?? 0;
   const openPositions = strategyData?.open_positions ?? 0;
   const openCost = strategyData?.open_cost ?? 0;
+  const currentSession = combinedMetrics?.current_session ?? null;
+  const sessionPnl = currentSession?.realized_pnl ?? null;
   const apiSettledWinRate = strategyData?.win_rate;
   const settledWinRate =
     typeof apiSettledWinRate === "number"
@@ -115,10 +120,10 @@ export default function OverviewClient({
         : 0;
 
   // Recent trades: merge when "all", otherwise filter by bot
-  const kalshiTrades = (kalshiData.recent_trades || []).filter(
+  const kalshiTrades = (kalshiData?.recent_trades || []).filter(
     (t: any) => (t.mode || "paper") === mode
   );
-  const rlTrades = (rlData.recent_trades || []).filter(
+  const rlTrades = (rlData?.recent_trades || []).filter(
     (t: any) => (t.mode || "paper") === mode
   );
   const recentTrades =
@@ -135,8 +140,8 @@ export default function OverviewClient({
         : rlTrades;
 
   const sideBreakdown =
-    (bot === "all" || bot === "kalshi") && kalshiData.side_breakdown
-      ? Object.entries(kalshiData.side_breakdown).map(([side, data]: [string, any]) => ({
+    (bot === "all" || bot === "kalshi") && kalshiData?.side_breakdown
+      ? Object.entries(kalshiData.side_breakdown!).map(([side, data]: [string, any]) => ({
           side,
           ...data,
         }))
@@ -222,12 +227,12 @@ export default function OverviewClient({
                     <span className="text-xs font-mono text-gray-500">RL Crypto Bot</span>
                   </div>
                   <div className="text-xl font-mono font-bold tabular-nums">
-                    ${(rlData.realized_pnl ?? 0) >= 0 ? "+" : ""}
-                    {fmt(rlData.realized_pnl ?? 0)}
+                    ${(rlData?.realized_pnl ?? 0) >= 0 ? "+" : ""}
+                    {fmt(rlData?.realized_pnl ?? 0)}
                   </div>
                   <div className="text-sm font-mono text-gray-400">
-                    {((rlData.settled_trades ?? (rlData.wins ?? 0) + (rlData.losses ?? 0)) || 0)} settled ·{" "}
-                    {((rlData.win_rate ?? 0) * 100).toFixed(1)}% settled win rate
+                    {((rlData?.settled_trades ?? (rlData?.wins ?? 0) + (rlData?.losses ?? 0)) || 0)} settled ·{" "}
+                    {((rlData?.win_rate ?? 0) * 100).toFixed(1)}% settled win rate
                   </div>
                 </div>
                 <div className="rounded-lg border border-blue-800/40 bg-blue-950/10 p-4">
@@ -236,12 +241,12 @@ export default function OverviewClient({
                     <span className="text-xs font-mono text-gray-500">Kalshi Market Bot</span>
                   </div>
                   <div className="text-xl font-mono font-bold tabular-nums">
-                    ${(kalshiData.realized_pnl ?? 0) >= 0 ? "+" : ""}
-                    {fmt(kalshiData.realized_pnl ?? 0)}
+                    ${(kalshiData?.realized_pnl ?? 0) >= 0 ? "+" : ""}
+                    {fmt(kalshiData?.realized_pnl ?? 0)}
                   </div>
                   <div className="text-sm font-mono text-gray-400">
-                    {((kalshiData.settled_trades ?? (kalshiData.wins ?? 0) + (kalshiData.losses ?? 0)) || 0)} settled ·{" "}
-                    {((kalshiData.win_rate ?? 0) * 100).toFixed(1)}% settled win rate
+                    {((kalshiData?.settled_trades ?? (kalshiData?.wins ?? 0) + (kalshiData?.losses ?? 0)) || 0)} settled ·{" "}
+                    {((kalshiData?.win_rate ?? 0) * 100).toFixed(1)}% settled win rate
                   </div>
                 </div>
               </div>
@@ -252,6 +257,11 @@ export default function OverviewClient({
               <KpiCard
                 label="Realized P&L"
                 value={`$${pnl >= 0 ? "+" : ""}${fmt(pnl)}`}
+                sublabel={
+                  sessionPnl !== null
+                    ? `This run: $${sessionPnl >= 0 ? "+" : ""}${fmt(sessionPnl)}`
+                    : undefined
+                }
                 mode={mode}
                 trend={pnl > 0 ? "up" : pnl < 0 ? "down" : "flat"}
               />
@@ -408,8 +418,16 @@ export default function OverviewClient({
             />
             <KpiCard
               label="Strategy"
-              value="BUY_NO"
-              sublabel="Lognormal edge model"
+              value={
+                botStatus.strategy.side_filter === "both"
+                  ? "BUY_BOTH"
+                  : `BUY_${botStatus.strategy.side_filter.toUpperCase()}`
+              }
+              sublabel={
+                botStatus.strategy.allow_buy_yes
+                  ? "BUY_YES enabled"
+                  : "BUY_YES disabled"
+              }
               mode="neutral"
             />
             <KpiCard

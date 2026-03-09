@@ -6,6 +6,81 @@
 const BASE_URL =
   process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
+export type StrategyMetrics = {
+  total_trades: number;
+  wins: number;
+  losses: number;
+  settled_trades: number;
+  win_rate: number;
+  realized_pnl: number;
+  open_positions: number;
+  open_cost: number;
+  side_breakdown?: Record<string, { total: number; wins: number; pnl: number }>;
+  recent_trades?: Array<Record<string, unknown>>;
+};
+
+export type CurrentSessionSnapshot = {
+  session_id: string;
+  started_at: string | null;
+  open_positions: number;
+  open_cost: number;
+  settled_trades: number;
+  wins: number;
+  losses: number;
+  win_rate: number | null;
+  realized_pnl: number;
+  last_scan: Record<string, unknown> | null;
+};
+
+export type CombinedMetricsResponse = {
+  combined: StrategyMetrics;
+  current_session: CurrentSessionSnapshot | null;
+  by_strategy: {
+    kalshi: StrategyMetrics;
+    rl_crypto: StrategyMetrics;
+  };
+  timestamp: string;
+};
+
+export type BotSession = {
+  session_id: string;
+  started_at: string | null;
+  last_trade_at: string | null;
+  trades_opened: number;
+  open_now: number;
+  wins: number;
+  losses: number;
+  realized_pnl: number;
+};
+
+export type BotStatusResponse = {
+  sessions: BotSession[];
+  total_sessions: number;
+  total_trades: number;
+  first_trade_at: string | null;
+  last_trade_at: string | null;
+  current_session: CurrentSessionSnapshot | null;
+  strategy: {
+    name: string;
+    side_filter: "yes" | "no" | "both";
+    allow_buy_yes: boolean;
+    min_edge: number;
+    max_edge: number;
+    min_price: number;
+    max_price: number;
+    assets: string[];
+    volatilities: Record<string, number>;
+  };
+  session_reconciliation?: {
+    db_sessions: number;
+    jsonl_session_starts: number;
+    jsonl_session_ends: number;
+    delta_db_minus_jsonl: number;
+    jsonl_log_path: string;
+  };
+  timestamp: string;
+};
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function get<T = any>(path: string): Promise<T | null> {
   try {
@@ -34,7 +109,7 @@ export async function fetchHealth() {
 // ---------------------------------------------------------------------------
 
 export async function fetchCombinedMetrics(mode = "paper") {
-  return get(`/api/metrics/combined?mode=${mode}`);
+  return get<CombinedMetricsResponse>(`/api/metrics/combined?mode=${mode}`);
 }
 
 export async function fetchPaperTradingMetrics(mode?: string) {
@@ -55,7 +130,7 @@ export async function fetchCryptoPrices() {
 // ---------------------------------------------------------------------------
 
 export async function fetchBotStatus() {
-  return get(`/api/bot/status`);
+  return get<BotStatusResponse>(`/api/bot/status`);
 }
 
 // ---------------------------------------------------------------------------

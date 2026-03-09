@@ -1,5 +1,7 @@
 # Risk Management Configuration
-# These limits apply to LIVE trading only (paper trading has separate, looser limits)
+# These limits apply to LIVE trading only.
+# Paper-trading defaults live in `shared/config/kalshi_config.yaml` under
+# `strategy.paper_trading` to keep one source of truth.
 
 live_trading:
   # ═══════════════════════════════════════════════════════════════

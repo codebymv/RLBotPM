@@ -56,9 +56,18 @@ python main.py kalshi paper-trade \
   --max-price 15 \          # Max 15¢ contracts
   --max-contracts 10 \      # Max 10 contracts per trade
   --max-positions 20 \      # Max 20 open positions
-  --side no \               # BUY_NO only (best strategy)
+  --per-asset-cap 0.40 \    # Max 40% per-asset exposure
+  --max-session-loss 5 \    # Stop session at -$5 realized loss
+  --strategy-mode buy_no \  # buy_no (default), buy_yes, both
   --series KXBTC,KXETH \    # Only BTC & ETH markets
   --live                    # Use live API
+```
+
+### BUY_YES Safety Gate
+```bash
+# BUY_YES and BOTH modes require explicit opt-in
+python main.py kalshi paper-trade --live --strategy-mode buy_yes --enable-buy-yes
+python main.py kalshi paper-trade --live --strategy-mode both --enable-buy-yes
 ```
 
 ### Check Status
@@ -165,6 +174,23 @@ Expected behavior:
 - ✅ Scans markets and detects edges
 - ✅ Opens at least 1 position (if edge found)
 - ✅ Logs appear in `bot/logs/paper_trades.jsonl`
+- ✅ Session reconciliation delta is visible in `/bot-status`
+
+### 60-Minute Validation Gate (before multi-day run)
+```bash
+# Run a reduced-risk validation session (~12 scans at 5-minute interval)
+python main.py kalshi paper-trade \
+  --live \
+  --max-scans 12 \
+  --max-positions 10 \
+  --per-asset-cap 0.30 \
+  --max-session-loss 3 \
+  --strategy-mode buy_no
+
+# Review outcomes and loss clusters
+python main.py kalshi paper-status
+python bot/scripts/analyze_paper_losses.py
+```
 
 ### First Day
 - ✅ 2-10 trades opened (varies by market conditions)
@@ -248,17 +274,23 @@ Once you have 2-4 weeks of solid paper trading data:
    - Regime breakdown
    - Out-of-sample testing
 
-3. **Implement Risk Management**
+3. **Run Controlled 3-5 Day Cycle**
+   - Keep `--strategy-mode buy_no`
+   - Keep `--max-session-loss` enabled
+   - Review checkpoints at 24h, 72h, and end-of-run
+   - Compare vs prior run (PnL, settled win rate, open exposure, loss clusters)
+
+4. **Implement Risk Management**
    - Add safety rails from `risk_limits.yaml`
    - Build alerting system
    - Test circuit breakers
 
-4. **Micro-Scale Live Testing**
+5. **Micro-Scale Live Testing**
    - Start with $100-500 real capital
    - Same parameters as paper
    - Monitor for 2-4 weeks
 
-5. **Gradual Scale-Up**
+6. **Gradual Scale-Up**
    - Only increase capital after proven success
    - Follow scaling schedule in `LIVE_TRADING_READINESS.md`
 
@@ -270,7 +302,7 @@ Once you have 2-4 weeks of solid paper trading data:
 2. **Monitor Daily**: Check dashboard and logs every day
 3. **Save Logs**: Archive `paper_trades.jsonl` weekly
 4. **Test Variations**: Try different `--min-edge` thresholds
-5. **Compare Sides**: Test `--side yes` vs `--side no` vs `--side both`
+5. **Compare Sides Safely**: Use `--strategy-mode buy_yes --enable-buy-yes` only for isolated experiments
 
 ---
 
