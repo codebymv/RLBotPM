@@ -378,191 +378,234 @@ def run_paper_trading(
             scan_n += 1
             portfolio.scan_count = scan_n
 
-            if max_scans and scan_n > max_scans:
-                logger.info(f"Reached max_scans={max_scans}, stopping.")
-                stop_reason = "max_scans_reached"
-                break
-
-            scan_ts = datetime.now(timezone.utc).isoformat()
-
-            # 1. Check settlements on open positions
-            if portfolio.open_positions:
-                _check_settlements(adapter, portfolio, log_path, session_id=session_id)
-
-            if (
-                max_session_loss_dollars is not None
-                and portfolio.realized_pnl <= -abs(max_session_loss_dollars)
-            ):
-                logger.warning(
-                    "Session loss stop triggered after settlements: realized_pnl=%+.2f <= -$%.2f",
-                    portfolio.realized_pnl,
-                    abs(max_session_loss_dollars),
-                )
-                stop_reason = "max_session_loss_reached"
-                break
-
-            # 2. Fetch live markets
             try:
-                markets = _fetch_live_markets(adapter, series_list)
-            except Exception as e:
-                logger.error(f"Scan {scan_n}: fetch failed — {e}")
-                time.sleep(interval_seconds)
-                continue
-
-            if not markets:
-                logger.info(f"Scan {scan_n}: no markets found")
-                time.sleep(interval_seconds)
-                continue
-
-            # 3. Run edge detection (request many so small edges aren't crowded out)
-            edges = detector.scan_series(markets, top_n=500)
-
-            # 4. Filter and open new positions
-            new_trades = 0
-            for edge in edges:
-                if new_trades >= max_new_trades_per_scan:
+                if max_scans and scan_n > max_scans:
+                    logger.info(f"Reached max_scans={max_scans}, stopping.")
+                    stop_reason = "max_scans_reached"
                     break
 
-                if edge.edge_type not in ("crypto_spot_mispricing", "strike_dominance"):
-                    continue
+                scan_ts = datetime.now(timezone.utc).isoformat()
 
-                # Skip if already have a position in this market
-                if edge.ticker in portfolio.open_positions:
-                    continue
+                # 1. Check settlements on open positions
+                if portfolio.open_positions:
+                    _check_settlements(adapter, portfolio, log_path, session_id=session_id)
 
-                # Side filter (BUY_NO only by default — 100% backtest win rate)
-                if edge.recommended_side == "yes" and not enable_buy_yes:
-                    continue
-                if side_filter and edge.recommended_side != side_filter:
-                    continue
-
-                # Edge bounds
-                if edge.edge_value < min_edge or edge.edge_value > max_edge:
-                    continue
-
-                # Price bounds
-                price = edge.market_price
-                if price < min_price or price > max_price:
-                    continue
-
-                # Position limit
-                if len(portfolio.open_positions) >= max_open_positions:
+                if (
+                    max_session_loss_dollars is not None
+                    and portfolio.realized_pnl <= -abs(max_session_loss_dollars)
+                ):
+                    logger.warning(
+                        "Session loss stop triggered after settlements: realized_pnl=%+.2f <= -$%.2f",
+                        portfolio.realized_pnl,
+                        abs(max_session_loss_dollars),
+                    )
+                    stop_reason = "max_session_loss_reached"
                     break
 
-                # Concentration limit: max 40% of capital per asset
-                asset = _extract_asset(edge.ticker)
-                asset_cost = sum(
-                    p.cost_dollars for p in portfolio.open_positions.values()
-                    if _extract_asset(p.ticker) == asset
+                # 2. Fetch live markets
+                try:
+                    markets = _fetch_live_markets(adapter, series_list)
+                except Exception as e:
+                    logger.error(f"Scan {scan_n}: fetch failed — {e}")
+                    time.sleep(interval_seconds)
+                    continue
+
+                if not markets:
+                    logger.info(f"Scan {scan_n}: no markets found")
+                    time.sleep(interval_seconds)
+                    continue
+
+                # 3. Run edge detection (request many so small edges aren't crowded out)
+                edges = detector.scan_series(markets, top_n=500)
+
+                # 4. Filter and open new positions
+                new_trades = 0
+                filter_counts = {
+                    "edge_type": 0,
+                    "duplicate": 0,
+                    "side": 0,
+                    "edge_bounds": 0,
+                    "price_bounds": 0,
+                    "position_limit": 0,
+                    "contracts": 0,
+                    "cash": 0,
+                    "asset_cap": 0,
+                }
+                near_misses = []  # edges that passed early filters but failed later
+
+                for edge in edges:
+                    if new_trades >= max_new_trades_per_scan:
+                        break
+
+                    if edge.edge_type not in ("crypto_spot_mispricing", "strike_dominance"):
+                        filter_counts["edge_type"] += 1
+                        continue
+
+                    if edge.ticker in portfolio.open_positions:
+                        filter_counts["duplicate"] += 1
+                        continue
+
+                    if edge.recommended_side == "yes" and not enable_buy_yes:
+                        filter_counts["side"] += 1
+                        continue
+                    if side_filter and edge.recommended_side != side_filter:
+                        filter_counts["side"] += 1
+                        continue
+
+                    if edge.edge_value < min_edge or edge.edge_value > max_edge:
+                        filter_counts["edge_bounds"] += 1
+                        continue
+
+                    price = edge.market_price
+                    if price < min_price or price > max_price:
+                        filter_counts["price_bounds"] += 1
+                        continue
+
+                    if len(portfolio.open_positions) >= max_open_positions:
+                        filter_counts["position_limit"] += 1
+                        break
+
+                    asset = _extract_asset(edge.ticker)
+                    asset_cost = sum(
+                        p.cost_dollars for p in portfolio.open_positions.values()
+                        if _extract_asset(p.ticker) == asset
+                    )
+
+                    if edge.recommended_side == "yes":
+                        cost_per_contract = price / 100.0
+                    elif edge.recommended_side == "no":
+                        cost_per_contract = (100 - price) / 100.0
+                    else:
+                        filter_counts["side"] += 1
+                        continue
+
+                    contracts = min(
+                        max_contracts_per_trade,
+                        int(portfolio.cash / cost_per_contract) if cost_per_contract > 0 else 0,
+                    )
+                    if contracts <= 0:
+                        if len(near_misses) < 2:
+                            near_misses.append(
+                                {"ticker": edge.ticker, "reason": "contracts=0", "price": price, "edge": edge.edge_value}
+                            )
+                        filter_counts["contracts"] += 1
+                        continue
+
+                    total_cost = contracts * cost_per_contract
+                    if total_cost > portfolio.cash:
+                        if len(near_misses) < 2:
+                            near_misses.append(
+                                {"ticker": edge.ticker, "reason": "insufficient_cash", "cost": total_cost, "cash": portfolio.cash}
+                            )
+                        filter_counts["cash"] += 1
+                        continue
+                    if asset_cost + total_cost > portfolio.initial_capital * per_asset_cap_pct:
+                        if len(near_misses) < 2:
+                            near_misses.append(
+                                {"ticker": edge.ticker, "reason": "asset_cap", "asset_cost": asset_cost, "total_cost": total_cost}
+                            )
+                        filter_counts["asset_cap"] += 1
+                        continue
+
+                    # Open position
+                    portfolio.cash -= total_cost
+                    portfolio.trades_taken += 1
+
+                    pos = PaperPosition(
+                        ticker=edge.ticker,
+                        event_ticker=edge.event_ticker,
+                        series_ticker=edge.market_data.get("series_ticker", ""),
+                        side=edge.recommended_side,
+                        entry_price_cents=price,
+                        fair_price_cents=edge.fair_price or 0,
+                        edge_value=edge.edge_value,
+                        edge_type=edge.edge_type,
+                        contracts=contracts,
+                        cost_dollars=total_cost,
+                        opened_at=scan_ts,
+                        reasoning=edge.reasoning,
+                    )
+                    portfolio.open_positions[edge.ticker] = pos
+                    new_trades += 1
+                    _db_open_trade(pos, mode="paper", session_id=session_id)
+
+                    _log_event(log_path, {
+                        "type": "open_position",
+                        "timestamp": scan_ts,
+                        "session_id": session_id,
+                        "ticker": edge.ticker,
+                        "event_ticker": edge.event_ticker,
+                        "series_ticker": edge.market_data.get("series_ticker", ""),
+                        "side": edge.recommended_side,
+                        "entry_price": price,
+                        "fair_price": edge.fair_price,
+                        "edge": edge.edge_value,
+                        "edge_type": edge.edge_type,
+                        "contracts": contracts,
+                        "cost": total_cost,
+                        "reasoning": edge.reasoning,
+                        "asset": asset,
+                        "spot_timestamp": edge.market_data.get("spot_timestamp") or scan_ts,
+                        "market_snapshot": {
+                            "yes_bid": edge.market_data.get("yes_bid"),
+                            "yes_ask": edge.market_data.get("yes_ask"),
+                            "no_bid": edge.market_data.get("no_bid"),
+                            "no_ask": edge.market_data.get("no_ask"),
+                            "liquidity": edge.market_data.get("liquidity"),
+                            "volume": edge.market_data.get("volume"),
+                            "open_interest": edge.market_data.get("open_interest"),
+                        },
+                        "edge_inputs": {
+                            "market_price_cents": edge.market_price,
+                            "fair_price_cents": edge.fair_price,
+                            "edge_value": edge.edge_value,
+                            "edge_type": edge.edge_type,
+                        },
+                    })
+
+                    logger.info(
+                        f"OPEN {edge.ticker}: "
+                        f"BUY_{edge.recommended_side.upper()} {contracts}@{price:.0f}¢ "
+                        f"edge={edge.edge_value:.1%} fair={edge.fair_price:.0f}¢ "
+                        f"cost=${total_cost:.2f}"
+                    )
+
+                # Filter debug: when 0 trades but we have edges, log why (every 6th scan to limit noise)
+                if new_trades == 0 and edges and scan_n % 6 == 0:
+                    parts = [f"{k}={v}" for k, v in filter_counts.items() if v > 0]
+                    msg = ", ".join(parts) if parts else "no filter hits"
+                    logger.info(
+                        f"Filter breakdown (scan {scan_n}): {len(edges)} edges -> 0 trades | {msg}"
+                    )
+                    if near_misses:
+                        for nm in near_misses[:2]:
+                            logger.info(f"  Near miss: {nm.get('ticker', '?')} | {nm.get('reason', '?')} | {nm}")
+
+                # 5. Summary
+                logger.info(
+                    f"Scan {scan_n}: {len(markets)} markets | "
+                    f"{len(edges)} edges | {new_trades} new trades | "
+                    f"open={len(portfolio.open_positions)} | "
+                    f"P&L=${portfolio.realized_pnl:+.2f} | "
+                    f"cash=${portfolio.cash:.2f}"
                 )
-
-                # Size the trade
-                if edge.recommended_side == "yes":
-                    cost_per_contract = price / 100.0
-                elif edge.recommended_side == "no":
-                    cost_per_contract = (100 - price) / 100.0
-                else:
-                    continue
-
-                # Simple sizing: fixed number of contracts, capped by available cash
-                contracts = min(
-                    max_contracts_per_trade,
-                    int(portfolio.cash / cost_per_contract) if cost_per_contract > 0 else 0,
-                )
-                if contracts <= 0:
-                    continue
-
-                total_cost = contracts * cost_per_contract
-                if total_cost > portfolio.cash:
-                    continue
-                if asset_cost + total_cost > portfolio.initial_capital * per_asset_cap_pct:
-                    continue
-
-                # Open position
-                portfolio.cash -= total_cost
-                portfolio.trades_taken += 1
-
-                pos = PaperPosition(
-                    ticker=edge.ticker,
-                    event_ticker=edge.event_ticker,
-                    series_ticker=edge.market_data.get("series_ticker", ""),
-                    side=edge.recommended_side,
-                    entry_price_cents=price,
-                    fair_price_cents=edge.fair_price or 0,
-                    edge_value=edge.edge_value,
-                    edge_type=edge.edge_type,
-                    contracts=contracts,
-                    cost_dollars=total_cost,
-                    opened_at=scan_ts,
-                    reasoning=edge.reasoning,
-                )
-                portfolio.open_positions[edge.ticker] = pos
-                new_trades += 1
-                _db_open_trade(pos, mode="paper", session_id=session_id)
 
                 _log_event(log_path, {
-                    "type": "open_position",
+                    "type": "scan_summary",
                     "timestamp": scan_ts,
                     "session_id": session_id,
-                    "ticker": edge.ticker,
-                    "event_ticker": edge.event_ticker,
-                    "series_ticker": edge.market_data.get("series_ticker", ""),
-                    "side": edge.recommended_side,
-                    "entry_price": price,
-                    "fair_price": edge.fair_price,
-                    "edge": edge.edge_value,
-                    "edge_type": edge.edge_type,
-                    "contracts": contracts,
-                    "cost": total_cost,
-                    "reasoning": edge.reasoning,
-                    "asset": asset,
-                    "spot_timestamp": edge.market_data.get("spot_timestamp") or scan_ts,
-                    "market_snapshot": {
-                        "yes_bid": edge.market_data.get("yes_bid"),
-                        "yes_ask": edge.market_data.get("yes_ask"),
-                        "no_bid": edge.market_data.get("no_bid"),
-                        "no_ask": edge.market_data.get("no_ask"),
-                        "liquidity": edge.market_data.get("liquidity"),
-                        "volume": edge.market_data.get("volume"),
-                        "open_interest": edge.market_data.get("open_interest"),
-                    },
-                    "edge_inputs": {
-                        "market_price_cents": edge.market_price,
-                        "fair_price_cents": edge.fair_price,
-                        "edge_value": edge.edge_value,
-                        "edge_type": edge.edge_type,
-                    },
+                    "scan": scan_n,
+                    "markets_scanned": len(markets),
+                    "edges_found": len(edges),
+                    "new_trades": new_trades,
+                    "open_positions": len(portfolio.open_positions),
+                    "realized_pnl": portfolio.realized_pnl,
+                    "cash": portfolio.cash,
+                    "total_value": portfolio.total_value,
                 })
 
-                logger.info(
-                    f"OPEN {edge.ticker}: "
-                    f"BUY_{edge.recommended_side.upper()} {contracts}@{price:.0f}¢ "
-                    f"edge={edge.edge_value:.1%} fair={edge.fair_price:.0f}¢ "
-                    f"cost=${total_cost:.2f}"
-                )
-
-            # 5. Summary
-            logger.info(
-                f"Scan {scan_n}: {len(markets)} markets | "
-                f"{len(edges)} edges | {new_trades} new trades | "
-                f"open={len(portfolio.open_positions)} | "
-                f"P&L=${portfolio.realized_pnl:+.2f} | "
-                f"cash=${portfolio.cash:.2f}"
-            )
-
-            _log_event(log_path, {
-                "type": "scan_summary",
-                "timestamp": scan_ts,
-                "session_id": session_id,
-                "scan": scan_n,
-                "markets_scanned": len(markets),
-                "edges_found": len(edges),
-                "new_trades": new_trades,
-                "open_positions": len(portfolio.open_positions),
-                "realized_pnl": portfolio.realized_pnl,
-                "cash": portfolio.cash,
-                "total_value": portfolio.total_value,
-            })
+            except Exception as e:
+                logger.exception("Scan %d failed (continuing): %s", scan_n, e)
 
             time.sleep(interval_seconds)
 
@@ -730,3 +773,94 @@ def read_paper_status(log_path: Optional[Path] = None) -> Dict:
             for p in closed_positions
         ],
     }
+
+
+def compute_promotion_gates(log_path: Optional[Path] = None) -> Optional[Dict]:
+    """
+    Compute promotion gate status for paper -> real money readiness.
+    Returns a dict with lifetime stats and pass/fail per gate, or None if log missing.
+    """
+    if log_path is None:
+        log_path = LOG_DIR / "paper_trades.jsonl"
+    if not log_path.exists():
+        return None
+
+    events = []
+    with open(log_path) as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                try:
+                    events.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+
+    cur_id = None
+    cur_pnl = 0.0
+    cur_settled = 0
+    cur_wins = 0
+    cur_losses = 0
+    session_pnls: List[float] = []
+    session_starts: List[str] = []
+
+    for ev in events:
+        t = ev.get("type")
+        if t == "session_start":
+            session_starts.append(ev.get("timestamp") or "")
+            if cur_id is not None:
+                session_pnls.append(cur_pnl)
+            cur_id = ev.get("session_id")
+            cur_pnl = 0.0
+            cur_settled = 0
+            cur_wins = 0
+            cur_losses = 0
+        elif t == "settlement" and cur_id and ev.get("session_id") == cur_id:
+            pnl = float(ev.get("pnl") or 0)
+            cur_pnl += pnl
+            cur_settled += 1
+            if pnl > 0:
+                cur_wins += 1
+            else:
+                cur_losses += 1
+    if cur_id is not None:
+        session_pnls.append(cur_pnl)
+
+    total_settled = len([e for e in events if e.get("type") == "settlement"])
+    total_wins = sum(1 for e in events if e.get("type") == "settlement" and (e.get("pnl") or 0) > 0)
+    total_losses = total_settled - total_wins
+    total_pnl = sum(e.get("pnl") or 0 for e in events if e.get("type") == "settlement")
+    worst_pnl = min(session_pnls) if session_pnls else 0.0
+    win_rate = total_wins / total_settled if total_settled > 0 else 0.0
+
+    # Days span
+    days_span = 0
+    if len(session_starts) >= 2:
+        try:
+            from datetime import datetime
+            first = datetime.fromisoformat(session_starts[0].replace("Z", "+00:00"))
+            last = datetime.fromisoformat(session_starts[-1].replace("Z", "+00:00"))
+            days_span = max(0, (last - first).days)
+        except (ValueError, TypeError):
+            pass
+
+    gates = {
+        "total_settled": total_settled,
+        "total_sessions": len(session_pnls),
+        "total_wins": total_wins,
+        "total_losses": total_losses,
+        "total_pnl": total_pnl,
+        "win_rate": win_rate,
+        "worst_session_pnl": worst_pnl,
+        "days_span": days_span,
+        "g1_settled": total_settled >= 200,
+        "g1_sessions": len(session_pnls) >= 10,
+        "g1_days": days_span >= 14,
+        "g2_wr": win_rate >= 0.85,
+        "g2_pnl": total_pnl > 0,
+        "g2_worst": worst_pnl > -5.0,
+    }
+    gates["ready"] = all([
+        gates["g1_settled"], gates["g1_sessions"], gates["g1_days"],
+        gates["g2_wr"], gates["g2_pnl"], gates["g2_worst"],
+    ])
+    return gates

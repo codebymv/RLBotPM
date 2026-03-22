@@ -7,6 +7,7 @@ Use this to train models, evaluate performance, and manage the bot.
 
 import asyncio
 import click
+import sys
 import numpy as np
 import json
 import re
@@ -1708,7 +1709,7 @@ def paper_trade_kalshi(interval, bankroll, min_edge, max_edge, min_price, max_pr
 @kalshi.command("paper-status")
 def paper_status():
     """Show current paper trading portfolio status from log."""
-    from src.strategies.paper_trader import read_paper_status
+    from src.strategies.paper_trader import read_paper_status, compute_promotion_gates
 
     status = read_paper_status()
 
@@ -1765,6 +1766,15 @@ def paper_status():
             side_tag = f"[green]NO[/green]" if p.get('side') == 'no' else f"[red]YES[/red]"
             pnl_color = "green" if p.get('pnl', 0) > 0 else "red"
             console.print(f"  {p['ticker']}  {side_tag}  {p['outcome']}  [{pnl_color}]P&L=${p['pnl']:+.2f}[/{pnl_color}]")
+
+    gates = compute_promotion_gates()
+    if gates:
+        ready = gates["ready"]
+        console.print(f"\n[bold]Promotion gate[/bold] (paper -> real): {'[green]READY[/green]' if ready else '[yellow]NOT READY[/yellow]'}")
+        console.print(f"  Lifetime: {gates['total_settled']} settled | {gates['total_sessions']} sessions | {gates['days_span']}d | PnL ${gates['total_pnl']:+.2f} | worst session ${gates['worst_session_pnl']:.2f}")
+        if not gates["g2_worst"]:
+            console.print(f"  [yellow]Blocker: worst session ${gates['worst_session_pnl']:.2f} (target > -$5)[/yellow]")
+        console.print(f"  Full check: python bot/scripts/paper_promotion_check.py")
 
 
 @kalshi.command("live-trade")
@@ -1840,6 +1850,201 @@ def live_trade(interval, max_cost, max_total, max_positions, max_loss_streak,
         console.print(f"\n[red]Error:[/red] {e}")
         import traceback
         traceback.print_exc()
+
+
+# =============================================================================
+# Fleet Orchestration - Run both bots in parallel
+# =============================================================================
+
+@cli.group()
+def fleet():
+    """Orchestrate both bots (Kalshi + RL Crypto) in parallel"""
+    pass
+
+
+@fleet.command("start")
+@click.option('--dry-run', is_flag=True, help='Kalshi dry-run + RL paper mode (no real money)')
+@click.option('--skip-gates', is_flag=True, help='Skip promotion gate checks (dangerous for live)')
+@click.option('--kalshi-only', is_flag=True, help='Start only Kalshi bot')
+@click.option('--rl-only', is_flag=True, help='Start only RL Crypto bot')
+@click.option('--model', default=None, help='RL model path (e.g. models/best_model_run_171) overrides fleet.yaml')
+def fleet_start(dry_run, skip_gates, kalshi_only, rl_only, model):
+    """Start both trading bots in parallel.
+
+    Runs preflight promotion checks unless --skip-gates.
+    Use --dry-run to test orchestration without real orders.
+    """
+    import subprocess
+    import yaml
+
+    repo_root = Path(__file__).resolve().parent.parent
+    bot_dir = repo_root / "bot"
+    cfg_path = repo_root / "shared" / "config" / "fleet.yaml"
+
+    if not cfg_path.exists():
+        console.print(f"[bold red]Config not found:[/bold red] {cfg_path}")
+        raise SystemExit(1)
+
+    with open(cfg_path, encoding="utf-8") as f:
+        fleet_cfg = yaml.safe_load(f) or {}
+
+    fleet_section = fleet_cfg.get("fleet", {})
+    kalshi_cfg = fleet_cfg.get("kalshi", {})
+    rl_cfg = fleet_cfg.get("rl_crypto", {})
+
+    # Preflight: promotion gates
+    if not skip_gates and not dry_run:
+        console.print("\n[bold]Running promotion gate checks...[/bold]")
+        gates_ok = True
+
+        if kalshi_cfg.get("enabled", True) and not rl_only:
+            result = subprocess.run(
+                [sys.executable, str(bot_dir / "scripts" / "paper_promotion_check.py")],
+                cwd=repo_root,
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0:
+                console.print("[red]Kalshi gate: NOT READY[/red]")
+                if result.stdout:
+                    console.print(result.stdout)
+                gates_ok = False
+            else:
+                console.print("[green]Kalshi gate: READY[/green]")
+
+        if rl_cfg.get("enabled", True) and not kalshi_only:
+            result = subprocess.run(
+                [sys.executable, str(bot_dir / "scripts" / "rl_promotion_check.py")],
+                cwd=repo_root,
+                capture_output=True,
+                text=True,
+                env={**os.environ, "DATABASE_URL": os.getenv("DATABASE_URL", "")},
+            )
+            if result.returncode != 0:
+                console.print("[red]RL Crypto gate: NOT READY[/red]")
+                if result.stdout:
+                    console.print(result.stdout)
+                gates_ok = False
+            else:
+                console.print("[green]RL Crypto gate: READY[/green]")
+
+        if not gates_ok:
+            console.print("\n[bold red]Preflight failed. Use --skip-gates to override (live only).[/bold red]")
+            raise SystemExit(1)
+
+    mode_str = "DRY RUN (no real orders)" if dry_run else "LIVE"
+    console.print(f"\n[bold cyan]Starting fleet in {mode_str} mode[/bold cyan]\n")
+
+    procs = []
+    env = os.environ.copy()
+
+    # Kalshi
+    if kalshi_cfg.get("enabled", True) and not rl_only:
+        kalshi_args = [
+            sys.executable, "main.py", "kalshi", "live-trade",
+            "--interval", str(kalshi_cfg.get("interval", 300)),
+            "--max-cost", str(kalshi_cfg.get("max_cost", 1.0)),
+            "--max-total", str(kalshi_cfg.get("max_total", 10.0)),
+            "--max-positions", str(kalshi_cfg.get("max_positions", 10)),
+            "--max-loss-streak", str(kalshi_cfg.get("max_loss_streak", 3)),
+            "--max-daily-loss", str(kalshi_cfg.get("max_daily_loss", 5.0)),
+            "--min-edge", str(kalshi_cfg.get("min_edge", 0.02)),
+            "--max-edge", str(kalshi_cfg.get("max_edge", 0.05)),
+            "--min-price", str(kalshi_cfg.get("min_price", 1)),
+            "--max-price", str(kalshi_cfg.get("max_price", 15)),
+        ]
+        if dry_run:
+            kalshi_args.append("--dry-run")
+        if kalshi_cfg.get("series"):
+            kalshi_args.extend(["--series", kalshi_cfg["series"]])
+        # Bypass confirmation (subprocess has no TTY).
+        kalshi_args.append("--yes")
+
+        p = subprocess.Popen(
+            kalshi_args,
+            cwd=str(bot_dir),
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
+        )
+        procs.append(("Kalshi", p))
+        console.print("[dim]Started Kalshi bot (PID %d)[/dim]" % p.pid)
+
+    # RL Crypto
+    if rl_cfg.get("enabled", True) and not kalshi_only:
+        rl_mode = "paper" if dry_run else "live"
+        model_path_str = model or rl_cfg.get("model", "models/best_model_run_171")
+        model_path = Path(model_path_str)
+        if not model_path.is_absolute():
+            model_path = bot_dir / model_path_str
+        if not model_path.exists():
+            console.print(f"[yellow]RL model not found: {model_path} — skipping RL bot[/yellow]")
+        else:
+            rl_args = [
+                sys.executable, "-m", "src.execution.live_trader",
+                "--model", str(model_path),
+                "--symbol", rl_cfg.get("symbol", "BTC-USD"),
+                "--interval", rl_cfg.get("interval", "1h"),
+                "--mode", rl_mode,
+                "--capital", str(rl_cfg.get("capital", 1000.0)),
+                "--duration", str(rl_cfg.get("duration", 0)),
+                "--tick-interval", str(rl_cfg.get("tick_interval", 60)),
+            ]
+            p = subprocess.Popen(
+                rl_args,
+                cwd=str(bot_dir),
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
+            )
+            procs.append(("RL Crypto", p))
+            console.print("[dim]Started RL Crypto bot (PID %d)[/dim]" % p.pid)
+
+    if not procs:
+        console.print("[yellow]No bots started[/yellow]")
+        return
+
+    console.print("\n[green]Fleet running. Ctrl+C to stop all.[/green]")
+    try:
+        for name, proc in procs:
+            proc.wait()
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Stopping fleet...[/yellow]")
+        for name, proc in procs:
+            proc.terminate()
+        for name, proc in procs:
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
+
+@fleet.command("status")
+def fleet_status():
+    """Run promotion gate checks for both bots and report status."""
+    import subprocess
+
+    repo_root = Path(__file__).resolve().parent.parent
+    bot_dir = repo_root / "bot"
+
+    console.print("\n[bold]Fleet Promotion Status[/bold]\n")
+
+    console.print("[bold]Kalshi:[/bold]")
+    result = subprocess.run(
+        [sys.executable, str(bot_dir / "scripts" / "paper_promotion_check.py")],
+        cwd=repo_root,
+    )
+    console.print()
+
+    console.print("[bold]RL Crypto:[/bold]")
+    result = subprocess.run(
+        [sys.executable, str(bot_dir / "scripts" / "rl_promotion_check.py")],
+        cwd=repo_root,
+        env={**os.environ, "DATABASE_URL": os.getenv("DATABASE_URL", "")},
+    )
+    console.print()
 
 
 if __name__ == '__main__':

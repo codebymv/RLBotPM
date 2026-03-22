@@ -12,6 +12,9 @@ help:
 	@echo "  make dev-api           - Start API in development mode"
 	@echo "  make dev-dashboard     - Start dashboard in development mode"
 	@echo "  make test              - Run all tests"
+	@echo "  make fleet-status      - Check promotion gates for both bots"
+	@echo "  make fleet-start       - Start both bots in parallel (live)"
+	@echo "  make fleet-dry         - Start both bots in dry-run mode"
 	@echo "  make clean             - Clean build artifacts"
 
 install-bot:
@@ -53,6 +56,15 @@ test-bot:
 
 test-api:
 	pytest api/tests/ -v
+
+fleet-status:
+	cd bot && python main.py fleet status
+
+fleet-start:
+	cd bot && python main.py fleet start
+
+fleet-dry:
+	cd bot && python main.py fleet start --dry-run
 
 clean:
 	find . -type d -name "__pycache__" -exec rm -rf {} +

@@ -1,0 +1,44 @@
+# Fleet Orchestration - Run both bots in parallel
+# ===============================================
+# Usage: python main.py fleet start [--dry-run] [--skip-gates]
+
+fleet:
+  # Global circuit breaker (orchestrator-level)
+  max_combined_daily_loss_usd: 50.0   # Halt both bots if combined daily loss exceeds this
+  max_combined_drawdown_pct: 0.15     # Halt if combined drawdown > 15%
+
+  # Preflight: require both promotion gates to pass before starting live
+  require_kalshi_gate: true
+  require_rl_gate: true
+
+# -----------------------------------------------------------------------------
+# Bot 1: Kalshi Prediction Markets
+# -----------------------------------------------------------------------------
+kalshi:
+  enabled: true
+  # CLI: python main.py kalshi live-trade [options]
+  interval: 300              # seconds between scans
+  max_cost: 1.0              # max $ per trade
+  max_total: 10.0            # max total capital deployed
+  max_positions: 10
+  max_loss_streak: 3         # kill switch after N consecutive losses
+  max_daily_loss: 5.0        # kill switch at daily loss
+  min_edge: 0.02
+  max_edge: 0.05
+  min_price: 1
+  max_price: 15
+  series: null               # null = default from config; or "KXBTC,KXETH,KXSOL"
+
+# -----------------------------------------------------------------------------
+# Bot 2: RL Crypto Spot (Coinbase)
+# -----------------------------------------------------------------------------
+rl_crypto:
+  enabled: true
+  # CLI: python -m src.execution.live_trader [options]
+  # After fixing .env (MODEL_SAVE_PATH=./models), use models/; else bot/models/ for legacy
+  model: "bot/models/best_model_run_172.zip"
+  symbol: "BTC-USD"
+  interval: "1h"
+  capital: 1000.0           # paper fallback; live uses actual portfolio
+  tick_interval: 60         # seconds between ticks
+  duration: 0               # 0 = indefinite

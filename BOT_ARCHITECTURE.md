@@ -191,6 +191,43 @@ Get-Content bot/logs/paper_trades.jsonl -Tail 20
 
 ---
 
+## 🚀 Fleet Orchestration (Both Bots in Parallel)
+
+Run both bots with one command. Requires promotion gates to pass before live (unless `--skip-gates`).
+
+### Promotion Gates
+
+| Bot | Script | Data Source |
+|-----|--------|-------------|
+| Kalshi | `bot/scripts/paper_promotion_check.py` | `bot/logs/paper_trades.jsonl` |
+| RL Crypto | `bot/scripts/rl_promotion_check.py` | `rl_crypto_trades` table (mode=paper) |
+
+### Commands
+
+```bash
+# Check if both bots are ready for live
+python bot/main.py fleet status
+
+# Dry run: Kalshi dry-run + RL paper (no real money)
+python bot/main.py fleet start --dry-run
+
+# Start both live (requires gates to pass)
+python bot/main.py fleet start
+
+# Start only one bot
+python bot/main.py fleet start --kalshi-only
+python bot/main.py fleet start --rl-only
+
+# Override gates (dangerous)
+python bot/main.py fleet start --skip-gates
+```
+
+### Config
+
+Edit `shared/config/fleet.yaml` for model path, capital, limits, etc.
+
+---
+
 ## 🎓 Which to Start With?
 
 ### Option A: Start with Kalshi Bot (Easier)
