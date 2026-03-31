@@ -13,8 +13,11 @@ Circuit breakers protect against:
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Callable, Dict, List, Optional
 from enum import Enum
+import json
+import os
 
 from ..core.logger import get_logger
 from ..core.config import get_settings
@@ -168,6 +171,7 @@ class CircuitBreaker:
             self.consecutive_losses += 1
         
         logger.debug(f"Trade recorded: P&L=${pnl:.2f}, Capital=${capital:.2f}")
+        self.persist_state()
     
     def record_api_error(self):
         """Record an API error"""
@@ -221,15 +225,45 @@ class CircuitBreaker:
             'consecutive_losses': self.consecutive_losses,
             'win_rate_last_20': win_rate,
             'api_error_count': self.api_error_count,
+            'limits': {
+                'max_daily_loss_usd': self.settings.MAX_DAILY_LOSS_USD,
+                'max_weekly_loss_usd': self.settings.MAX_WEEKLY_LOSS_USD,
+                'max_total_drawdown': self.settings.MAX_TOTAL_DRAWDOWN,
+                'max_consecutive_losses': self.settings.MAX_CONSECUTIVE_LOSSES,
+            },
             'recent_events': [
                 {
                     'timestamp': e.timestamp.isoformat(),
                     'rule': e.rule_violated,
-                    'description': e.description
+                    'description': e.description,
+                    'severity': e.severity,
                 }
                 for e in self.events[-5:]  # Last 5 events
-            ]
+            ],
+            'written_at': datetime.now().isoformat(),
         }
+
+    def persist_state(self, path: Optional[Path] = None) -> None:
+        """Write current status report to disk as JSON so the API can read it.
+
+        Args:
+            path: Destination file.  Defaults to the ``CIRCUIT_BREAKER_STATE_PATH``
+                  env var, falling back to ``<repo_root>/bot/logs/circuit_breaker_state.json``.
+        """
+        if path is None:
+            env_path = os.getenv("CIRCUIT_BREAKER_STATE_PATH")
+            if env_path:
+                path = Path(env_path)
+            else:
+                # Walk up from this file to the repo root then into bot/logs/
+                path = Path(__file__).resolve().parent.parent.parent.parent / "logs" / "circuit_breaker_state.json"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(self.get_status_report(), indent=2), encoding="utf-8")
+            tmp.replace(path)  # atomic rename so readers never see a partial file
+        except Exception as exc:
+            logger.warning("Failed to persist circuit breaker state: %s", exc)
     
     def _check_daily_loss(self):
         """Check daily loss limit"""
@@ -381,6 +415,8 @@ class CircuitBreaker:
 
         logger.critical(f"CIRCUIT BREAKER TRIGGERED: {description}")
         logger.critical("Trading PAUSED - Human review required")
+
+        self.persist_state()
 
         if self._on_trigger is not None:
             try:

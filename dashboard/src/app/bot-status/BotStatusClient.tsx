@@ -15,6 +15,7 @@ import {
   fetchMarketStats,
   fetchTrainingRuns,
 } from "../../lib/api";
+import { SessionHistoryChart } from "../components/SessionHistoryChart";
 
 type Session = BotSession;
 
@@ -379,7 +380,12 @@ export default function BotStatusClient({
             {kalshiBot.sessions.length === 0 ? (
               <EmptyState message="No sessions recorded" />
             ) : (
-              <div className="space-y-3">
+              <>
+                <div className="rounded-lg border border-gray-800/60 bg-gray-900/20 p-4 mb-4">
+                  <div className="text-[10px] uppercase tracking-widest text-gray-500 mb-3 font-medium">P&amp;L per Session</div>
+                  <SessionHistoryChart sessions={kalshiBot.sessions} />
+                </div>
+                <div className="space-y-3">
                 {(kalshiBot.sessions as Session[]).map((s) => {
                   const totalSettled = s.wins + s.losses;
                   const wr =
@@ -436,7 +442,8 @@ export default function BotStatusClient({
                     </div>
                   );
                 })}
-              </div>
+                </div>
+              </>
             )}
           </section>
 

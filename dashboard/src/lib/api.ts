@@ -42,6 +42,51 @@ export type CombinedMetricsResponse = {
   timestamp: string;
 };
 
+export type PnlSeriesPoint = {
+  timestamp: string;
+  pnl: number;
+  cumulative_pnl: number;
+  side: string;
+  ticker: string;
+};
+
+export type HeartbeatResponse = {
+  bot_id: string;
+  is_alive: boolean;
+  stale: boolean;
+  seconds_since_heartbeat: number | null;
+  last_seen: string | null;
+  metadata: Record<string, unknown>;
+};
+
+export type RiskStatusResponse = {
+  status: string;
+  stale: boolean;
+  seconds_since_write: number | null;
+  current_capital: number | null;
+  peak_capital: number | null;
+  circuit_breakers: {
+    daily_loss: { status: string; current_usd: number; limit_usd: number; pct_used: number };
+    weekly_loss: { status: string; current_usd: number; limit_usd: number; pct_used: number };
+    drawdown: { status: string; current: number; limit: number; pct_used: number };
+    consecutive_losses: { current: number; limit: number };
+  };
+  win_rate_last_20: number | null;
+  api_error_count: number;
+  recent_events: Array<{ timestamp: string; rule: string; description: string; severity: string }>;
+  last_updated: string;
+};
+
+export type TradesSummaryResponse = {
+  total_trades: number;
+  winning_trades: number;
+  losing_trades: number;
+  win_rate: number;
+  avg_profit: number;
+  avg_loss: number;
+  profit_factor: number;
+};
+
 export type BotSession = {
   session_id: string;
   started_at: string | null;
@@ -178,4 +223,26 @@ export async function fetchTrainingRuns(limit = 10) {
     offset?: number;
   }>(`/api/training/runs?limit=${limit}`);
   return data?.runs ?? [];
+}
+
+// ---------------------------------------------------------------------------
+// Heartbeat & risk
+// ---------------------------------------------------------------------------
+
+export async function fetchHeartbeat(botId = "kalshi_paper") {
+  return get<HeartbeatResponse>(`/api/bot/heartbeat?bot_id=${botId}`);
+}
+
+export async function fetchRiskStatus() {
+  return get<RiskStatusResponse>(`/api/risk/status`);
+}
+
+export async function fetchTradesSummary() {
+  return get<TradesSummaryResponse>(`/api/trades/summary`);
+}
+
+export async function fetchPnlSeriesTyped(mode = "paper") {
+  return get<{ series: PnlSeriesPoint[]; total_pnl: number }>(
+    `/api/kalshi/pnl-series?mode=${mode}`
+  );
 }

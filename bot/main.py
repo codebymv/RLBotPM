@@ -1940,25 +1940,42 @@ def fleet_start(dry_run, skip_gates, kalshi_only, rl_only, model):
 
     # Kalshi
     if kalshi_cfg.get("enabled", True) and not rl_only:
-        kalshi_args = [
-            sys.executable, "main.py", "kalshi", "live-trade",
-            "--interval", str(kalshi_cfg.get("interval", 300)),
-            "--max-cost", str(kalshi_cfg.get("max_cost", 1.0)),
-            "--max-total", str(kalshi_cfg.get("max_total", 10.0)),
-            "--max-positions", str(kalshi_cfg.get("max_positions", 10)),
-            "--max-loss-streak", str(kalshi_cfg.get("max_loss_streak", 3)),
-            "--max-daily-loss", str(kalshi_cfg.get("max_daily_loss", 5.0)),
-            "--min-edge", str(kalshi_cfg.get("min_edge", 0.02)),
-            "--max-edge", str(kalshi_cfg.get("max_edge", 0.05)),
-            "--min-price", str(kalshi_cfg.get("min_price", 1)),
-            "--max-price", str(kalshi_cfg.get("max_price", 15)),
-        ]
         if dry_run:
-            kalshi_args.append("--dry-run")
-        if kalshi_cfg.get("series"):
-            kalshi_args.extend(["--series", kalshi_cfg["series"]])
-        # Bypass confirmation (subprocess has no TTY).
-        kalshi_args.append("--yes")
+            # Paper mode: full portfolio simulation, no real orders
+            kalshi_args = [
+                sys.executable, "main.py", "kalshi", "paper-trade",
+                "--live",
+                "--interval", str(kalshi_cfg.get("interval", 300)),
+                "--bankroll", str(kalshi_cfg.get("bankroll", 100.0)),
+                "--min-edge", str(kalshi_cfg.get("min_edge", 0.015)),
+                "--max-edge", str(kalshi_cfg.get("max_edge", 0.60)),
+                "--min-price", str(kalshi_cfg.get("min_price", 1)),
+                "--max-price", str(kalshi_cfg.get("max_price", 50)),
+                "--max-positions", str(kalshi_cfg.get("max_positions", 10)),
+                "--max-new-trades-per-scan", str(kalshi_cfg.get("max_new_trades_per_scan", 4)),
+                "--max-session-loss", str(kalshi_cfg.get("max_session_loss", 5.0)),
+            ]
+            if kalshi_cfg.get("series"):
+                kalshi_args.extend(["--series", kalshi_cfg["series"]])
+        else:
+            # Live mode: real orders via Kalshi execution client
+            kalshi_args = [
+                sys.executable, "main.py", "kalshi", "live-trade",
+                "--interval", str(kalshi_cfg.get("interval", 300)),
+                "--max-cost", str(kalshi_cfg.get("max_cost", 1.0)),
+                "--max-total", str(kalshi_cfg.get("max_total", 10.0)),
+                "--max-positions", str(kalshi_cfg.get("max_positions", 10)),
+                "--max-loss-streak", str(kalshi_cfg.get("max_loss_streak", 3)),
+                "--max-daily-loss", str(kalshi_cfg.get("max_daily_loss", 5.0)),
+                "--min-edge", str(kalshi_cfg.get("min_edge", 0.015)),
+                "--max-edge", str(kalshi_cfg.get("max_edge", 0.60)),
+                "--min-price", str(kalshi_cfg.get("min_price", 1)),
+                "--max-price", str(kalshi_cfg.get("max_price", 50)),
+            ]
+            if kalshi_cfg.get("series"):
+                kalshi_args.extend(["--series", kalshi_cfg["series"]])
+            # Bypass confirmation in subprocess (no TTY)
+            kalshi_args.append("--yes")
 
         p = subprocess.Popen(
             kalshi_args,
@@ -1973,24 +1990,37 @@ def fleet_start(dry_run, skip_gates, kalshi_only, rl_only, model):
 
     # RL Crypto
     if rl_cfg.get("enabled", True) and not kalshi_only:
-        rl_mode = "paper" if dry_run else "live"
-        model_path_str = model or rl_cfg.get("model", "models/best_model_run_171")
+        model_path_str = model or rl_cfg.get("model", "models/best_model_run_172.zip")
         model_path = Path(model_path_str)
         if not model_path.is_absolute():
             model_path = bot_dir / model_path_str
         if not model_path.exists():
             console.print(f"[yellow]RL model not found: {model_path} — skipping RL bot[/yellow]")
         else:
-            rl_args = [
-                sys.executable, "-m", "src.execution.live_trader",
-                "--model", str(model_path),
-                "--symbol", rl_cfg.get("symbol", "BTC-USD"),
-                "--interval", rl_cfg.get("interval", "1h"),
-                "--mode", rl_mode,
-                "--capital", str(rl_cfg.get("capital", 1000.0)),
-                "--duration", str(rl_cfg.get("duration", 0)),
-                "--tick-interval", str(rl_cfg.get("tick_interval", 60)),
-            ]
+            if dry_run:
+                # Paper mode: rl-paper-trade uses live Coinbase data with no real orders
+                symbols = rl_cfg.get("symbols")
+                rl_args = [
+                    sys.executable, "main.py", "rl-paper-trade",
+                    "--model", str(model_path),
+                    "--capital", str(rl_cfg.get("capital", 1000.0)),
+                    "--interval", rl_cfg.get("interval", "1h"),
+                    "--duration", str(rl_cfg.get("duration", 0)),
+                ]
+                if symbols:
+                    rl_args.extend(["--symbols", symbols])
+            else:
+                # Live mode: real orders via Coinbase execution client
+                rl_args = [
+                    sys.executable, "-m", "src.execution.live_trader",
+                    "--model", str(model_path),
+                    "--symbol", rl_cfg.get("symbol", "BTC-USD"),
+                    "--interval", rl_cfg.get("interval", "1h"),
+                    "--mode", "live",
+                    "--capital", str(rl_cfg.get("capital", 1000.0)),
+                    "--duration", str(rl_cfg.get("duration", 0)),
+                    "--tick-interval", str(rl_cfg.get("tick_interval", 60)),
+                ]
             p = subprocess.Popen(
                 rl_args,
                 cwd=str(bot_dir),

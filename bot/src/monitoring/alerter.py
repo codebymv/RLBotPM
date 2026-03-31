@@ -165,10 +165,25 @@ class AlertSystem:
             logger.info("No alert transport configured; alert message: %s", message)
 
     def check_and_alert(self, metrics: Dict[str, float]) -> None:
+        """Fire alerts based on live trading metrics.
+
+        Args:
+            metrics: Dict containing any of:
+                - ``total_return_pct``: current total return (float, e.g. -0.15)
+                - ``win_rate``: recent win rate (float, 0-1)
+                - ``num_trades``: total settled trade count (int)
+                - ``consecutive_losses``: consecutive losing trades (int)
+                - ``daily_pnl``: today's realised P&L in USD (float)
+                - ``circuit_breaker_status``: string "active" / "paused" / "triggered"
+        """
         total_return = metrics.get("total_return_pct")
         win_rate = metrics.get("win_rate")
         num_trades = metrics.get("num_trades", 0)
+        consecutive_losses = metrics.get("consecutive_losses", 0)
+        daily_pnl = metrics.get("daily_pnl")
+        cb_status = metrics.get("circuit_breaker_status", "")
 
+        # Large drawdown
         if total_return is not None and total_return < -0.10:
             self.send_alert(
                 "Large Drawdown Alert",
@@ -176,9 +191,58 @@ class AlertSystem:
                 severity="warning",
             )
 
+        # Strong paper performance milestone
         if win_rate is not None and win_rate > 0.55 and num_trades > 100:
             self.send_alert(
                 "Paper Trading Success",
                 f"Win rate {win_rate:.1%} over {num_trades} trades",
                 severity="success",
+            )
+
+        # Consecutive loss streak
+        if consecutive_losses >= 3:
+            self.send_alert(
+                "Consecutive Loss Streak",
+                f"{consecutive_losses} losses in a row — performance review recommended",
+                severity="warning",
+            )
+
+        # Circuit breaker tripped
+        if cb_status in ("paused", "triggered"):
+            self.send_alert(
+                "Circuit Breaker TRIGGERED",
+                f"Trading halted — circuit breaker status: {cb_status}. Manual review required.",
+                severity="critical",
+            )
+
+        # Daily loss threshold
+        if daily_pnl is not None and daily_pnl < -10.0:
+            self.send_alert(
+                "Daily Loss Alert",
+                f"Today's P&L is ${daily_pnl:.2f} — approaching daily loss limit",
+                severity="warning",
+            )
+
+    def check_circuit_breaker_state(self, state: Dict) -> None:
+        """Fire an alert if the circuit breaker state dict (from /api/risk/status)
+        indicates a problem.  Call this from a supervisor loop or cron check.
+
+        Args:
+            state: Dict returned by ``GET /api/risk/status`` or
+                   ``CircuitBreaker.get_status_report()``.
+        """
+        status = state.get("status", "")
+        if status in ("paused", "triggered"):
+            events = state.get("recent_events", [])
+            last_rule = events[-1].get("rule", "unknown") if events else "unknown"
+            self.send_alert(
+                f"Circuit Breaker: {last_rule}",
+                f"Status={status}. Bot has halted trading. Check dashboard immediately.",
+                severity="critical",
+            )
+        elif state.get("stale"):
+            self.send_alert(
+                "Bot Heartbeat Lost",
+                "Circuit breaker state is stale — bot process may have crashed.",
+                severity="critical",
             )

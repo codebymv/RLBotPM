@@ -11,6 +11,8 @@ import { SectionHeader } from "./components/SectionHeader";
 import { EmptyState } from "./components/EmptyState";
 import { DataFreshness } from "./components/DataFreshness";
 import { StrategyBadge } from "./components/StrategyBadge";
+import { PnlChart } from "./components/PnlChart";
+import { RiskStatusPanel } from "./components/RiskStatusPanel";
 import {
   type BotStatusResponse,
   type CombinedMetricsResponse,
@@ -19,6 +21,10 @@ import {
   fetchCryptoPrices,
   fetchBotStatus,
   fetchMarketStats,
+  fetchHeartbeat,
+  fetchRiskStatus,
+  fetchTradesSummary,
+  fetchPnlSeriesTyped,
 } from "../lib/api";
 
 function fmt(n: number, decimals = 2) {
@@ -82,6 +88,30 @@ export default function OverviewClient({
     queryFn: fetchMarketStats,
     initialData: initialMktStats,
     refetchInterval: 60_000,
+  });
+
+  const { data: heartbeat } = useQuery({
+    queryKey: ["heartbeat"],
+    queryFn: () => fetchHeartbeat(),
+    refetchInterval: 30_000,
+  });
+
+  const { data: riskStatus } = useQuery({
+    queryKey: ["riskStatus"],
+    queryFn: fetchRiskStatus,
+    refetchInterval: 30_000,
+  });
+
+  const { data: tradesSummary } = useQuery({
+    queryKey: ["tradesSummary"],
+    queryFn: fetchTradesSummary,
+    refetchInterval: 60_000,
+  });
+
+  const { data: pnlSeries } = useQuery({
+    queryKey: ["pnlSeries", mode],
+    queryFn: () => fetchPnlSeriesTyped(mode),
+    refetchInterval: 30_000,
   });
 
   // Select data by bot — fall back to empty objects so downstream ?. access is safe
@@ -178,7 +208,7 @@ export default function OverviewClient({
           </p>
         </div>
         <div className="flex flex-col gap-2 mt-4 sm:mt-0">
-          <div className="flex gap-2 items-center">
+          <div className="flex gap-2 items-center flex-wrap">
             <StatusPill mode={mode} />
             <DataFreshness
               lastUpdated={
@@ -188,7 +218,7 @@ export default function OverviewClient({
               }
             />
           </div>
-          <div className="flex gap-2 text-xs">
+          <div className="flex gap-2 text-xs flex-wrap">
             <SystemStatus
               label="API"
               ok={health.status === "healthy"}
@@ -199,6 +229,7 @@ export default function OverviewClient({
               ok={health.database === "connected"}
               text={health.database || "unknown"}
             />
+            <BotLiveness heartbeat={heartbeat ?? null} />
           </div>
         </div>
       </div>
@@ -284,6 +315,29 @@ export default function OverviewClient({
                 mode="neutral"
               />
               <KpiCard
+                label="Profit Factor"
+                value={
+                  tradesSummary && tradesSummary.total_trades > 0
+                    ? tradesSummary.profit_factor === Infinity
+                      ? "∞"
+                      : fmt(tradesSummary.profit_factor)
+                    : "—"
+                }
+                sublabel={
+                  tradesSummary && tradesSummary.total_trades > 0
+                    ? `avg win $${fmt(tradesSummary.avg_profit)} · avg loss $${fmt(Math.abs(tradesSummary.avg_loss))}`
+                    : "Need settled trades"
+                }
+                mode="neutral"
+                trend={
+                  tradesSummary && tradesSummary.profit_factor > 1.3
+                    ? "up"
+                    : tradesSummary && tradesSummary.profit_factor < 1.0
+                    ? "down"
+                    : "flat"
+                }
+              />
+              <KpiCard
                 label="Kalshi Settled Markets"
                 value={mktStats ? mktStats.total_markets.toLocaleString() : "—"}
                 sublabel={mktStats ? `${mktStats.total_events} events · dataset coverage` : "Kalshi dataset coverage"}
@@ -342,6 +396,21 @@ export default function OverviewClient({
             submessage="Start the paper trader or switch modes"
           />
         )}
+
+        {/* Risk / Circuit Breaker Panel */}
+        <div className="mt-4">
+          <RiskStatusPanel risk={riskStatus ?? null} />
+        </div>
+
+        {/* Cumulative P&L Chart */}
+        {pnlSeries && pnlSeries.series && pnlSeries.series.length > 0 && (
+          <div className="mt-4">
+            <div className="text-[10px] uppercase tracking-widest text-gray-500 mb-2 font-medium">
+              Cumulative P&amp;L
+            </div>
+            <PnlChart series={pnlSeries.series} />
+          </div>
+        )}
       </section>
 
       {/* Live Crypto Prices */}
@@ -358,7 +427,7 @@ export default function OverviewClient({
             {Object.entries(
               crypto.prices as Record<
                 string,
-                { price?: number; bid?: number; ask?: number; error?: string }
+                { price?: number; bid?: number; ask?: number; error?: string; change_24h_pct?: number; volume_24h?: number }
               >
             ).map(([asset, data]) => (
               <div
@@ -376,6 +445,16 @@ export default function OverviewClient({
                     <div className="text-xl font-mono font-bold tabular-nums">
                       ${fmt(data.price, asset === "DOGE" || asset === "XRP" ? 4 : 2)}
                     </div>
+                    {data.change_24h_pct != null && (
+                      <div
+                        className={`text-xs font-mono font-bold mt-1 ${
+                          data.change_24h_pct >= 0 ? "text-green-400" : "text-red-400"
+                        }`}
+                      >
+                        {data.change_24h_pct >= 0 ? "↑" : "↓"}
+                        {Math.abs(data.change_24h_pct * 100).toFixed(2)}%
+                      </div>
+                    )}
                     {data.bid && data.ask ? (
                       <div className="text-[9px] text-gray-600 mt-1.5 font-mono">
                         {fmt(data.bid, 2)} / {fmt(data.ask, 2)}
@@ -469,10 +548,12 @@ export default function OverviewClient({
                     <th className="text-left py-3 px-4 font-bold">Side</th>
                     <th className="text-right py-3 px-4 font-bold">Price</th>
                     <th className="text-right py-3 px-4 font-bold">Edge</th>
+                    <th className="text-left py-3 px-4 font-bold">Type</th>
                     <th className="text-right py-3 px-4 font-bold">Qty</th>
                     <th className="text-right py-3 px-4 font-bold">Cost</th>
+                    <th className="text-right py-3 px-4 font-bold">Hold</th>
                     <th className="text-left py-3 px-4 font-bold">Status</th>
-                    <th className="text-right py-3 px-4 font-bold">P&L</th>
+                    <th className="text-right py-3 px-4 font-bold">P&amp;L</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -514,11 +595,27 @@ export default function OverviewClient({
                       <td className="py-3 px-4 text-right tabular-nums text-gray-400">
                         {t.edge != null ? `${(t.edge * 100).toFixed(1)}%` : "—"}
                       </td>
+                      <td className="py-3 px-4">
+                        {t.edge_type ? (
+                          <span className="text-[8px] uppercase font-mono text-gray-500 bg-gray-800/60 px-1.5 py-0.5 rounded">
+                            {t.edge_type}
+                          </span>
+                        ) : (
+                          <span className="text-gray-600">—</span>
+                        )}
+                      </td>
                       <td className="py-3 px-4 text-right tabular-nums">
                         {t.contracts ?? 1}
                       </td>
                       <td className="py-3 px-4 text-right tabular-nums">
                         ${fmt(t.cost)}
+                      </td>
+                      <td className="py-3 px-4 text-right tabular-nums text-gray-500 text-xs">
+                        {t.hold_hours != null
+                          ? t.hold_hours < 1
+                            ? `${Math.round(t.hold_hours * 60)}m`
+                            : `${t.hold_hours.toFixed(1)}h`
+                          : "—"}
                       </td>
                       <td className="py-3 px-4">
                         <span
@@ -647,6 +744,39 @@ function SystemStatus({ label, ok, text }: { label: string; ok: boolean; text: s
     >
       <span className={`w-1.5 h-1.5 rounded-full ${ok ? "bg-green-400" : "bg-red-400"}`} />
       {label}: {text}
+    </span>
+  );
+}
+
+function BotLiveness({ heartbeat }: { heartbeat: import("../lib/api").HeartbeatResponse | null }) {
+  if (!heartbeat) {
+    return (
+      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[10px] font-mono font-bold uppercase tracking-wider bg-gray-800/60 text-gray-500">
+        <span className="w-1.5 h-1.5 rounded-full bg-gray-600" />
+        Bot: unknown
+      </span>
+    );
+  }
+
+  const isAlive = heartbeat.is_alive;
+  const secs = heartbeat.seconds_since_heartbeat;
+  const agoStr =
+    secs == null
+      ? ""
+      : secs < 120
+      ? `${Math.round(secs)}s ago`
+      : `${Math.round(secs / 60)}m ago`;
+
+  return (
+    <span
+      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[10px] font-mono font-bold uppercase tracking-wider ${
+        isAlive ? "bg-green-900/40 text-green-400" : "bg-red-900/40 text-red-400"
+      }`}
+    >
+      <span
+        className={`w-1.5 h-1.5 rounded-full ${isAlive ? "bg-green-400 animate-pulse" : "bg-red-400"}`}
+      />
+      Bot: {isAlive ? "live" : `dead${agoStr ? ` · ${agoStr}` : ""}`}
     </span>
   );
 }

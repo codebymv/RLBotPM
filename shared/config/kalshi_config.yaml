@@ -68,9 +68,9 @@ strategy:
     interval_seconds: 300
     bankroll: 100.0
     min_edge: 0.015
-    max_edge: 0.10
+    max_edge: 0.60
     min_price_cents: 1
-    max_price_cents: 25
+    max_price_cents: 50
     max_contracts_per_trade: 10
     max_open_positions: 10
     max_new_trades_per_scan: 4

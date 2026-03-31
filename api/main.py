@@ -10,8 +10,9 @@ This API provides endpoints for:
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from datetime import datetime
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 import os
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
@@ -506,7 +507,8 @@ async def get_paper_trading_metrics(
             recent = conn.execute(text(f"""
                 SELECT ticker, side, entry_price_cents, edge_value, contracts,
                        cost_dollars, status, outcome, pnl,
-                       opened_at, settled_at, edge_type, mode
+                       opened_at, settled_at, edge_type, mode,
+                       EXTRACT(EPOCH FROM (settled_at - opened_at)) / 3600.0 AS hold_hours
                 FROM kalshi_trades
                 WHERE 1=1 {mode_filter}
                 ORDER BY id DESC
@@ -528,6 +530,7 @@ async def get_paper_trading_metrics(
                 "settled_at": r[10].isoformat() if r[10] else None,
                 "edge_type": r[11],
                 "mode": r[12],
+                "hold_hours": float(r[13]) if r[13] is not None else None,
             }
             for r in recent
         ]
@@ -562,41 +565,30 @@ async def get_combined_metrics(
         kalshi_metrics = await get_paper_trading_metrics(mode=mode)
 
         with DB_ENGINE.connect() as conn:
-            rl_total = conn.execute(
-                text(
-                    "SELECT COUNT(*) FROM rl_crypto_trades WHERE mode = :mode AND status = 'closed'"
-                ),
+            # Single aggregation — replaces 5 sequential queries
+            rl_agg = conn.execute(
+                text("""
+                    SELECT
+                        COUNT(*) FILTER (WHERE status = 'closed')                         AS total,
+                        COUNT(*) FILTER (WHERE status = 'closed' AND pnl > 0)             AS wins,
+                        COALESCE(SUM(pnl) FILTER (WHERE status = 'closed'), 0)            AS pnl,
+                        COUNT(*) FILTER (WHERE status = 'open')                           AS open_count,
+                        COALESCE(SUM(position_size) FILTER (WHERE status = 'open'), 0)   AS open_cost
+                    FROM rl_crypto_trades WHERE mode = :mode
+                """),
                 {"mode": mode},
-            ).scalar() or 0
-            rl_wins = conn.execute(
-                text(
-                    "SELECT COUNT(*) FROM rl_crypto_trades WHERE mode = :mode AND status = 'closed' AND pnl > 0"
-                ),
-                {"mode": mode},
-            ).scalar() or 0
-            rl_pnl = conn.execute(
-                text(
-                    "SELECT COALESCE(SUM(pnl), 0) FROM rl_crypto_trades WHERE mode = :mode AND status = 'closed'"
-                ),
-                {"mode": mode},
-            ).scalar() or 0.0
-            rl_open = conn.execute(
-                text(
-                    "SELECT COUNT(*) FROM rl_crypto_trades WHERE mode = :mode AND status = 'open'"
-                ),
-                {"mode": mode},
-            ).scalar() or 0
-            rl_open_cost = conn.execute(
-                text(
-                    "SELECT COALESCE(SUM(position_size), 0) FROM rl_crypto_trades WHERE mode = :mode AND status = 'open'"
-                ),
-                {"mode": mode},
-            ).scalar() or 0.0
+            ).fetchone()
+            rl_total    = int(rl_agg[0] or 0)
+            rl_wins     = int(rl_agg[1] or 0)
+            rl_pnl      = float(rl_agg[2] or 0.0)
+            rl_open     = int(rl_agg[3] or 0)
+            rl_open_cost = float(rl_agg[4] or 0.0)
 
             rl_recent = conn.execute(
                 text("""
                     SELECT symbol, action, entry_price, exit_price, position_size,
-                           pnl, pnl_pct, status, opened_at, closed_at
+                           pnl, pnl_pct, status, opened_at, closed_at,
+                           exit_reason, hold_steps
                     FROM rl_crypto_trades
                     WHERE mode = :mode
                     ORDER BY id DESC
@@ -610,13 +602,17 @@ async def get_combined_metrics(
                 "ticker": r[0],
                 "side": r[1],
                 "entry_price_cents": None,
+                "entry_price": float(r[2]) if r[2] is not None else None,
                 "edge": None,
                 "contracts": 1,
                 "cost": float(r[4]),
                 "status": r[7],
                 "pnl": float(r[5]) if r[5] is not None else None,
+                "pnl_pct": float(r[6]) if r[6] is not None else None,
                 "opened_at": r[8].isoformat() if r[8] else None,
                 "settled_at": r[9].isoformat() if r[9] else None,
+                "exit_reason": r[10],
+                "hold_steps": r[11],
                 "mode": mode,
                 "strategy": "rl_crypto",
             }
@@ -1134,23 +1130,90 @@ async def get_models(
 
 
 # Risk management endpoints
+CIRCUIT_BREAKER_STATE_PATH = Path(
+    os.getenv(
+        "CIRCUIT_BREAKER_STATE_PATH",
+        str(Path(__file__).resolve().parent.parent / "bot" / "logs" / "circuit_breaker_state.json"),
+    )
+)
+
 @app.get("/api/risk/status")
 async def get_risk_status():
     """
-    Get current risk management status
-    
-    Returns:
-        Circuit breaker status and risk metrics
+    Get current risk management status from the circuit breaker state file
+    written by the bot on every trade / trigger event.
     """
-    # TODO: Implement risk status check
+    if not CIRCUIT_BREAKER_STATE_PATH.exists():
+        return {
+            "status": "unknown",
+            "stale": True,
+            "reason": "state_file_not_found",
+            "state_file": str(CIRCUIT_BREAKER_STATE_PATH),
+            "last_updated": datetime.utcnow().isoformat(),
+        }
+
+    try:
+        raw = CIRCUIT_BREAKER_STATE_PATH.read_text(encoding="utf-8")
+        state = json.loads(raw)
+    except Exception as exc:
+        return {
+            "status": "unknown",
+            "stale": True,
+            "reason": f"parse_error: {exc}",
+            "last_updated": datetime.utcnow().isoformat(),
+        }
+
+    # Detect staleness — file older than 5 minutes means bot likely not running
+    written_at_str = state.get("written_at")
+    stale = False
+    seconds_since_write = None
+    if written_at_str:
+        try:
+            written_at = datetime.fromisoformat(written_at_str)
+            seconds_since_write = (datetime.now() - written_at).total_seconds()
+            stale = seconds_since_write > 300  # 5 minutes
+        except Exception:
+            stale = True
+
+    limits = state.get("limits", {})
+    daily_pnl = state.get("daily_pnl", 0.0)
+    weekly_pnl = state.get("weekly_pnl", 0.0)
+    drawdown = state.get("drawdown", 0.0)
+
     return {
-        "status": "active",
+        "status": state.get("status", "unknown"),
+        "stale": stale,
+        "seconds_since_write": seconds_since_write,
+        "current_capital": state.get("current_capital"),
+        "peak_capital": state.get("peak_capital"),
         "circuit_breakers": {
-            "daily_loss": {"status": "ok", "current": 0, "limit": 20},
-            "weekly_loss": {"status": "ok", "current": 0, "limit": 50},
-            "drawdown": {"status": "ok", "current": 0.05, "limit": 0.30}
+            "daily_loss": {
+                "status": "triggered" if state.get("status") == "paused" else "ok",
+                "current_usd": daily_pnl,
+                "limit_usd": limits.get("max_daily_loss_usd", 20),
+                "pct_used": abs(daily_pnl) / max(limits.get("max_daily_loss_usd", 20), 0.01),
+            },
+            "weekly_loss": {
+                "status": "triggered" if state.get("status") == "paused" else "ok",
+                "current_usd": weekly_pnl,
+                "limit_usd": limits.get("max_weekly_loss_usd", 50),
+                "pct_used": abs(weekly_pnl) / max(limits.get("max_weekly_loss_usd", 50), 0.01),
+            },
+            "drawdown": {
+                "status": "triggered" if drawdown > limits.get("max_total_drawdown", 0.30) else "ok",
+                "current": drawdown,
+                "limit": limits.get("max_total_drawdown", 0.30),
+                "pct_used": drawdown / max(limits.get("max_total_drawdown", 0.30), 0.01),
+            },
+            "consecutive_losses": {
+                "current": state.get("consecutive_losses", 0),
+                "limit": limits.get("max_consecutive_losses", 5),
+            },
         },
-        "last_updated": datetime.utcnow().isoformat()
+        "win_rate_last_20": state.get("win_rate_last_20"),
+        "api_error_count": state.get("api_error_count", 0),
+        "recent_events": state.get("recent_events", []),
+        "last_updated": state.get("written_at", datetime.utcnow().isoformat()),
     }
 
 
@@ -1258,28 +1321,46 @@ import httpx  # lightweight async HTTP – already transitively available
 
 @app.get("/api/crypto/prices")
 async def get_crypto_prices():
-    """Live spot prices for all tracked crypto assets from Coinbase."""
-    import time as _time
+    """Live spot prices for all tracked crypto assets from Coinbase, with 24h change."""
     results = {}
     async with httpx.AsyncClient(timeout=10) as client:
         for asset in CRYPTO_ASSETS:
             symbol = f"{asset}-USD"
             try:
-                resp = await client.get(
-                    COINBASE_TICKER.format(symbol=symbol)
-                )
-                if resp.status_code == 200:
-                    data = resp.json()
-                    results[asset] = {
-                        "price": float(data["price"]),
-                        "volume_24h": float(data.get("volume", 0)),
-                        "bid": float(data.get("bid", 0)),
-                        "ask": float(data.get("ask", 0)),
-                        "symbol": symbol,
-                        "timestamp": datetime.utcnow().isoformat(),
-                    }
-                else:
+                resp = await client.get(COINBASE_TICKER.format(symbol=symbol))
+                if resp.status_code != 200:
                     results[asset] = {"error": f"HTTP {resp.status_code}"}
+                    continue
+
+                data = resp.json()
+                current_price = float(data["price"])
+
+                # Attempt to fetch 24h change via daily candle (2 candles = today + yesterday)
+                change_24h_pct: float | None = None
+                try:
+                    candle_resp = await client.get(
+                        COINBASE_CANDLES.format(symbol=symbol),
+                        params={"granularity": 86400},  # 1-day candles
+                    )
+                    if candle_resp.status_code == 200:
+                        candles = candle_resp.json()
+                        # Coinbase returns [time, low, high, open, close, volume] newest-first
+                        if len(candles) >= 2:
+                            prev_close = float(candles[1][4])  # previous day close
+                            if prev_close > 0:
+                                change_24h_pct = (current_price - prev_close) / prev_close
+                except Exception:
+                    pass  # non-fatal; change_24h_pct stays None
+
+                results[asset] = {
+                    "price": current_price,
+                    "volume_24h": float(data.get("volume", 0)),
+                    "bid": float(data.get("bid", 0)),
+                    "ask": float(data.get("ask", 0)),
+                    "change_24h_pct": change_24h_pct,
+                    "symbol": symbol,
+                    "timestamp": datetime.utcnow().isoformat(),
+                }
             except Exception as e:
                 results[asset] = {"error": str(e)}
     return {
@@ -1452,6 +1533,72 @@ async def get_kalshi_market_stats():
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ──────────────────────────────────────────────────────────────────────
+#  Bot Heartbeat endpoints
+# ──────────────────────────────────────────────────────────────────────
+
+# In-memory store — survives API-restarts gracefully (returns stale=True
+# until the bot sends its first beat post-restart).
+_HEARTBEAT_STORE: Dict[str, Any] = {}
+_HEARTBEAT_STALE_SECONDS = 120  # bot sends every 60s; allow 2× before "dead"
+
+
+class HeartbeatPayload(BaseModel):
+    bot_id: str = "kalshi_paper"
+    timestamp: str
+    metadata: Optional[Dict[str, Any]] = None
+
+
+@app.post("/api/bot/heartbeat", status_code=200)
+async def post_bot_heartbeat(payload: HeartbeatPayload):
+    """Receive a liveness ping from the bot process."""
+    _HEARTBEAT_STORE[payload.bot_id] = {
+        "bot_id": payload.bot_id,
+        "last_seen": payload.timestamp,
+        "received_at": datetime.utcnow().isoformat(),
+        "metadata": payload.metadata or {},
+    }
+    return {"ok": True, "bot_id": payload.bot_id}
+
+
+@app.get("/api/bot/heartbeat")
+async def get_bot_heartbeat(bot_id: str = "kalshi_paper"):
+    """Return whether the bot is currently alive.
+
+    ``is_alive`` is ``True`` when the last heartbeat arrived within
+    ``_HEARTBEAT_STALE_SECONDS`` seconds.
+    """
+    entry = _HEARTBEAT_STORE.get(bot_id)
+    if not entry:
+        return {
+            "bot_id": bot_id,
+            "is_alive": False,
+            "stale": True,
+            "seconds_since_heartbeat": None,
+            "last_seen": None,
+            "metadata": {},
+        }
+
+    try:
+        last_seen_dt = datetime.fromisoformat(entry["last_seen"].replace("Z", "+00:00"))
+        # Compare naive-to-naive for simplicity
+        last_seen_naive = last_seen_dt.replace(tzinfo=None)
+        secs = (datetime.utcnow() - last_seen_naive).total_seconds()
+    except Exception:
+        secs = None
+
+    is_alive = secs is not None and secs < _HEARTBEAT_STALE_SECONDS
+
+    return {
+        "bot_id": bot_id,
+        "is_alive": is_alive,
+        "stale": not is_alive,
+        "seconds_since_heartbeat": secs,
+        "last_seen": entry["last_seen"],
+        "metadata": entry.get("metadata", {}),
+    }
 
 
 def _interval_to_seconds(interval: str) -> int:

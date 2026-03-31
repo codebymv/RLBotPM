@@ -1,6 +1,8 @@
 # Fleet Orchestration - Run both bots in parallel
 # ===============================================
-# Usage: python main.py fleet start [--dry-run] [--skip-gates]
+# Usage:
+#   python main.py fleet start --dry-run   (paper mode, no real money)
+#   python main.py fleet start             (live mode, requires promotion gates)
 
 fleet:
   # Global circuit breaker (orchestrator-level)
@@ -13,32 +15,39 @@ fleet:
 
 # -----------------------------------------------------------------------------
 # Bot 1: Kalshi Prediction Markets
+#   --dry-run  → kalshi paper-trade --live (paper portfolio, no real orders)
+#   live       → kalshi live-trade (real orders)
 # -----------------------------------------------------------------------------
 kalshi:
   enabled: true
-  # CLI: python main.py kalshi live-trade [options]
-  interval: 300              # seconds between scans
-  max_cost: 1.0              # max $ per trade
-  max_total: 10.0            # max total capital deployed
-  max_positions: 10
-  max_loss_streak: 3         # kill switch after N consecutive losses
-  max_daily_loss: 5.0        # kill switch at daily loss
-  min_edge: 0.02
-  max_edge: 0.05
+  interval: 300
+  min_edge: 0.015
+  max_edge: 0.60
   min_price: 1
-  max_price: 15
-  series: null               # null = default from config; or "KXBTC,KXETH,KXSOL"
+  max_price: 50
+  bankroll: 100.0                # paper-trade only
+  max_positions: 10
+  max_new_trades_per_scan: 4
+  max_session_loss: 5.0          # paper session loss stop
+  series: null                   # null = all crypto series
+  # live-trade only (real money)
+  max_cost: 1.0
+  max_total: 10.0
+  max_loss_streak: 3
+  max_daily_loss: 5.0
 
 # -----------------------------------------------------------------------------
 # Bot 2: RL Crypto Spot (Coinbase)
+#   --dry-run  → rl-paper-trade (live data, paper portfolio, no real orders)
+#   live       → live_trader --mode live (real orders via Coinbase)
 # -----------------------------------------------------------------------------
 rl_crypto:
   enabled: true
-  # CLI: python -m src.execution.live_trader [options]
-  # After fixing .env (MODEL_SAVE_PATH=./models), use models/; else bot/models/ for legacy
   model: "bot/models/best_model_run_172.zip"
-  symbol: "BTC-USD"
+  symbols: null                  # null = all from DATA_SYMBOLS env var
   interval: "1h"
-  capital: 1000.0           # paper fallback; live uses actual portfolio
-  tick_interval: 60         # seconds between ticks
-  duration: 0               # 0 = indefinite
+  capital: 1000.0
+  duration: 0                    # 0 = indefinite
+  # live-trade only
+  symbol: "BTC-USD"
+  tick_interval: 60
