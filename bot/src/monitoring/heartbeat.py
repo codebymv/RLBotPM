@@ -18,7 +18,7 @@ from ..core.logger import get_logger
 
 logger = get_logger(__name__)
 
-_API_BASE_URL = os.getenv("NEXT_PUBLIC_API_URL") or os.getenv("API_BASE_URL") or "http://localhost:8000"
+_API_BASE_URL = os.getenv("API_BASE_URL") or os.getenv("NEXT_PUBLIC_API_URL") or "http://localhost:8000"
 
 
 class BotHeartbeat:
