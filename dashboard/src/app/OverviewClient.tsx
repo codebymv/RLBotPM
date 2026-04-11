@@ -191,8 +191,8 @@ export default function OverviewClient({
             />
           </div>
           <div className="flex gap-2 text-xs flex-wrap">
-            <SystemStatus label="API" ok={health.status === "healthy"} text={health.status} />
-            <SystemStatus label="DB" ok={health.database === "connected"} text={health.database || "unknown"} />
+            <SystemStatus label="API" ok={health?.status === "healthy"} text={health?.status ?? "unknown"} />
+            <SystemStatus label="DB" ok={health?.database === "connected"} text={health?.database ?? "unknown"} />
             <BotLiveness heartbeat={heartbeat ?? null} />
           </div>
         </div>
