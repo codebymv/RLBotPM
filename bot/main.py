@@ -2039,10 +2039,14 @@ def fleet_start(dry_run, skip_gates, kalshi_only, rl_only, model):
     # Start heartbeat so the dashboard knows the fleet is alive
     from src.monitoring.heartbeat import BotHeartbeat
 
+    api_url = os.getenv("API_BASE_URL") or os.getenv("NEXT_PUBLIC_API_URL") or "http://localhost:8000"
+    console.print(f"[dim]Heartbeat → {api_url}[/dim]")
+
     bot_names = [name for name, _ in procs]
     heartbeat = BotHeartbeat(
         interval=60,
         bot_id="fleet",
+        api_base_url=api_url,
         metadata_fn=lambda: {
             "bots": bot_names,
             "pids": {name: proc.pid for name, proc in procs if proc.poll() is None},

@@ -28,13 +28,13 @@ export function KpiCard({
     <div
       role="article"
       aria-label={`${label}: ${value}${sublabel ? `, ${sublabel}` : ""}${trendLabel ? `, ${trendLabel}` : ""}`}
-      className={`rounded-lg border p-4 transition-colors ${modeStyles[mode]} ${className}`}
+      className={`rounded-xl border p-4 sm:p-5 transition-colors ${modeStyles[mode]} ${className}`}
     >
       <div className="text-[11px] uppercase tracking-widest text-gray-500 mb-1.5 font-medium">
         {label}
       </div>
       <div className="flex items-baseline gap-2">
-        <div className="text-3xl font-mono font-bold tabular-nums">{value}</div>
+        <div className="text-2xl sm:text-3xl font-mono font-bold tabular-nums leading-tight">{value}</div>
         {trendIcon && (
           <span className="text-base text-gray-400" aria-label={trendLabel}>
             {trendIcon}

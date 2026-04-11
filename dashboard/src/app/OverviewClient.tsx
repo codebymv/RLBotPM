@@ -216,17 +216,17 @@ export default function OverviewClient({
           <div className="space-y-6">
 
             {/* Hero P&L + Key Metrics */}
-            <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
-              <div className="lg:col-span-1 rounded-xl border border-gray-800/60 bg-gray-900/30 p-6 flex flex-col justify-center">
-                <div className="text-xs uppercase tracking-widest text-gray-500 mb-2 font-medium">
+            <div className="grid grid-cols-1 lg:grid-cols-5 gap-3 sm:gap-4">
+              <div className="lg:col-span-1 rounded-xl border border-gray-800/60 bg-gray-900/30 p-4 sm:p-5 flex flex-col justify-center">
+                <div className="text-[11px] uppercase tracking-widest text-gray-500 mb-1.5 font-medium">
                   Realized P&L
                 </div>
-                <div className={`text-4xl sm:text-5xl font-mono font-bold tabular-nums leading-tight ${pnl >= 0 ? "text-green-400" : "text-red-400"}`}>
+                <div className={`text-3xl sm:text-4xl lg:text-5xl font-mono font-bold tabular-nums leading-tight ${pnl >= 0 ? "text-green-400" : "text-red-400"}`}>
                   ${pnl >= 0 ? "+" : ""}{fmt(pnl)}
                 </div>
                 {sessionPnl !== null && (
                   <div className="text-sm font-mono text-gray-500 mt-2">
-                    Current session: ${sessionPnl >= 0 ? "+" : ""}{fmt(sessionPnl)}
+                    Session: ${sessionPnl >= 0 ? "+" : ""}{fmt(sessionPnl)}
                   </div>
                 )}
               </div>
@@ -324,17 +324,17 @@ export default function OverviewClient({
                           {wr.toFixed(0)}% win
                         </span>
                       </div>
-                      <div className="flex items-baseline justify-between">
+                      <div className="flex items-baseline justify-between gap-4">
                         <div>
-                          <div className="text-3xl font-mono font-bold tabular-nums">
+                          <div className="text-2xl sm:text-3xl font-mono font-bold tabular-nums leading-tight">
                             {sideWins}W <span className="text-gray-600">/</span> {sideLosses}L
                           </div>
-                          <div className="text-sm font-mono text-gray-500 mt-1">
+                          <div className="text-xs sm:text-sm font-mono text-gray-500 mt-1">
                             {sideTotal} settled trades
                           </div>
                         </div>
-                        <div className="text-right">
-                          <div className={`text-2xl font-mono font-bold tabular-nums ${data.pnl >= 0 ? "text-green-400" : "text-red-400"}`}>
+                        <div className="text-right shrink-0">
+                          <div className={`text-xl sm:text-2xl font-mono font-bold tabular-nums leading-tight ${data.pnl >= 0 ? "text-green-400" : "text-red-400"}`}>
                             ${data.pnl >= 0 ? "+" : ""}{fmt(data.pnl)}
                           </div>
                           <div className="text-xs font-mono text-gray-600 mt-1">P&L</div>
@@ -440,7 +440,7 @@ export default function OverviewClient({
         />
 
         {botStatus ? (
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+          <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
             <KpiCard
               label="Total Sessions"
               value={botStatus.total_sessions}
@@ -473,21 +473,17 @@ export default function OverviewClient({
               sublabel={botStatus.strategy.assets.slice(0, 3).join(", ") + (botStatus.strategy.assets.length > 3 ? "…" : "")}
               mode="neutral"
             />
+            {mktStats && (
+              <KpiCard
+                label="Kalshi Dataset"
+                value={mktStats.total_markets.toLocaleString()}
+                sublabel={`${mktStats.total_events} events · training data`}
+                mode="neutral"
+              />
+            )}
           </div>
         ) : (
           <EmptyState message="Bot status unavailable" />
-        )}
-
-        {mktStats && (
-          <div className="mt-3">
-            <KpiCard
-              label="Kalshi Dataset"
-              value={mktStats.total_markets.toLocaleString() + " markets"}
-              sublabel={`${mktStats.total_events} events · training coverage`}
-              mode="neutral"
-              className="max-w-sm"
-            />
-          </div>
         )}
       </section>
 
@@ -667,14 +663,14 @@ function StrategyCard({
           </span>
         )}
       </div>
-      <div className={`text-3xl font-mono font-bold tabular-nums ${pnl >= 0 ? "text-green-400" : "text-red-400"}`}>
+      <div className={`text-2xl sm:text-3xl font-mono font-bold tabular-nums leading-tight ${pnl >= 0 ? "text-green-400" : "text-red-400"}`}>
         ${pnl >= 0 ? "+" : ""}{fmt(pnl)}
       </div>
-      <div className="flex items-center gap-4 mt-3 text-sm font-mono text-gray-400">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-3 text-sm font-mono text-gray-400">
         <span>{settled} settled</span>
-        <span className="text-gray-700">·</span>
+        <span className="text-gray-700 hidden sm:inline">·</span>
         <span>{wins}W / {losses}L</span>
-        <span className="text-gray-700">·</span>
+        <span className="text-gray-700 hidden sm:inline">·</span>
         <span>{winRate.toFixed(1)}%</span>
       </div>
     </div>

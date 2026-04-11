@@ -18,7 +18,7 @@ export function SectionHeader({
   className = "",
 }: SectionHeaderProps) {
   return (
-    <div className={`flex items-end justify-between mb-4 ${className}`}>
+    <div className={`flex items-end justify-between mb-5 ${className}`}>
       <div>
         <h2 id={id} className="text-xl font-bold tracking-tight">{title}</h2>
         {subtitle && (
@@ -28,7 +28,7 @@ export function SectionHeader({
       {actionHref && actionLabel && (
         <Link
           href={actionHref}
-          className="text-sm text-gray-400 hover:text-gray-200 transition-colors tracking-wide"
+          className="text-sm font-medium text-gray-400 hover:text-cyan-400 transition-colors tracking-wide shrink-0 ml-4"
         >
           {actionLabel}
         </Link>

@@ -1,8 +1,8 @@
 "use client";
 
 import {
-  LineChart,
-  Line,
+  AreaChart,
+  Area,
   XAxis,
   YAxis,
   CartesianGrid,
@@ -71,22 +71,14 @@ export function PnlChart({ series, height = 220 }: Props) {
   return (
     <div style={{ height }} className="w-full">
       <ResponsiveContainer width="100%" height="100%">
-        <LineChart
+        <AreaChart
           data={series}
           margin={{ top: 4, right: 8, bottom: 0, left: 8 }}
         >
           <defs>
             <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
-              <stop
-                offset="5%"
-                stopColor={lineColor}
-                stopOpacity={0.12}
-              />
-              <stop
-                offset="95%"
-                stopColor={lineColor}
-                stopOpacity={0}
-              />
+              <stop offset="5%" stopColor={lineColor} stopOpacity={0.2} />
+              <stop offset="95%" stopColor={lineColor} stopOpacity={0} />
             </linearGradient>
           </defs>
           <CartesianGrid
@@ -111,15 +103,16 @@ export function PnlChart({ series, height = 220 }: Props) {
           />
           <ReferenceLine y={0} stroke="#374151" strokeDasharray="4 2" />
           <Tooltip content={<CustomTooltip />} />
-          <Line
+          <Area
             type="monotone"
             dataKey="cumulative_pnl"
             stroke={lineColor}
             strokeWidth={2}
+            fill={`url(#${gradientId})`}
             dot={false}
             activeDot={{ r: 4, fill: lineColor, stroke: "#111827", strokeWidth: 2 }}
           />
-        </LineChart>
+        </AreaChart>
       </ResponsiveContainer>
     </div>
   );
