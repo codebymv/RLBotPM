@@ -229,7 +229,7 @@ export async function fetchTrainingRuns(limit = 10) {
 // Heartbeat & risk
 // ---------------------------------------------------------------------------
 
-export async function fetchHeartbeat(botId = "kalshi_paper") {
+export async function fetchHeartbeat(botId = "fleet") {
   return get<HeartbeatResponse>(`/api/bot/heartbeat?bot_id=${botId}`);
 }
 

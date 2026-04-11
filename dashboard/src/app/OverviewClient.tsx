@@ -166,7 +166,7 @@ export default function OverviewClient({
   const showStrategyBreakdown = bot === "all";
 
   return (
-    <main className="min-h-screen bg-gray-950 text-gray-100 px-4 sm:px-6 py-6 max-w-7xl mx-auto grid-terminal">
+    <main className="min-h-screen bg-gray-950 text-gray-100 px-4 sm:px-6 xl:px-10 py-6 max-w-[1600px] mx-auto grid-terminal">
 
       {/* ─── Header ─── */}
       <header className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 pb-6 mb-8 border-b border-gray-800/50">
@@ -216,7 +216,7 @@ export default function OverviewClient({
           <div className="space-y-6">
 
             {/* Hero P&L + Key Metrics */}
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
               <div className="lg:col-span-1 rounded-xl border border-gray-800/60 bg-gray-900/30 p-6 flex flex-col justify-center">
                 <div className="text-xs uppercase tracking-widest text-gray-500 mb-2 font-medium">
                   Realized P&L
@@ -231,7 +231,7 @@ export default function OverviewClient({
                 )}
               </div>
 
-              <div className="lg:col-span-2 grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div className="lg:col-span-4 grid grid-cols-2 sm:grid-cols-4 gap-3">
                 <KpiCard
                   label="Win Rate"
                   value={settledTrades > 0 ? `${settledWinRate.toFixed(1)}%` : "—"}
@@ -380,7 +380,7 @@ export default function OverviewClient({
         />
 
         {crypto && crypto.prices ? (
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 xl:grid-cols-6 gap-3">
             {Object.entries(
               crypto.prices as Record<
                 string,

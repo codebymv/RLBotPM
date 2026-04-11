@@ -2036,12 +2036,28 @@ def fleet_start(dry_run, skip_gates, kalshi_only, rl_only, model):
         console.print("[yellow]No bots started[/yellow]")
         return
 
+    # Start heartbeat so the dashboard knows the fleet is alive
+    from src.monitoring.heartbeat import BotHeartbeat
+
+    bot_names = [name for name, _ in procs]
+    heartbeat = BotHeartbeat(
+        interval=60,
+        bot_id="fleet",
+        metadata_fn=lambda: {
+            "bots": bot_names,
+            "pids": {name: proc.pid for name, proc in procs if proc.poll() is None},
+            "mode": "dry_run" if dry_run else "live",
+        },
+    )
+    heartbeat.start()
+
     console.print("\n[green]Fleet running. Ctrl+C to stop all.[/green]")
     try:
         for name, proc in procs:
             proc.wait()
     except KeyboardInterrupt:
         console.print("\n[yellow]Stopping fleet...[/yellow]")
+        heartbeat.stop()
         for name, proc in procs:
             proc.terminate()
         for name, proc in procs:

@@ -27,7 +27,7 @@ export default function Nav() {
       aria-label="Main navigation"
       className="border-b border-gray-800/60 bg-gray-950/95 backdrop-blur-md sticky top-0 z-50 shadow-lg shadow-black/20"
     >
-      <div className="max-w-7xl mx-auto px-4 sm:px-6">
+      <div className="max-w-[1600px] mx-auto px-4 sm:px-6 xl:px-10">
         <div className="flex items-center justify-between h-16 gap-4">
           {/* Logo */}
           <Link

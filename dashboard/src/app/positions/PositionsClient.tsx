@@ -156,7 +156,7 @@ export default function PositionsClient({
   );
 
   return (
-    <main className="min-h-screen bg-gray-950 text-gray-100 p-3 sm:p-4 max-w-6xl mx-auto grid-terminal">
+    <main className="min-h-screen bg-gray-950 text-gray-100 px-4 sm:px-6 xl:px-10 py-6 max-w-[1600px] mx-auto grid-terminal">
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between mb-5 pb-4 border-b border-gray-800/60">
         <div>
