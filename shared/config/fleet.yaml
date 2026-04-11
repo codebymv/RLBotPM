@@ -43,7 +43,7 @@ kalshi:
 # -----------------------------------------------------------------------------
 rl_crypto:
   enabled: true
-  model: "bot/models/best_model_run_174.zip"
+  model: "models/best_model_run_174.zip"
   symbols: null                  # null = all from DATA_SYMBOLS env var
   interval: "1h"
   capital: 1000.0

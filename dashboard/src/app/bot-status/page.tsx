@@ -1,6 +1,4 @@
 import { Suspense } from "react";
-import { SectionHeader } from "../components/SectionHeader";
-import { EmptyState } from "../components/EmptyState";
 import BotStatusClient from "./BotStatusClient";
 import type { BotStatusResponse } from "../../lib/api";
 

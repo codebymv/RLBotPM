@@ -15,6 +15,8 @@ import {
   fetchMarketStats,
   fetchTrainingRuns,
 } from "../../lib/api";
+import { fmt } from "../../lib/format";
+import { Stat } from "../components/Stat";
 import { SessionHistoryChart } from "../components/SessionHistoryChart";
 
 type Session = BotSession;
@@ -31,34 +33,6 @@ type TrainingRun = {
   status: string | null;
   config_snapshot: unknown;
 };
-
-function fmt(n: number, d = 2) {
-  return n.toLocaleString("en-US", {
-    minimumFractionDigits: d,
-    maximumFractionDigits: d,
-  });
-}
-
-function Stat({
-  label,
-  value,
-  valueClass = "",
-}: {
-  label: string;
-  value: string;
-  valueClass?: string;
-}) {
-  return (
-    <div>
-      <div className="text-[10px] text-gray-600 uppercase tracking-widest font-mono font-bold mb-1">
-        {label}
-      </div>
-      <div className={`font-mono font-medium tabular-nums ${valueClass}`}>
-        {value}
-      </div>
-    </div>
-  );
-}
 
 type Props = {
   kalshiBot: BotData | null;

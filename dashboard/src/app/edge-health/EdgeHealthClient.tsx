@@ -9,7 +9,7 @@ import { EmptyState } from "../components/EmptyState";
 import { StrategyBadge } from "../components/StrategyBadge";
 import { DataFreshness } from "../components/DataFreshness";
 import {
-  fetchHealth,
+  fetchEdgeHealth,
   fetchPnlSeries,
   fetchCombinedMetrics,
 } from "../../lib/api";
@@ -48,7 +48,7 @@ export default function EdgeHealthClient({
 
   const { data: health, dataUpdatedAt: healthUpdatedAt } = useQuery({
     queryKey: ["edgeHealth", mode],
-    queryFn: () => fetchHealth(),
+    queryFn: () => fetchEdgeHealth(mode),
     initialData: initialHealth,
     refetchInterval: 30_000,
   });
@@ -327,8 +327,9 @@ export default function EdgeHealthClient({
                   </div>
                   <div>
                     <div className="text-[10px] text-gray-600 uppercase mb-0.5">
-                      {s.total} Total
+                      Trades
                     </div>
+                    <div className="tabular-nums">{s.total}</div>
                   </div>
                 </div>
               </div>

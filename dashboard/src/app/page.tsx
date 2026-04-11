@@ -13,18 +13,6 @@ async function getHealth() {
   }
 }
 
-async function getMetrics() {
-  try {
-    const res = await fetch(`${baseUrl}/api/paper-trading/metrics`, {
-      cache: "no-store",
-    });
-    if (!res.ok) return null;
-    return res.json();
-  } catch {
-    return null;
-  }
-}
-
 async function getCryptoPrices() {
   try {
     const res = await fetch(`${baseUrl}/api/crypto/prices`, {

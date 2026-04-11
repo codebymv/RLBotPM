@@ -12,6 +12,8 @@ import {
   fetchRLPositions,
   fetchCryptoPrices,
 } from "../../lib/api";
+import { fmt } from "../../lib/format";
+import { Stat } from "../components/Stat";
 
 type KalshiPosition = {
   strategy: "kalshi";
@@ -73,12 +75,6 @@ function getCost(p: UnifiedPosition): number {
   return p.entry_price * p.position_size;
 }
 
-function fmt(n: number, d = 2) {
-  return n.toLocaleString("en-US", {
-    minimumFractionDigits: d,
-    maximumFractionDigits: d,
-  });
-}
 
 type Props = {
   kalshiData: { positions: Omit<KalshiPosition, "strategy">[]; count: number };
@@ -95,8 +91,8 @@ export default function PositionsClient({
   const bot = useBot();
 
   const { data: kalshiData, dataUpdatedAt: positionsUpdatedAt } = useQuery({
-    queryKey: ["kalshiPositions"],
-    queryFn: () => fetchKalshiPositions(),
+    queryKey: ["kalshiPositions", mode],
+    queryFn: () => fetchKalshiPositions(mode),
     initialData: initialKalshiData,
     refetchInterval: 15_000,
   });
@@ -396,23 +392,3 @@ export default function PositionsClient({
   );
 }
 
-function Stat({
-  label,
-  value,
-  valueClass = "",
-}: {
-  label: string;
-  value: string;
-  valueClass?: string;
-}) {
-  return (
-    <div>
-      <div className="text-[10px] text-gray-600 uppercase tracking-widest mb-1 font-mono font-bold">
-        {label}
-      </div>
-      <div className={`font-mono font-medium tabular-nums ${valueClass}`}>
-        {value}
-      </div>
-    </div>
-  );
-}

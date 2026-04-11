@@ -105,6 +105,31 @@ export function RiskStatusPanel({ risk }: Props) {
         </div>
       </div>
 
+      {(risk.current_capital != null || risk.win_rate_last_20 != null) && (
+        <div className="grid grid-cols-3 gap-3 mb-4 text-sm font-mono">
+          {risk.current_capital != null && (
+            <div>
+              <div className="text-[10px] text-gray-600 uppercase tracking-wider mb-0.5">Capital</div>
+              <div className="font-bold tabular-nums text-gray-200">${risk.current_capital.toFixed(2)}</div>
+            </div>
+          )}
+          {risk.peak_capital != null && (
+            <div>
+              <div className="text-[10px] text-gray-600 uppercase tracking-wider mb-0.5">Peak</div>
+              <div className="font-bold tabular-nums text-gray-400">${risk.peak_capital.toFixed(2)}</div>
+            </div>
+          )}
+          {risk.win_rate_last_20 != null && (
+            <div>
+              <div className="text-[10px] text-gray-600 uppercase tracking-wider mb-0.5">Win Rate (L20)</div>
+              <div className={`font-bold tabular-nums ${risk.win_rate_last_20 >= 0.5 ? "text-green-400" : "text-red-400"}`}>
+                {(risk.win_rate_last_20 * 100).toFixed(0)}%
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       {cb && (
         <>
           <BreacherBar
