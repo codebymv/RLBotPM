@@ -81,7 +81,8 @@ class CryptoTradingEnv(gym.Env):
 
         self.settings = get_settings()
         self.initial_capital = initial_capital or self.settings.INITIAL_CAPITAL
-        self.transaction_cost = transaction_cost or self.settings.TRANSACTION_COST_PCT
+        # transaction_cost param is accepted for backward compat but ignored;
+        # actual fees come from risk_config.yaml (maker_fee_pct / taker_fee_pct).
         self.max_steps = max_steps
         self.interval = interval
         self.sequence_length = max(1, int(sequence_length))
@@ -610,6 +611,8 @@ class CryptoTradingEnv(gym.Env):
             row = self._get_symbol_row(current_symbol)
             if row is None:
                 return valid
+
+            if self.entry_volatility_cap > 0:
                 volatility = abs(float(row["volatility_24h"]))
                 if volatility > self.entry_volatility_cap:
                     return valid

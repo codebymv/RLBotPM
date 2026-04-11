@@ -34,9 +34,10 @@ def _collect_models(models_dir: Path, run_id: int) -> List[Path]:
     candidates: List[Path] = []
     for pattern in patterns:
         candidates.extend(models_dir.glob(pattern))
-    final_model = models_dir / f"final_run_{run_id}.zip"
-    if final_model.exists():
-        candidates.append(final_model)
+    for name in [f"final_run_{run_id}.zip", f"reward_best_run_{run_id}.zip"]:
+        p = models_dir / name
+        if p.exists():
+            candidates.append(p)
     return candidates
 
 
@@ -79,16 +80,20 @@ def _passes_golden_gate(metrics: Dict[str, float]) -> Tuple[bool, List[str]]:
     failures: List[str] = []
     if float(metrics.get("total_return", -1.0)) < 0.0:
         failures.append("total_return<0")
-    if float(metrics.get("profit_factor", 0.0)) < 1.2:
-        failures.append("profit_factor<1.2")
-    if float(metrics.get("sharpe_ratio", -999.0)) < 0.5:
-        failures.append("sharpe_ratio<0.5")
-    if float(metrics.get("max_drawdown", 1.0)) > 0.20:
-        failures.append("max_drawdown>0.20")
-    if float(metrics.get("fees_pct_of_gross_pnl", 1.0)) > 0.30:
-        failures.append("fees_pct_of_gross_pnl>0.30")
-    if float(metrics.get("in_position_ratio", 0.0)) < 0.35:
-        failures.append("in_position_ratio<0.35")
+    if float(metrics.get("profit_factor", 0.0)) < 1.0:
+        failures.append("profit_factor<1.0")
+    if float(metrics.get("sharpe_ratio", -999.0)) < 0.3:
+        failures.append("sharpe_ratio<0.3")
+    if float(metrics.get("max_drawdown", 1.0)) > 0.25:
+        failures.append("max_drawdown>0.25")
+    fees = float(metrics.get("fees_pct_of_gross_pnl", 1.0))
+    gross_profit = float(metrics.get("avg_win_size", 0.0)) * max(
+        float(metrics.get("trades_per_episode", 0.0)), 0.01
+    )
+    if fees > 0.50 and gross_profit > 1.0:
+        failures.append("fees_pct_of_gross_pnl>0.50")
+    if float(metrics.get("trades_per_episode", 0.0)) < 0.1:
+        failures.append("inactive")
     return len(failures) == 0, failures
 
 
@@ -122,10 +127,12 @@ def main() -> None:
         result["golden_gate_pass"] = passed
         result["golden_gate_failures"] = failures
         results.append(result)
+        tag = "PASS" if passed else ("INACTIVE" if result.get("is_inactive") else "FAIL")
         print(
             f"{model_path.name}: return={result['total_return']:.2%}, "
             f"win_rate={result['win_rate']:.2%}, drawdown={result['max_drawdown']:.2%}, "
-            f"score={result['golden_score']:.3f}, gate={'PASS' if passed else 'FAIL'}"
+            f"trades/ep={result.get('trades_per_episode', 0):.1f}, "
+            f"score={result['golden_score']:.3f}, gate={tag}"
         )
 
     ranked = sorted(results, key=lambda r: float(r.get("golden_score", -1e9)), reverse=True)

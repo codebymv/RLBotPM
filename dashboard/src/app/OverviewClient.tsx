@@ -114,7 +114,6 @@ export default function OverviewClient({
     refetchInterval: 30_000,
   });
 
-  // Select data by bot — fall back to empty objects so downstream ?. access is safe
   const kalshiData = combinedMetrics?.by_strategy?.kalshi ?? null;
   const rlData = combinedMetrics?.by_strategy?.rl_crypto ?? null;
   const combinedData = combinedMetrics?.combined ?? null;
@@ -126,12 +125,6 @@ export default function OverviewClient({
         ? kalshiData
         : rlData;
 
-  // KPI semantics:
-  // - totalTrades: all records (open + settled/closed)
-  // - settledTrades: wins + losses only
-  // - settledWinRate: wins / settledTrades
-  // pnl / wins / losses come from the DB (lifetime across all sessions).
-  // currentSession comes from the JSONL log and reflects only the active run.
   const totalTrades = strategyData?.total_trades ?? 0;
   const wins = strategyData?.wins ?? 0;
   const losses = strategyData?.losses ?? 0;
@@ -149,7 +142,6 @@ export default function OverviewClient({
         ? (wins / settledTrades) * 100
         : 0;
 
-  // Recent trades: merge when "all", otherwise filter by bot
   const kalshiTrades = (kalshiData?.recent_trades || []).filter(
     (t: any) => (t.mode || "paper") === mode
   );
@@ -180,34 +172,20 @@ export default function OverviewClient({
   const showStrategyBreakdown = bot === "all";
 
   return (
-    <main className="min-h-screen bg-gray-950 text-gray-100 p-3 sm:p-4 max-w-6xl mx-auto grid-terminal">
-      {/* Header with System Status */}
-      <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between mb-6 pb-4 border-b border-gray-800/60">
+    <main className="min-h-screen bg-gray-950 text-gray-100 px-4 sm:px-6 py-6 max-w-7xl mx-auto grid-terminal">
+
+      {/* ─── Header ─── */}
+      <header className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 pb-6 mb-8 border-b border-gray-800/50">
         <div>
-          <div className="flex items-center gap-3 mb-3">
-            <Image
-              src="/rltrade-icon.png"
-              alt="RLTrade"
-              width={56}
-              height={56}
-              className="w-14 h-14"
-            />
-            <Image
-              src="/rltrade-text.png"
-              alt="RLTrade"
-              width={200}
-              height={56}
-              className="h-12 w-auto"
-            />
+          <div className="flex items-center gap-3 mb-2">
+            <Image src="/rltrade-icon.png" alt="RLTrade" width={48} height={48} className="w-12 h-12" />
+            <Image src="/rltrade-text.png" alt="RLTrade" width={180} height={48} className="h-10 w-auto" />
           </div>
-          <p className="text-gray-500 text-base font-mono tracking-wide">
+          <p className="text-gray-500 text-sm tracking-wide">
             Reinforcement Learning Crypto Prediction Market Bot
           </p>
-          <p className="text-gray-600 text-sm font-mono mt-1">
-            Kalshi · Coinbase · PPO
-          </p>
         </div>
-        <div className="flex flex-col gap-2 mt-4 sm:mt-0">
+        <div className="flex flex-col items-start sm:items-end gap-2">
           <div className="flex gap-2 items-center flex-wrap">
             <StatusPill mode={mode} />
             <DataFreshness
@@ -219,207 +197,192 @@ export default function OverviewClient({
             />
           </div>
           <div className="flex gap-2 text-xs flex-wrap">
-            <SystemStatus
-              label="API"
-              ok={health.status === "healthy"}
-              text={health.status}
-            />
-            <SystemStatus
-              label="DB"
-              ok={health.database === "connected"}
-              text={health.database || "unknown"}
-            />
+            <SystemStatus label="API" ok={health.status === "healthy"} text={health.status} />
+            <SystemStatus label="DB" ok={health.database === "connected"} text={health.database || "unknown"} />
             <BotLiveness heartbeat={heartbeat ?? null} />
           </div>
         </div>
-      </div>
+      </header>
 
-      {/* Trading Performance */}
-      <section className="mb-6">
+      {/* ─── 1. Portfolio Summary ─── */}
+      <section aria-labelledby="portfolio-heading" className="mb-10">
         <SectionHeader
-          title="Trading Performance"
+          id="portfolio-heading"
+          title="Portfolio Overview"
           subtitle={
             bot === "all"
-              ? `Combined metrics for ${mode.toUpperCase()} (all strategies)`
-              : `Performance for ${mode.toUpperCase()} · ${bot === "rl_crypto" ? "RL Crypto Bot" : "Kalshi Bot"}`
+              ? `Combined ${mode} performance across all strategies`
+              : `${bot === "rl_crypto" ? "RL Crypto" : "Kalshi"} · ${mode} mode`
           }
           actionHref={link("/positions")}
-          actionLabel="VIEW ALL POSITIONS →"
+          actionLabel="Positions →"
         />
 
         {combinedMetrics && strategyData ? (
-          <>
-            {/* Strategy breakdown when "all" */}
+          <div className="space-y-6">
+
+            {/* Hero P&L + Key Metrics */}
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+              <div className="lg:col-span-1 rounded-xl border border-gray-800/60 bg-gray-900/30 p-6 flex flex-col justify-center">
+                <div className="text-xs uppercase tracking-widest text-gray-500 mb-2 font-medium">
+                  Realized P&L
+                </div>
+                <div className={`text-4xl sm:text-5xl font-mono font-bold tabular-nums leading-tight ${pnl >= 0 ? "text-green-400" : "text-red-400"}`}>
+                  ${pnl >= 0 ? "+" : ""}{fmt(pnl)}
+                </div>
+                {sessionPnl !== null && (
+                  <div className="text-sm font-mono text-gray-500 mt-2">
+                    Current session: ${sessionPnl >= 0 ? "+" : ""}{fmt(sessionPnl)}
+                  </div>
+                )}
+              </div>
+
+              <div className="lg:col-span-2 grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <KpiCard
+                  label="Win Rate"
+                  value={settledTrades > 0 ? `${settledWinRate.toFixed(1)}%` : "—"}
+                  sublabel={settledTrades > 0 ? `${wins}W / ${losses}L` : "No settled trades"}
+                  mode="neutral"
+                />
+                <KpiCard
+                  label="Profit Factor"
+                  value={
+                    tradesSummary && tradesSummary.total_trades > 0
+                      ? tradesSummary.profit_factor === Infinity ? "∞" : fmt(tradesSummary.profit_factor)
+                      : "—"
+                  }
+                  sublabel={
+                    tradesSummary && tradesSummary.total_trades > 0
+                      ? `+$${fmt(tradesSummary.avg_profit)} / -$${fmt(Math.abs(tradesSummary.avg_loss))}`
+                      : "Avg win / loss"
+                  }
+                  mode="neutral"
+                  trend={tradesSummary && tradesSummary.profit_factor > 1.3 ? "up" : tradesSummary && tradesSummary.profit_factor < 1.0 ? "down" : "flat"}
+                />
+                <KpiCard
+                  label="Total Trades"
+                  value={totalTrades}
+                  sublabel={`${settledTrades} settled · ${openPositions} open`}
+                  mode="neutral"
+                />
+                <KpiCard
+                  label="Deployed"
+                  value={`$${fmt(openCost)}`}
+                  sublabel={`${openPositions} open position${openPositions !== 1 ? "s" : ""}`}
+                  mode="neutral"
+                />
+              </div>
+            </div>
+
+            {/* Strategy Breakdown (when viewing "all") */}
             {showStrategyBreakdown && (
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-5">
-                <div className="rounded-lg border border-purple-800/40 bg-purple-950/10 p-4">
-                  <div className="flex items-center justify-between mb-2">
-                    <StrategyBadge strategy="rl_crypto" />
-                    <span className="text-xs font-mono text-gray-500">RL Crypto Bot</span>
-                  </div>
-                  <div className="text-xl font-mono font-bold tabular-nums">
-                    ${(rlData?.realized_pnl ?? 0) >= 0 ? "+" : ""}
-                    {fmt(rlData?.realized_pnl ?? 0)}
-                  </div>
-                  <div className="text-sm font-mono text-gray-400">
-                    {((rlData?.settled_trades ?? (rlData?.wins ?? 0) + (rlData?.losses ?? 0)) || 0)} settled ·{" "}
-                    {((rlData?.win_rate ?? 0) * 100).toFixed(1)}% settled win rate
-                  </div>
-                </div>
-                <div className="rounded-lg border border-blue-800/40 bg-blue-950/10 p-4">
-                  <div className="flex items-center justify-between mb-2">
-                    <StrategyBadge strategy="kalshi" />
-                    <span className="text-xs font-mono text-gray-500">Kalshi Market Bot</span>
-                  </div>
-                  <div className="text-xl font-mono font-bold tabular-nums">
-                    ${(kalshiData?.realized_pnl ?? 0) >= 0 ? "+" : ""}
-                    {fmt(kalshiData?.realized_pnl ?? 0)}
-                  </div>
-                  <div className="text-sm font-mono text-gray-400">
-                    {((kalshiData?.settled_trades ?? (kalshiData?.wins ?? 0) + (kalshiData?.losses ?? 0)) || 0)} settled ·{" "}
-                    {((kalshiData?.win_rate ?? 0) * 100).toFixed(1)}% settled win rate
-                  </div>
-                </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <StrategyCard
+                  strategy="kalshi"
+                  label="Kalshi Prediction Markets"
+                  pnl={kalshiData?.realized_pnl ?? 0}
+                  settled={kalshiData?.settled_trades ?? (kalshiData?.wins ?? 0) + (kalshiData?.losses ?? 0)}
+                  wins={kalshiData?.wins ?? 0}
+                  losses={kalshiData?.losses ?? 0}
+                  winRate={(kalshiData?.win_rate ?? 0) * 100}
+                  openPositions={kalshiData?.open_positions ?? 0}
+                />
+                <StrategyCard
+                  strategy="rl_crypto"
+                  label="RL Crypto Spot Trading"
+                  pnl={rlData?.realized_pnl ?? 0}
+                  settled={rlData?.settled_trades ?? (rlData?.wins ?? 0) + (rlData?.losses ?? 0)}
+                  wins={rlData?.wins ?? 0}
+                  losses={rlData?.losses ?? 0}
+                  winRate={(rlData?.win_rate ?? 0) * 100}
+                  openPositions={rlData?.open_positions ?? 0}
+                />
               </div>
             )}
 
-            {/* Primary KPIs */}
-            <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 mb-5">
-              <KpiCard
-                label="Realized P&L"
-                value={`$${pnl >= 0 ? "+" : ""}${fmt(pnl)}`}
-                sublabel={
-                  sessionPnl !== null
-                    ? `This run: $${sessionPnl >= 0 ? "+" : ""}${fmt(sessionPnl)}`
-                    : undefined
-                }
-                mode={mode}
-                trend={pnl > 0 ? "up" : pnl < 0 ? "down" : "flat"}
-              />
-              <KpiCard
-                label="Total Trades (All)"
-                value={totalTrades}
-                sublabel={`${settledTrades} settled · ${openPositions} open`}
-                mode="neutral"
-              />
-              <KpiCard
-                label="Settled Win Rate"
-                value={settledTrades > 0 ? `${settledWinRate.toFixed(1)}%` : "—"}
-                sublabel={settledTrades > 0 ? `${wins}W · ${losses}L settled` : "No settled trades yet"}
-                mode="neutral"
-              />
-              <KpiCard
-                label="Open Positions"
-                value={openPositions}
-                sublabel={`$${fmt(openCost)} deployed`}
-                mode="neutral"
-              />
-              <KpiCard
-                label="Profit Factor"
-                value={
-                  tradesSummary && tradesSummary.total_trades > 0
-                    ? tradesSummary.profit_factor === Infinity
-                      ? "∞"
-                      : fmt(tradesSummary.profit_factor)
-                    : "—"
-                }
-                sublabel={
-                  tradesSummary && tradesSummary.total_trades > 0
-                    ? `avg win $${fmt(tradesSummary.avg_profit)} · avg loss $${fmt(Math.abs(tradesSummary.avg_loss))}`
-                    : "Need settled trades"
-                }
-                mode="neutral"
-                trend={
-                  tradesSummary && tradesSummary.profit_factor > 1.3
-                    ? "up"
-                    : tradesSummary && tradesSummary.profit_factor < 1.0
-                    ? "down"
-                    : "flat"
-                }
-              />
-              <KpiCard
-                label="Kalshi Settled Markets"
-                value={mktStats ? mktStats.total_markets.toLocaleString() : "—"}
-                sublabel={mktStats ? `${mktStats.total_events} events · dataset coverage` : "Kalshi dataset coverage"}
-                mode="neutral"
-              />
-            </div>
-
-            {/* Side Breakdown (Kalshi only) */}
+            {/* Side Breakdown (Kalshi BUY_NO / BUY_YES) */}
             {showSideBreakdown && (
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 {sideBreakdown.map((data: any) => {
                   const sideWins = data.wins || 0;
                   const sideTotal = data.total || 0;
                   const sideLosses = sideTotal - sideWins;
-                  const wr = sideTotal > 0 ? ((sideWins / sideTotal) * 100).toFixed(0) : "0";
+                  const wr = sideTotal > 0 ? (sideWins / sideTotal) * 100 : 0;
+                  const isNo = data.side === "no";
                   return (
                     <div
                       key={data.side}
-                      className={`rounded-lg border p-5 ${
-                        data.side === "no"
-                          ? "border-green-800/60 bg-green-950/10"
-                          : "border-red-800/60 bg-red-950/10"
+                      className={`rounded-xl border p-5 ${
+                        isNo
+                          ? "border-green-800/50 bg-green-950/10"
+                          : "border-red-800/50 bg-red-950/10"
                       }`}
                     >
-                      <div className="flex items-center justify-between mb-3">
-                        <span className="text-xs font-mono font-bold uppercase tracking-widest text-gray-400">
+                      <div className="flex items-center justify-between mb-4">
+                        <h4 className="text-sm font-bold uppercase tracking-wider text-gray-300">
                           BUY_{data.side.toUpperCase()}
-                        </span>
+                        </h4>
                         <span
-                          className={`text-[10px] font-mono font-bold px-2.5 py-1 rounded-md ${
-                            data.side === "no"
-                              ? "bg-green-900/60 text-green-300"
-                              : "bg-red-900/60 text-red-300"
+                          className={`text-xs font-mono font-bold px-3 py-1 rounded-full ${
+                            isNo ? "bg-green-900/60 text-green-300" : "bg-red-900/60 text-red-300"
                           }`}
                         >
-                          {wr}% WIN
+                          {wr.toFixed(0)}% win
                         </span>
                       </div>
-                      <div className="text-2xl font-mono font-bold mb-1">
-                        {sideWins}W / {sideLosses}L
-                      </div>
-                      <div className="text-sm font-mono text-gray-400">
-                        P&L: <span className={data.pnl >= 0 ? "text-green-400" : "text-red-400"}>
-                          ${data.pnl >= 0 ? "+" : ""}{fmt(data.pnl)}
-                        </span>
+                      <div className="flex items-baseline justify-between">
+                        <div>
+                          <div className="text-3xl font-mono font-bold tabular-nums">
+                            {sideWins}W <span className="text-gray-600">/</span> {sideLosses}L
+                          </div>
+                          <div className="text-sm font-mono text-gray-500 mt-1">
+                            {sideTotal} settled trades
+                          </div>
+                        </div>
+                        <div className="text-right">
+                          <div className={`text-2xl font-mono font-bold tabular-nums ${data.pnl >= 0 ? "text-green-400" : "text-red-400"}`}>
+                            ${data.pnl >= 0 ? "+" : ""}{fmt(data.pnl)}
+                          </div>
+                          <div className="text-xs font-mono text-gray-600 mt-1">P&L</div>
+                        </div>
                       </div>
                     </div>
                   );
                 })}
               </div>
             )}
-          </>
+          </div>
         ) : (
           <EmptyState
-            message={`No ${mode} trading data for ${bot === "all" ? "any strategy" : bot === "rl_crypto" ? "RL Crypto Bot" : "Kalshi Bot"}`}
+            message={`No ${mode} data for ${bot === "all" ? "any strategy" : bot === "rl_crypto" ? "RL Crypto" : "Kalshi"}`}
             submessage="Start the paper trader or switch modes"
           />
         )}
-
-        {/* Risk / Circuit Breaker Panel */}
-        <div className="mt-4">
-          <RiskStatusPanel risk={riskStatus ?? null} />
-        </div>
-
-        {/* Cumulative P&L Chart */}
-        {pnlSeries && pnlSeries.series && pnlSeries.series.length > 0 && (
-          <div className="mt-4">
-            <div className="text-[10px] uppercase tracking-widest text-gray-500 mb-2 font-medium">
-              Cumulative P&amp;L
-            </div>
-            <PnlChart series={pnlSeries.series} />
-          </div>
-        )}
       </section>
 
-      {/* Live Crypto Prices */}
-      <section className="mb-6">
+      {/* ─── 2. Risk & Circuit Breakers ─── */}
+      <section className="mb-10">
+        <RiskStatusPanel risk={riskStatus ?? null} />
+      </section>
+
+      {/* ─── 3. Cumulative P&L Chart ─── */}
+      {pnlSeries && pnlSeries.series && pnlSeries.series.length > 0 && (
+        <section aria-labelledby="pnl-chart-heading" className="mb-10">
+          <SectionHeader id="pnl-chart-heading" title="Cumulative P&L" subtitle="Settled trade performance over time" />
+          <div className="rounded-xl border border-gray-800/60 bg-gray-900/20 p-4 sm:p-6">
+            <PnlChart series={pnlSeries.series} height={280} />
+          </div>
+        </section>
+      )}
+
+      {/* ─── 4. Crypto Spot Prices ─── */}
+      <section aria-labelledby="crypto-heading" className="mb-10">
         <SectionHeader
+          id="crypto-heading"
           title="Crypto Spot Prices"
           subtitle="Real-time market data from Coinbase"
           actionHref={link("/crypto")}
-          actionLabel="DETAILED VIEW →"
+          actionLabel="Detailed View →"
         />
 
         {crypto && crypto.prices ? (
@@ -432,11 +395,11 @@ export default function OverviewClient({
             ).map(([asset, data]) => (
               <div
                 key={asset}
-                className="rounded-lg border border-gray-800/60 bg-gray-900/40 p-4 hover:bg-gray-900/60 transition-colors"
+                className="rounded-xl border border-gray-800/50 bg-gray-900/30 p-4 hover:bg-gray-900/50 transition-colors"
               >
                 <div className="flex items-center justify-between mb-2">
-                  <span className="font-bold text-sm font-mono">{asset}</span>
-                  <span className="text-[9px] text-gray-600 font-mono">
+                  <span className="font-bold text-sm">{asset}</span>
+                  <span className="text-[10px] text-gray-600 font-mono tabular-nums">
                     σ{((crypto.volatilities?.[asset] || 0) * 100).toFixed(0)}%
                   </span>
                 </div>
@@ -447,7 +410,7 @@ export default function OverviewClient({
                     </div>
                     {data.change_24h_pct != null && (
                       <div
-                        className={`text-xs font-mono font-bold mt-1 ${
+                        className={`text-xs font-mono font-bold mt-1.5 ${
                           data.change_24h_pct >= 0 ? "text-green-400" : "text-red-400"
                         }`}
                       >
@@ -456,15 +419,13 @@ export default function OverviewClient({
                       </div>
                     )}
                     {data.bid && data.ask ? (
-                      <div className="text-[9px] text-gray-600 mt-1.5 font-mono">
+                      <div className="text-[10px] text-gray-600 mt-1.5 font-mono tabular-nums">
                         {fmt(data.bid, 2)} / {fmt(data.ask, 2)}
                       </div>
                     ) : null}
                   </>
                 ) : (
-                  <div className="text-red-400 text-xs font-mono">
-                    {data.error || "unavailable"}
-                  </div>
+                  <div className="text-red-400 text-xs font-mono">{data.error || "unavailable"}</div>
                 )}
               </div>
             ))}
@@ -474,13 +435,14 @@ export default function OverviewClient({
         )}
       </section>
 
-      {/* Bot Operations */}
-      <section className="mb-6">
+      {/* ─── 5. Bot Configuration ─── */}
+      <section aria-labelledby="config-heading" className="mb-10">
         <SectionHeader
+          id="config-heading"
           title="Bot Configuration"
           subtitle="Strategy parameters and operational status"
           actionHref={link("/bot-status")}
-          actionLabel="FULL STATUS →"
+          actionLabel="Full Status →"
         />
 
         {botStatus ? (
@@ -502,142 +464,109 @@ export default function OverviewClient({
                   ? "BUY_BOTH"
                   : `BUY_${botStatus.strategy.side_filter.toUpperCase()}`
               }
-              sublabel={
-                botStatus.strategy.allow_buy_yes
-                  ? "BUY_YES enabled"
-                  : "BUY_YES disabled"
-              }
+              sublabel={botStatus.strategy.allow_buy_yes ? "BUY_YES enabled" : "BUY_YES disabled"}
               mode="neutral"
             />
             <KpiCard
               label="Edge Range"
-              value={`${(botStatus.strategy.min_edge * 100).toFixed(0)}-${(botStatus.strategy.max_edge * 100).toFixed(0)}%`}
-              sublabel={`Price ${botStatus.strategy.min_price}-${botStatus.strategy.max_price}¢`}
+              value={`${(botStatus.strategy.min_edge * 100).toFixed(0)}–${(botStatus.strategy.max_edge * 100).toFixed(0)}%`}
+              sublabel={`Price ${botStatus.strategy.min_price}–${botStatus.strategy.max_price}¢`}
               mode="neutral"
             />
             <KpiCard
               label="Assets Tracked"
               value={botStatus.strategy.assets.length}
-              sublabel={botStatus.strategy.assets.slice(0, 2).join(", ") + (botStatus.strategy.assets.length > 2 ? "..." : "")}
+              sublabel={botStatus.strategy.assets.slice(0, 3).join(", ") + (botStatus.strategy.assets.length > 3 ? "…" : "")}
               mode="neutral"
             />
           </div>
         ) : (
           <EmptyState message="Bot status unavailable" />
         )}
+
+        {mktStats && (
+          <div className="mt-3">
+            <KpiCard
+              label="Kalshi Dataset"
+              value={mktStats.total_markets.toLocaleString() + " markets"}
+              sublabel={`${mktStats.total_events} events · training coverage`}
+              mode="neutral"
+              className="max-w-sm"
+            />
+          </div>
+        )}
       </section>
 
-      {/* Recent Trades */}
-      <section className="mb-6">
+      {/* ─── 6. Recent Trades ─── */}
+      <section aria-labelledby="trades-heading" className="mb-10">
         <SectionHeader
-          title={`Recent ${mode.charAt(0).toUpperCase() + mode.slice(1)} Trades${bot !== "all" ? ` (${bot === "rl_crypto" ? "RL" : "Kalshi"})` : ""}`}
-          subtitle={`Latest executions in ${mode} mode`}
+          id="trades-heading"
+          title={`Recent Trades${bot !== "all" ? ` · ${bot === "rl_crypto" ? "RL Crypto" : "Kalshi"}` : ""}`}
+          subtitle={`Latest ${mode} executions`}
           actionHref={link("/positions")}
-          actionLabel="ALL POSITIONS →"
+          actionLabel="All Positions →"
         />
 
         {recentTrades.length > 0 ? (
           <>
-            {/* Desktop Table View */}
-            <div className="hidden md:block overflow-x-auto rounded-lg border border-gray-800/60 bg-gray-900/20">
+            {/* Desktop */}
+            <div className="hidden md:block rounded-xl border border-gray-800/50 bg-gray-900/20 overflow-hidden">
               <table className="w-full text-sm font-mono">
                 <thead>
-                  <tr className="text-gray-500 border-b border-gray-800/60 text-[10px] uppercase tracking-widest">
-                    {bot === "all" && <th className="text-left py-3 px-4 font-bold">Strategy</th>}
-                    <th className="text-left py-3 px-4 font-bold">Ticker</th>
-                    <th className="text-left py-3 px-4 font-bold">Side</th>
-                    <th className="text-right py-3 px-4 font-bold">Price</th>
-                    <th className="text-right py-3 px-4 font-bold">Edge</th>
-                    <th className="text-left py-3 px-4 font-bold">Type</th>
-                    <th className="text-right py-3 px-4 font-bold">Qty</th>
-                    <th className="text-right py-3 px-4 font-bold">Cost</th>
-                    <th className="text-right py-3 px-4 font-bold">Hold</th>
-                    <th className="text-left py-3 px-4 font-bold">Status</th>
-                    <th className="text-right py-3 px-4 font-bold">P&amp;L</th>
+                  <tr className="text-gray-500 border-b border-gray-800/50 text-[10px] uppercase tracking-widest">
+                    {bot === "all" && <th className="text-left py-3.5 px-5 font-bold">Bot</th>}
+                    <th className="text-left py-3.5 px-5 font-bold">Ticker</th>
+                    <th className="text-left py-3.5 px-5 font-bold">Side</th>
+                    <th className="text-right py-3.5 px-5 font-bold">Price</th>
+                    <th className="text-right py-3.5 px-5 font-bold">Edge</th>
+                    <th className="text-right py-3.5 px-5 font-bold">Qty</th>
+                    <th className="text-right py-3.5 px-5 font-bold">Cost</th>
+                    <th className="text-left py-3.5 px-5 font-bold">Status</th>
+                    <th className="text-right py-3.5 px-5 font-bold">P&amp;L</th>
                   </tr>
                 </thead>
-                <tbody>
-                  {recentTrades.slice(0, 10).map((t: any, i: number) => (
+                <tbody className="divide-y divide-gray-900/40">
+                  {recentTrades.slice(0, 12).map((t: any, i: number) => (
                     <tr
                       key={`${t.ticker ?? t.symbol}-${t.strategy ?? bot}-${i}`}
-                      className="border-b border-gray-900/40 hover:bg-gray-900/40 transition-colors"
+                      className="hover:bg-gray-900/30 transition-colors"
                     >
                       {bot === "all" && (
-                        <td className="py-3 px-4">
-                          {t.strategy ? (
-                            <StrategyBadge strategy={t.strategy} />
-                          ) : (
-                            "—"
-                          )}
+                        <td className="py-3.5 px-5">
+                          {t.strategy ? <StrategyBadge strategy={t.strategy} /> : "—"}
                         </td>
                       )}
-                      <td className="py-3 px-4 text-xs font-bold">
-                        {t.ticker ?? t.symbol}
-                      </td>
-                      <td className="py-3 px-4">
+                      <td className="py-3.5 px-5 text-xs font-bold">{t.ticker ?? t.symbol}</td>
+                      <td className="py-3.5 px-5">
                         {t.side != null ? (
                           <span
                             className={`px-2 py-0.5 rounded-md text-[9px] font-bold uppercase ${
-                              t.side === "no"
-                                ? "bg-green-900/60 text-green-300"
-                                : "bg-red-900/60 text-red-300"
+                              t.side === "no" ? "bg-green-900/50 text-green-300" : "bg-red-900/50 text-red-300"
                             }`}
                           >
                             {t.side}
                           </span>
                         ) : (
-                          <span className="text-gray-500">—</span>
-                        )}
-                      </td>
-                      <td className="py-3 px-4 text-right tabular-nums">
-                        {t.entry_price_cents != null ? `${t.entry_price_cents}¢` : t.entry_price != null ? `$${fmt(t.entry_price)}` : "—"}
-                      </td>
-                      <td className="py-3 px-4 text-right tabular-nums text-gray-400">
-                        {t.edge != null ? `${(t.edge * 100).toFixed(1)}%` : "—"}
-                      </td>
-                      <td className="py-3 px-4">
-                        {t.edge_type ? (
-                          <span className="text-[8px] uppercase font-mono text-gray-500 bg-gray-800/60 px-1.5 py-0.5 rounded">
-                            {t.edge_type}
-                          </span>
-                        ) : (
                           <span className="text-gray-600">—</span>
                         )}
                       </td>
-                      <td className="py-3 px-4 text-right tabular-nums">
-                        {t.contracts ?? 1}
+                      <td className="py-3.5 px-5 text-right tabular-nums">
+                        {t.entry_price_cents != null ? `${t.entry_price_cents}¢` : t.entry_price != null ? `$${fmt(t.entry_price)}` : "—"}
                       </td>
-                      <td className="py-3 px-4 text-right tabular-nums">
-                        ${fmt(t.cost)}
+                      <td className="py-3.5 px-5 text-right tabular-nums text-gray-400">
+                        {t.edge != null ? `${(t.edge * 100).toFixed(1)}%` : "—"}
                       </td>
-                      <td className="py-3 px-4 text-right tabular-nums text-gray-500 text-xs">
-                        {t.hold_hours != null
-                          ? t.hold_hours < 1
-                            ? `${Math.round(t.hold_hours * 60)}m`
-                            : `${t.hold_hours.toFixed(1)}h`
-                          : "—"}
-                      </td>
-                      <td className="py-3 px-4">
-                        <span
-                          className={`text-[9px] uppercase font-bold ${
-                            t.status === "open" ? "text-amber-400" : "text-gray-500"
-                          }`}
-                        >
+                      <td className="py-3.5 px-5 text-right tabular-nums">{t.contracts ?? 1}</td>
+                      <td className="py-3.5 px-5 text-right tabular-nums">${fmt(t.cost)}</td>
+                      <td className="py-3.5 px-5">
+                        <span className={`text-[10px] uppercase font-bold ${t.status === "open" ? "text-amber-400" : "text-gray-500"}`}>
                           {t.status ?? "—"}
                         </span>
                       </td>
-                      <td
-                        className={`py-3 px-4 text-right font-bold tabular-nums ${
-                          t.pnl != null && t.pnl > 0
-                            ? "text-green-400"
-                            : t.pnl != null && t.pnl < 0
-                              ? "text-red-400"
-                              : "text-gray-400"
-                        }`}
-                      >
-                        {t.pnl != null
-                          ? `$${t.pnl >= 0 ? "+" : ""}${fmt(t.pnl)}`
-                          : "—"}
+                      <td className={`py-3.5 px-5 text-right font-bold tabular-nums ${
+                        t.pnl != null && t.pnl > 0 ? "text-green-400" : t.pnl != null && t.pnl < 0 ? "text-red-400" : "text-gray-500"
+                      }`}>
+                        {t.pnl != null ? `$${t.pnl >= 0 ? "+" : ""}${fmt(t.pnl)}` : "—"}
                       </td>
                     </tr>
                   ))}
@@ -645,78 +574,48 @@ export default function OverviewClient({
               </table>
             </div>
 
-            {/* Mobile Card View */}
+            {/* Mobile */}
             <div className="md:hidden space-y-3">
-              {recentTrades.slice(0, 10).map((t: any, i: number) => (
+              {recentTrades.slice(0, 8).map((t: any, i: number) => (
                 <div
-                  key={`${t.ticker ?? t.symbol}-${t.strategy ?? bot}-${i}`}
-                  className="rounded-lg border border-gray-800/60 bg-gray-900/20 p-4"
+                  key={`${t.ticker ?? t.symbol}-${t.strategy ?? bot}-m-${i}`}
+                  className="rounded-xl border border-gray-800/50 bg-gray-900/20 p-4"
                 >
                   <div className="flex items-start justify-between mb-3">
-                    <div className="flex-1">
+                    <div>
                       <div className="flex items-center gap-2 flex-wrap mb-1">
-                        {bot === "all" && t.strategy && (
-                          <StrategyBadge strategy={t.strategy} />
-                        )}
-                        <div className="font-mono text-sm font-bold">
-                          {t.ticker ?? t.symbol}
-                        </div>
+                        {bot === "all" && t.strategy && <StrategyBadge strategy={t.strategy} />}
+                        <span className="font-mono text-sm font-bold">{t.ticker ?? t.symbol}</span>
                       </div>
-                      {t.side != null ? (
+                      {t.side != null && (
                         <span
                           className={`inline-block px-2 py-0.5 rounded-md text-[9px] font-bold uppercase ${
-                            t.side === "no"
-                              ? "bg-green-900/60 text-green-300"
-                              : "bg-red-900/60 text-red-300"
+                            t.side === "no" ? "bg-green-900/50 text-green-300" : "bg-red-900/50 text-red-300"
                           }`}
                         >
                           {t.side}
                         </span>
-                      ) : (
-                        <span className="text-gray-500 text-[9px]">—</span>
                       )}
                     </div>
-                    <div
-                      className={`text-lg font-mono font-bold tabular-nums ${
-                        t.pnl != null && t.pnl > 0
-                          ? "text-green-400"
-                          : t.pnl != null && t.pnl < 0
-                            ? "text-red-400"
-                            : "text-gray-400"
-                      }`}
-                    >
-                      {t.pnl != null
-                        ? `$${t.pnl >= 0 ? "+" : ""}${fmt(t.pnl)}`
-                        : "—"}
+                    <div className={`text-lg font-mono font-bold tabular-nums ${
+                      t.pnl != null && t.pnl > 0 ? "text-green-400" : t.pnl != null && t.pnl < 0 ? "text-red-400" : "text-gray-500"
+                    }`}>
+                      {t.pnl != null ? `$${t.pnl >= 0 ? "+" : ""}${fmt(t.pnl)}` : "—"}
                     </div>
                   </div>
-                  <div className="grid grid-cols-2 gap-3 text-sm font-mono">
+                  <div className="grid grid-cols-3 gap-3 text-sm font-mono">
                     <div>
-                      <div className="text-[10px] text-gray-600 uppercase mb-0.5">
-                        Price
-                      </div>
+                      <div className="text-[10px] text-gray-600 uppercase mb-0.5">Price</div>
                       <div className="tabular-nums">
                         {t.entry_price_cents != null ? `${t.entry_price_cents}¢` : t.entry_price != null ? `$${fmt(t.entry_price)}` : "—"}
                       </div>
                     </div>
                     <div>
-                      <div className="text-[10px] text-gray-600 uppercase mb-0.5">
-                        Edge
-                      </div>
-                      <div className="tabular-nums text-gray-400">
-                        {t.edge != null ? `${(t.edge * 100).toFixed(1)}%` : "—"}
-                      </div>
-                    </div>
-                    <div>
-                      <div className="text-[10px] text-gray-600 uppercase mb-0.5">
-                        Qty
-                      </div>
+                      <div className="text-[10px] text-gray-600 uppercase mb-0.5">Qty</div>
                       <div className="tabular-nums">{t.contracts ?? 1}</div>
                     </div>
                     <div>
-                      <div className="text-[10px] text-gray-600 uppercase mb-0.5">
-                        Cost
-                      </div>
+                      <div className="text-[10px] text-gray-600 uppercase mb-0.5">Cost</div>
                       <div className="tabular-nums">${fmt(t.cost)}</div>
                     </div>
                   </div>
@@ -732,6 +631,59 @@ export default function OverviewClient({
         )}
       </section>
     </main>
+  );
+}
+
+/* ─── Local Components ─── */
+
+function StrategyCard({
+  strategy,
+  label,
+  pnl,
+  settled,
+  wins,
+  losses,
+  winRate,
+  openPositions,
+}: {
+  strategy: "kalshi" | "rl_crypto";
+  label: string;
+  pnl: number;
+  settled: number;
+  wins: number;
+  losses: number;
+  winRate: number;
+  openPositions: number;
+}) {
+  const isKalshi = strategy === "kalshi";
+  return (
+    <div
+      className={`rounded-xl border p-5 ${
+        isKalshi ? "border-blue-800/40 bg-blue-950/10" : "border-purple-800/40 bg-purple-950/10"
+      }`}
+    >
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center gap-2.5">
+          <StrategyBadge strategy={strategy} />
+          <span className="text-sm font-medium text-gray-300">{label}</span>
+        </div>
+        {openPositions > 0 && (
+          <span className="text-[10px] font-mono text-amber-400 bg-amber-900/30 px-2 py-0.5 rounded-full">
+            {openPositions} open
+          </span>
+        )}
+      </div>
+      <div className={`text-3xl font-mono font-bold tabular-nums ${pnl >= 0 ? "text-green-400" : "text-red-400"}`}>
+        ${pnl >= 0 ? "+" : ""}{fmt(pnl)}
+      </div>
+      <div className="flex items-center gap-4 mt-3 text-sm font-mono text-gray-400">
+        <span>{settled} settled</span>
+        <span className="text-gray-700">·</span>
+        <span>{wins}W / {losses}L</span>
+        <span className="text-gray-700">·</span>
+        <span>{winRate.toFixed(1)}%</span>
+      </div>
+    </div>
   );
 }
 
@@ -761,11 +713,7 @@ function BotLiveness({ heartbeat }: { heartbeat: import("../lib/api").HeartbeatR
   const isAlive = heartbeat.is_alive;
   const secs = heartbeat.seconds_since_heartbeat;
   const agoStr =
-    secs == null
-      ? ""
-      : secs < 120
-      ? `${Math.round(secs)}s ago`
-      : `${Math.round(secs / 60)}m ago`;
+    secs == null ? "" : secs < 120 ? `${Math.round(secs)}s ago` : `${Math.round(secs / 60)}m ago`;
 
   return (
     <span
@@ -773,9 +721,7 @@ function BotLiveness({ heartbeat }: { heartbeat: import("../lib/api").HeartbeatR
         isAlive ? "bg-green-900/40 text-green-400" : "bg-red-900/40 text-red-400"
       }`}
     >
-      <span
-        className={`w-1.5 h-1.5 rounded-full ${isAlive ? "bg-green-400 animate-pulse" : "bg-red-400"}`}
-      />
+      <span className={`w-1.5 h-1.5 rounded-full ${isAlive ? "bg-green-400 animate-pulse" : "bg-red-400"}`} />
       Bot: {isAlive ? "live" : `dead${agoStr ? ` · ${agoStr}` : ""}`}
     </span>
   );

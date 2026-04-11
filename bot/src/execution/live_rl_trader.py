@@ -106,10 +106,13 @@ class LiveRLPaperTrader:
         self.position_sizer = PositionSizer(kelly_fraction=self.base_kelly_fraction)
         self.adaptive_breaker = AdaptiveCircuitBreaker()
 
-        # Transaction costs
+        # Transaction costs — mirrors gym_env.py's maker/taker model
         tx_costs = self.risk_config.get("transaction_costs", {})
-        self.base_transaction_cost = float(
-            tx_costs.get("base_cost_pct", self.settings.TRANSACTION_COST_PCT)
+        self.order_type = str(tx_costs.get("default_order_type", "taker"))
+        self.taker_fee_pct = float(tx_costs.get("taker_fee_pct", 0.001))
+        self.maker_fee_pct = float(tx_costs.get("maker_fee_pct", 0.0005))
+        self.base_transaction_cost = (
+            self.maker_fee_pct if self.order_type == "maker" else self.taker_fee_pct
         )
         self.max_slippage_pct = float(
             self.risk_config.get("market_requirements", {}).get("max_slippage_pct", 0.02)
@@ -1054,11 +1057,38 @@ class LiveRLPaperTrader:
     # ------------------------------------------------------------------
 
     def _load_reward_config(self) -> Dict:
-        config_path = Path(__file__).resolve().parents[3] / "shared" / "config" / "reward_config.yaml"
+        """Load reward config with profile merge, matching gym_env.py behavior."""
+        reward_config_path = Path(__file__).resolve().parents[3] / "shared" / "config" / "reward_config.yaml"
+        model_config_path = Path(__file__).resolve().parents[3] / "shared" / "config" / "model_config.yaml"
         try:
-            with config_path.open("r", encoding="utf-8") as f:
-                data = yaml.safe_load(f) or {}
-            return data.get("reward_weights", {})
+            data = {}
+            if reward_config_path.exists():
+                with reward_config_path.open("r", encoding="utf-8") as f:
+                    data = yaml.safe_load(f) or {}
+
+            model_config_data = {}
+            if model_config_path.exists():
+                with model_config_path.open("r", encoding="utf-8") as f:
+                    model_config_data = yaml.safe_load(f) or {}
+
+            base_weights = data.get("reward_weights", {})
+
+            selected_profile = (
+                os.environ.get("REWARD_PROFILE")
+                or model_config_data.get("environment", {}).get("reward_profile")
+                or ""
+            )
+            profile_overrides = {}
+            profiles = data.get("profiles", {}) or {}
+            if selected_profile and selected_profile in profiles:
+                profile_overrides = profiles[selected_profile].get("reward_weights", {}) or {}
+                logger.info("Live paper: using reward profile '%s'", selected_profile)
+
+            merged = dict(base_weights)
+            for k, v in profile_overrides.items():
+                if v is not None:
+                    merged[k] = v
+            return merged
         except FileNotFoundError:
             return {}
 

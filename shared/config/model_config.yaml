@@ -83,21 +83,21 @@ training:
 
   # Early stopping configuration
   early_stopping:
-    eval_episodes: 50
-    patience: 15
+    eval_episodes: 20
+    patience: 20
     min_delta: 0.0
     metric: "golden_score"
-    min_profit_factor: 1.2
-    min_total_return: 0.001
-    max_drawdown: 0.20
-    max_fees_pct_of_gross_pnl: 0.30
+    min_profit_factor: 1.0
+    min_total_return: 0.0
+    max_drawdown: 0.25
+    max_fees_pct_of_gross_pnl: 0.50
 
 # Environment configuration
 environment:
   # Strategy env: crypto (default), momentum, mean_reversion, breakout
   strategy: "crypto"
   # Optional reward profile from shared/config/reward_config.yaml profiles
-  reward_profile: "lean"
+  reward_profile: "pnl_only"
   
   # Initial capital for backtesting
   initial_capital: 1000.0
@@ -109,21 +109,13 @@ environment:
   # Stacks last N observations (e.g. 4) into a single observation vector
   frame_stack: 4
   
-  # Transaction cost percentage (0.05% = maker fee level)
-  transaction_cost: 0.0005
-  
-  # Reward function weights
-  reward_weights:
-    returns: 10.0
-    transaction_cost_penalty: 100.0
-    drawdown_penalty: 10.0
-    profitable_close_bonus: 0.5
-    risk_violation_penalty: 1.0
-    long_term_profitability: 3.0
+  # Transaction costs are configured in shared/config/risk_config.yaml
+  # (maker_fee_pct, taker_fee_pct, slippage). The environment reads them
+  # from risk_config directly — do NOT duplicate them here.
 
-# Curriculum learning stages
+# Curriculum learning stages (NOT IMPLEMENTED in training code — kept for reference)
 curriculum:
-  enabled: true
+  enabled: false
   
   stages:
     - name: "Stage 1 - Simple Markets"

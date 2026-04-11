@@ -83,18 +83,17 @@ transaction_costs:
   default_order_type: "maker"
   
   # Taker fee (market orders) - immediate execution
-  taker_fee_pct: 0.001  # 0.10% - Coinbase/Binance taker
-  
+  taker_fee_pct: 0.001  # 0.10% - Coinbase Advanced taker
+
   # Maker fee (limit orders) - posts liquidity
-  # Real exchange rates: Bybit 0.01%, dYdX 0.02%, Hyperliquid 0.01%
-  maker_fee_pct: 0.0001  # 0.01% - competitive maker rate
-  
+  # Coinbase Advanced maker: 0.04-0.06% depending on tier
+  maker_fee_pct: 0.0005  # 0.05% - realistic Coinbase Advanced maker rate
+
   # Maker order fill probability (limit orders may not fill)
-  # Higher = more fills, but less realistic
-  maker_fill_probability: 0.85  # 85% of maker orders fill
+  maker_fill_probability: 0.65  # Conservative: queue position uncertainty
 
   # If maker misses, optionally fall back to taker to capture strong signals
-  maker_fallback_to_taker: true
+  maker_fallback_to_taker: false
   maker_fallback_fill_probability: 0.80
   
   # Slippage model

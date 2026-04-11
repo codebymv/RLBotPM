@@ -257,10 +257,8 @@ class CheckpointCallback(BaseCallback):
         """
         # Generate filename - include step number for best models to preserve history
         if is_best:
-            # Save both a versioned copy and update "current best" pointer
             filename = f"best_model_run_{self.training_run_id}_step_{self.n_calls}"
-            # Also save to a consistent "latest best" location
-            latest_filename = f"best_model_run_{self.training_run_id}"
+            latest_filename = f"reward_best_run_{self.training_run_id}"
             latest_filepath = self.save_path / latest_filename
             self.model.save(str(latest_filepath))
         else:
@@ -354,6 +352,7 @@ class EarlyStoppingCallback(BaseCallback):
         self.max_fees_pct_of_gross_pnl = float(max_fees_pct_of_gross_pnl)
 
         self.best_metric = -np.inf
+        self.best_gated_metric = -np.inf
         self.patience_counter = 0
 
     def _compute_metric(self, metrics: Dict[str, float]) -> float:
@@ -362,8 +361,6 @@ class EarlyStoppingCallback(BaseCallback):
         Supports direct metric lookup and a composite golden score.
         """
         if self.metric_name == "golden_score":
-            # Composite objective aligned with durable profitability:
-            # reward return/sharpe/profit_factor, penalize fees/drawdown.
             sharpe = float(metrics.get("sharpe_ratio", 0.0))
             total_return = float(metrics.get("total_return", 0.0))
             profit_factor = float(metrics.get("profit_factor", 0.0))
@@ -380,14 +377,26 @@ class EarlyStoppingCallback(BaseCallback):
             )
         return float(metrics.get(self.metric_name, -np.inf))
 
-    def _passes_hard_gates(self, metrics: Dict[str, float]) -> bool:
-        """Hard constraints to avoid selecting brittle checkpoints."""
-        return (
-            float(metrics.get("profit_factor", 0.0)) >= self.min_profit_factor
-            and float(metrics.get("total_return", -1.0)) >= self.min_total_return
-            and float(metrics.get("max_drawdown", 1.0)) <= self.max_drawdown
-            and float(metrics.get("fees_pct_of_gross_pnl", 1.0)) <= self.max_fees_pct_of_gross_pnl
+    def _passes_hard_gates(self, metrics: Dict[str, float]) -> tuple:
+        """Hard constraints for deployment eligibility.
+
+        Returns (passed, failures) where failures lists the specific
+        gates that were not met.
+        """
+        failures = []
+        if float(metrics.get("profit_factor", 0.0)) < self.min_profit_factor:
+            failures.append(f"profit_factor={metrics.get('profit_factor', 0):.3f}<{self.min_profit_factor}")
+        if float(metrics.get("total_return", -1.0)) < self.min_total_return:
+            failures.append(f"total_return={metrics.get('total_return', -1):.4f}<{self.min_total_return}")
+        if float(metrics.get("max_drawdown", 1.0)) > self.max_drawdown:
+            failures.append(f"max_drawdown={metrics.get('max_drawdown', 1):.4f}>{self.max_drawdown}")
+        fees = float(metrics.get("fees_pct_of_gross_pnl", 1.0))
+        gross_profit = float(metrics.get("avg_win_size", 0.0)) * max(
+            float(metrics.get("trades_per_episode", 0.0)), 0.01
         )
+        if fees > self.max_fees_pct_of_gross_pnl and gross_profit > 1.0:
+            failures.append(f"fees_pct={fees:.2%}>{self.max_fees_pct_of_gross_pnl:.0%}")
+        return len(failures) == 0, failures
 
     def _on_step(self) -> bool:
         if self.n_calls % self.eval_frequency != 0:
@@ -396,14 +405,12 @@ class EarlyStoppingCallback(BaseCallback):
         temp_path = self.save_path / f"early_stop_eval_run_{self.training_run_id}_step_{self.n_calls}"
         self.model.save(str(temp_path))
 
-        # Use strategy-specific evaluator
         if self.strategy == "kalshi":
             evaluator = KalshiEvaluator(
                 model_path=str(temp_path),
                 policy_type=self.policy_type,
             )
             metrics = evaluator.evaluate(num_episodes=self.eval_episodes, deterministic=True)
-            current_metric = self._compute_metric(metrics)
         else:
             evaluator = Evaluator(
                 model_path=str(temp_path),
@@ -412,38 +419,54 @@ class EarlyStoppingCallback(BaseCallback):
                 arbitrage_enabled=self.arbitrage_enabled,
             )
             metrics = evaluator.evaluate(num_episodes=self.eval_episodes, deterministic=True)
-            current_metric = self._compute_metric(metrics)
 
-        if not self._passes_hard_gates(metrics):
+        current_metric = self._compute_metric(metrics)
+        passes_gates, gate_failures = self._passes_hard_gates(metrics)
+
+        trades_per_ep = float(metrics.get("trades_per_episode", 0.0))
+        is_inactive = trades_per_ep < 0.1
+
+        if is_inactive:
             logger.info(
-                "Early stopping gate reject at step %s: return=%.4f pf=%.4f drawdown=%.4f fees=%.4f",
-                self.n_calls,
+                "Eval step %s: INACTIVE (%.1f trades/ep) — score=%.4f",
+                self.n_calls, trades_per_ep, current_metric,
+            )
+        elif not passes_gates:
+            logger.info(
+                "Eval step %s: gate reject [%s] — score=%.4f ret=%.4f pf=%.2f dd=%.4f fees=%.2f%%",
+                self.n_calls, ", ".join(gate_failures), current_metric,
                 float(metrics.get("total_return", 0.0)),
                 float(metrics.get("profit_factor", 0.0)),
                 float(metrics.get("max_drawdown", 0.0)),
-                float(metrics.get("fees_pct_of_gross_pnl", 0.0)),
+                float(metrics.get("fees_pct_of_gross_pnl", 0.0)) * 100,
             )
-            current_metric = -np.inf
 
-        if current_metric > self.best_metric + self.min_delta:
+        improved = current_metric > self.best_metric + self.min_delta
+        if improved:
             self.best_metric = current_metric
             self.patience_counter = 0
-            best_path = self.save_path / f"best_model_run_{self.training_run_id}"
-            self.model.save(str(best_path))
+            eval_best_path = self.save_path / f"eval_best_run_{self.training_run_id}"
+            self.model.save(str(eval_best_path))
             logger.info(
-                "Early stopping: new best %s=%.4f at step %s",
-                self.metric_name,
-                current_metric,
-                self.n_calls,
+                "Eval step %s: new eval-best %s=%.4f%s",
+                self.n_calls, self.metric_name, current_metric,
+                " (gates: PASS)" if passes_gates else f" (gates: FAIL [{', '.join(gate_failures)}])",
             )
         else:
             self.patience_counter += 1
             logger.info(
-                "Early stopping: no improvement (%s=%s), patience %s/%s",
-                self.metric_name,
-                current_metric,
-                self.patience_counter,
-                self.patience,
+                "Eval step %s: no improvement (%s=%.4f vs best=%.4f), patience %s/%s",
+                self.n_calls, self.metric_name, current_metric,
+                self.best_metric, self.patience_counter, self.patience,
+            )
+
+        if passes_gates and current_metric > self.best_gated_metric + self.min_delta:
+            self.best_gated_metric = current_metric
+            best_path = self.save_path / f"best_model_run_{self.training_run_id}"
+            self.model.save(str(best_path))
+            logger.info(
+                "Eval step %s: new gated-best %s=%.4f — saved for deployment",
+                self.n_calls, self.metric_name, current_metric,
             )
 
         if self.patience_counter >= self.patience:

@@ -88,3 +88,29 @@ profiles:
       manual_exit_bonus: 0.10
       auto_exit_penalty: 0.35
       episode_end_close_penalty_scale: 0.8
+
+  pnl_only:
+    reward_weights:
+      # PnL-only profile: strip auxiliary shaping, reward only real economics.
+      # Rationale: see RL_PROFITABILITY_AUDIT.md §2 (Reward vs Real-PnL Alignment)
+      portfolio_step_scale: 5.0
+      step_return_scale: 0.0
+      hold_pnl_step_scale: 0.0
+      carry_bonus_scale: 0.0
+      carry_bonus_cap: 0.0
+      fee_penalty_scale: 10.0
+      idle_base: 0.0
+      idle_step: 0.0
+      idle_cap: 0.0
+      manual_exit_bonus: 0.0
+      sell_profit_bonus: 0.0
+      sell_profit_bonus_scale: 0.0
+      sell_loss_bonus: 0.0
+      sharpe_bonus_scale: 0.0
+      sharpe_bonus_cap: 0.0
+      episode_pnl_bonus_scale: 1.0
+      episode_end_close_penalty_scale: 0.3
+      auto_exit_penalty: 0.3
+      loss_aversion_scale: 1.5
+      blocked_action_penalty: 0.5
+      base_penalty: 0.02

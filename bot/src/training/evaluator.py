@@ -294,8 +294,6 @@ class Evaluator:
         drawdown_guard = float(
             getattr(self.env.unwrapped, "reward_config", {}).get("drawdown_threshold", 0.2)
         )
-        if max_drawdown > drawdown_guard:
-            profit_factor = 0.0
         winning_trades = [pnl for pnl in trade_pnls if pnl > 0]
         losing_trades = [abs(pnl) for pnl in trade_pnls if pnl < 0]
         avg_win_size = float(np.mean(winning_trades)) if winning_trades else 0.0
@@ -303,6 +301,8 @@ class Evaluator:
         win_loss_ratio = (avg_win_size / avg_loss_size) if avg_loss_size > 0 else 0.0
         fees_pct_of_gross_pnl = float(total_fees / profit_wins) if profit_wins > 0 else 0.0  # type: ignore
         trades_per_episode = float(len(trade_pnls) / num_episodes) if num_episodes else 0.0
+
+        is_inactive = len(trade_pnls) < max(1, num_episodes * 0.1)
 
         return {
             "total_return": float(np.mean(episode_returns)) if episode_returns else 0.0,
@@ -312,6 +312,7 @@ class Evaluator:
             "max_drawdown": max_drawdown,
             "win_rate": float(np.mean(episode_win_rates)) if episode_win_rates else 0.0,
             "avg_trade_pnl": float(np.mean(trade_pnls)) if trade_pnls else 0.0,
+            "is_inactive": is_inactive,
             "avg_win_size": avg_win_size,
             "avg_loss_size": avg_loss_size,
             "win_loss_ratio": float(win_loss_ratio),

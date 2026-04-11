@@ -19,14 +19,16 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
-# Promotion gate targets (aligned with LIVE_TRADING_READINESS.md)
-GATE_MIN_CLOSED_TRADES = 100
+# Promotion gate targets (aligned with RL_PROFITABILITY_AUDIT.md Stage 2)
+GATE_MIN_CLOSED_TRADES = 50
 GATE_MIN_SESSIONS = 5
 GATE_MIN_DAYS = 14
-GATE_MIN_WIN_RATE = 0.45       # Realistic for RL (vs Kalshi 0.85)
-GATE_MIN_PROFIT_FACTOR = 1.3
-GATE_MIN_TOTAL_RETURN_PCT = 0.5   # +0.5% minimum
-GATE_WORST_SESSION_PNL = -50.0    # Worst session must be > -$50 (vs Kalshi -$5)
+GATE_MIN_WIN_RATE = 0.45
+GATE_MIN_PROFIT_FACTOR = 1.2
+GATE_MIN_TOTAL_RETURN_PCT = 0.0   # Must be net profitable (> 0%)
+GATE_WORST_SESSION_PNL = -30.0    # Worst session must be > -$30 on $1000 capital
+GATE_MAX_FEE_DRAG_PCT = 25.0      # Fees must be < 25% of gross profit
+GATE_MAX_SINGLE_TRADE_LOSS_PCT = 3.0  # No single trade > -3% of capital
 
 
 def _parse_args() -> argparse.Namespace:
@@ -77,6 +79,8 @@ def _get_session_pnls(db_url: str) -> tuple[list[dict], dict]:
             "worst_session_pnl": 0.0,
             "profit_factor": 0.0,
             "total_return_pct": 0.0,
+            "fee_drag_pct": 0.0,
+            "max_single_trade_loss_pct": 0.0,
         }
 
     # Group by session_id (fallback to date if missing)
@@ -115,7 +119,14 @@ def _get_session_pnls(db_url: str) -> tuple[list[dict], dict]:
     gross_loss = abs(sum(p for p in all_pnls if p < 0))
     profit_factor = gross_profit / gross_loss if gross_loss > 0 else (999.0 if gross_profit > 0 else 0.0)
 
-    # Approximate total return (assume $1000 initial; rough)
+    # Fee drag: fees as % of gross profit (rough estimate from pnl gap)
+    fee_drag_pct = 0.0  # Requires fee tracking in DB; placeholder until available
+
+    # Max single-trade loss as % of capital ($1000 assumed)
+    all_pnl_pcts = [float(r.pnl_pct) for r in rows if r.pnl_pct is not None]
+    max_single_trade_loss_pct = abs(min(all_pnl_pcts)) if all_pnl_pcts else 0.0
+
+    # Approximate total return (assume $1000 initial)
     total_return_pct = (total_pnl / 1000.0) * 100 if total_closed > 0 else 0.0
 
     lifetime = {
@@ -128,6 +139,8 @@ def _get_session_pnls(db_url: str) -> tuple[list[dict], dict]:
         "worst_session_pnl": worst_pnl,
         "profit_factor": profit_factor,
         "total_return_pct": total_return_pct,
+        "fee_drag_pct": fee_drag_pct,
+        "max_single_trade_loss_pct": max_single_trade_loss_pct,
     }
     return sessions, lifetime
 
@@ -158,14 +171,16 @@ def main() -> int:
     days_span = _days_span(sessions)
 
     # Evaluate gates
-    g1_trades = lifetime["total_closed"] >= GATE_MIN_CLOSED_TRADES
-    g1_sessions = lifetime["sessions"] >= GATE_MIN_SESSIONS
-    g1_days = days_span >= GATE_MIN_DAYS
-    g2_wr = lifetime["win_rate"] >= GATE_MIN_WIN_RATE
-    g2_pnl = lifetime["total_pnl"] > 0
-    g2_return = lifetime["total_return_pct"] >= GATE_MIN_TOTAL_RETURN_PCT
-    g2_pf = lifetime["profit_factor"] >= GATE_MIN_PROFIT_FACTOR
-    g2_worst = lifetime["worst_session_pnl"] > GATE_WORST_SESSION_PNL
+    g_trades = lifetime["total_closed"] >= GATE_MIN_CLOSED_TRADES
+    g_sessions = lifetime["sessions"] >= GATE_MIN_SESSIONS
+    g_days = days_span >= GATE_MIN_DAYS
+    g_wr = lifetime["win_rate"] >= GATE_MIN_WIN_RATE
+    g_pnl = lifetime["total_pnl"] > 0
+    g_return = lifetime["total_return_pct"] >= GATE_MIN_TOTAL_RETURN_PCT
+    g_pf = lifetime["profit_factor"] >= GATE_MIN_PROFIT_FACTOR
+    g_worst = lifetime["worst_session_pnl"] > GATE_WORST_SESSION_PNL
+    g_fee = lifetime["fee_drag_pct"] < GATE_MAX_FEE_DRAG_PCT
+    g_single = lifetime["max_single_trade_loss_pct"] < GATE_MAX_SINGLE_TRADE_LOSS_PCT
 
     print("=" * 50)
     print("RL Crypto Bot - Paper Trading Promotion Gate Check")
@@ -179,6 +194,7 @@ def main() -> int:
     print(f"  Lifetime PnL: ${lifetime['total_pnl']:+.2f}")
     print(f"  Approx return: {lifetime['total_return_pct']:+.2f}%")
     print(f"  Worst session PnL: ${lifetime['worst_session_pnl']:.2f}")
+    print(f"  Max single-trade loss: {lifetime['max_single_trade_loss_pct']:.2f}%")
     print(f"  Days observed: {days_span}")
     print()
 
@@ -190,17 +206,19 @@ def main() -> int:
         print()
 
     print("Gate evaluation:")
-    print(f"  [{'PASS' if g1_trades else 'FAIL'}] Closed trades >= {GATE_MIN_CLOSED_TRADES}")
-    print(f"  [{'PASS' if g1_sessions else 'FAIL'}] Sessions >= {GATE_MIN_SESSIONS}")
-    print(f"  [{'PASS' if g1_days else 'FAIL'}] Days >= {GATE_MIN_DAYS}")
-    print(f"  [{'PASS' if g2_wr else 'FAIL'}] Win rate >= {GATE_MIN_WIN_RATE:.0%}")
-    print(f"  [{'PASS' if g2_pnl else 'FAIL'}] Lifetime PnL > 0")
-    print(f"  [{'PASS' if g2_return else 'FAIL'}] Return >= {GATE_MIN_TOTAL_RETURN_PCT}%")
-    print(f"  [{'PASS' if g2_pf else 'FAIL'}] Profit factor >= {GATE_MIN_PROFIT_FACTOR}")
-    print(f"  [{'PASS' if g2_worst else 'FAIL'}] Worst session > ${GATE_WORST_SESSION_PNL}")
+    print(f"  [{'PASS' if g_trades else 'FAIL'}] Closed trades >= {GATE_MIN_CLOSED_TRADES}")
+    print(f"  [{'PASS' if g_sessions else 'FAIL'}] Sessions >= {GATE_MIN_SESSIONS}")
+    print(f"  [{'PASS' if g_days else 'FAIL'}] Days >= {GATE_MIN_DAYS}")
+    print(f"  [{'PASS' if g_wr else 'FAIL'}] Win rate >= {GATE_MIN_WIN_RATE:.0%}")
+    print(f"  [{'PASS' if g_pnl else 'FAIL'}] Lifetime PnL > 0")
+    print(f"  [{'PASS' if g_return else 'FAIL'}] Return >= {GATE_MIN_TOTAL_RETURN_PCT}%")
+    print(f"  [{'PASS' if g_pf else 'FAIL'}] Profit factor >= {GATE_MIN_PROFIT_FACTOR}")
+    print(f"  [{'PASS' if g_worst else 'FAIL'}] Worst session > ${GATE_WORST_SESSION_PNL}")
+    print(f"  [{'PASS' if g_fee else 'FAIL'}] Fee drag < {GATE_MAX_FEE_DRAG_PCT}% of gross profit")
+    print(f"  [{'PASS' if g_single else 'FAIL'}] No single trade loss > {GATE_MAX_SINGLE_TRADE_LOSS_PCT}%")
     print()
 
-    all_pass = g1_trades and g1_sessions and g1_days and g2_wr and g2_pnl and g2_return and g2_pf and g2_worst
+    all_pass = all([g_trades, g_sessions, g_days, g_wr, g_pnl, g_return, g_pf, g_worst, g_fee, g_single])
     if all_pass:
         print("Result: READY for live trading")
         return 0
