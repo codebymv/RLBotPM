@@ -52,10 +52,12 @@ class OrderType(Enum):
 class OrderStatus(Enum):
     """Order status."""
     PENDING = "pending"
+    RESTING = "resting"
     OPEN = "open"
     FILLED = "filled"
     PARTIALLY_FILLED = "partially_filled"
     CANCELED = "canceled"
+    CANCELLED = "cancelled"
     EXPIRED = "expired"
 
 
