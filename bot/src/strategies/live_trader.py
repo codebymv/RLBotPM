@@ -146,11 +146,33 @@ class LivePortfolio:
         return "\n".join(lines)
 
 
+def _push_event_to_api(event: Dict) -> None:
+    """Fire-and-forget POST of a trade event to the remote API."""
+    import urllib.request
+
+    api_url = (
+        os.getenv("API_BASE_URL")
+        or os.getenv("NEXT_PUBLIC_API_URL")
+        or "http://localhost:8000"
+    ).rstrip("/")
+    url = f"{api_url}/api/live-trades"
+    body = json.dumps(event, default=str).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=body, headers={"Content-Type": "application/json"}, method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5):
+            pass
+    except Exception:
+        pass
+
+
 def _log_event(log_path: Path, event: Dict):
-    """Append a JSON event to the live trade log."""
+    """Append a JSON event to the live trade log and push to remote API."""
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with open(log_path, "a") as f:
         f.write(json.dumps(event, default=str) + "\n")
+    _push_event_to_api(event)
 
 
 def _check_live_settlements(client, portfolio: LivePortfolio, log_path: Path):

@@ -1873,6 +1873,30 @@ async def get_kalshi_market_stats():
 
 
 # ──────────────────────────────────────────────────────────────────────
+#  Live trade event ingestion (bot → API push)
+# ──────────────────────────────────────────────────────────────────────
+
+from starlette.requests import Request as StarletteRequest
+
+
+@app.post("/api/live-trades")
+async def post_live_trade(request: StarletteRequest):
+    """Receive trade events pushed by the bot and append to the local JSONL log.
+
+    Accepts a single event ``{...}`` or a batch ``[{...}, ...]``.
+    The existing ``_read_live_trade_log_metrics`` then serves them to the
+    dashboard via the normal GET endpoints — no extra plumbing needed.
+    """
+    body = await request.json()
+    events = body if isinstance(body, list) else [body]
+    LIVE_TRADES_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(LIVE_TRADES_LOG_PATH, "a", encoding="utf-8") as f:
+        for event in events:
+            f.write(json.dumps(event, default=str) + "\n")
+    return {"ok": True, "count": len(events)}
+
+
+# ──────────────────────────────────────────────────────────────────────
 #  Bot Heartbeat endpoints
 # ──────────────────────────────────────────────────────────────────────
 
