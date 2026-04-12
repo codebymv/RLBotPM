@@ -368,8 +368,9 @@ class KalshiExecutionClient:
             logger.warning(f"Kalshi order blocked: {reason}")
             return None
         
-        # Validate price
-        price = max(1, min(99, price))
+        # Kalshi expects integer cent prices/counts in the JSON body.
+        price = int(round(max(1, min(99, price))))
+        contracts = int(contracts)
         
         client_order_id = str(uuid.uuid4())
         
@@ -435,6 +436,7 @@ class KalshiExecutionClient:
             logger.warning(f"Kalshi order blocked: {reason}")
             return None
         
+        contracts = int(contracts)
         client_order_id = str(uuid.uuid4())
         
         body = {
@@ -505,6 +507,7 @@ class KalshiExecutionClient:
             side = OrderSide.NO
             num_contracts = contracts or abs(position.position)
         
+        num_contracts = int(num_contracts)
         client_order_id = str(uuid.uuid4())
         
         body = {

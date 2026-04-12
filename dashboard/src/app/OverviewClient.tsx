@@ -21,7 +21,7 @@ import {
   fetchCryptoPrices,
   fetchBotStatus,
   fetchMarketStats,
-  fetchHeartbeat,
+  fetchHeartbeatFallback,
   fetchRiskStatus,
   fetchTradesSummary,
   fetchPnlSeriesTyped,
@@ -85,8 +85,19 @@ export default function OverviewClient({
   });
 
   const { data: heartbeat } = useQuery({
-    queryKey: ["heartbeat"],
-    queryFn: () => fetchHeartbeat(),
+    queryKey: ["heartbeat", mode, bot],
+    queryFn: () => {
+      if (mode === "live") {
+        if (bot === "kalshi" || bot === "all") {
+          return fetchHeartbeatFallback(["kalshi_live", "fleet"]);
+        }
+        return fetchHeartbeatFallback(["fleet"]);
+      }
+      if (bot === "kalshi" || bot === "all") {
+        return fetchHeartbeatFallback(["fleet", "kalshi_paper"]);
+      }
+      return fetchHeartbeatFallback(["fleet"]);
+    },
     refetchInterval: 30_000,
   });
 
@@ -241,17 +252,27 @@ export default function OverviewClient({
                 <KpiCard
                   label="Profit Factor"
                   value={
-                    tradesSummary && tradesSummary.total_trades > 0
+                    mode === "paper" && tradesSummary && tradesSummary.total_trades > 0
                       ? tradesSummary.profit_factor === Infinity ? "∞" : fmt(tradesSummary.profit_factor)
                       : "—"
                   }
                   sublabel={
-                    tradesSummary && tradesSummary.total_trades > 0
+                    mode === "paper" && tradesSummary && tradesSummary.total_trades > 0
                       ? `+$${fmt(tradesSummary.avg_profit)} / -$${fmt(Math.abs(tradesSummary.avg_loss))}`
-                      : "Avg win / loss"
+                      : mode === "live"
+                        ? "Paper metric only"
+                        : "Avg win / loss"
                   }
                   mode="neutral"
-                  trend={tradesSummary && tradesSummary.profit_factor > 1.3 ? "up" : tradesSummary && tradesSummary.profit_factor < 1.0 ? "down" : "flat"}
+                  trend={
+                    mode === "paper" && tradesSummary
+                      ? tradesSummary.profit_factor > 1.3
+                        ? "up"
+                        : tradesSummary.profit_factor < 1.0
+                          ? "down"
+                          : "flat"
+                      : undefined
+                  }
                 />
                 <KpiCard
                   label="Total Trades"

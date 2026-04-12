@@ -239,6 +239,7 @@ def run_live_trading(
     from ..data.sources.kalshi import KalshiAdapter
     from ..execution.kalshi_client import KalshiExecutionClient, OrderSide
     from ..monitoring import AlertSystem
+    from ..monitoring.heartbeat import BotHeartbeat
 
     series_list = series or CRYPTO_SERIES
     log_path = LOG_DIR / "live_trades.jsonl"
@@ -308,6 +309,20 @@ def run_live_trading(
         return portfolio
 
     mode_label = "DRY RUN" if dry_run else "LIVE"
+    session_id = datetime.now(timezone.utc).strftime("live_%Y%m%d_%H%M%S")
+    heartbeat = BotHeartbeat(
+        interval=60,
+        bot_id="kalshi_live" if not dry_run else "kalshi_live_dry_run",
+        metadata_fn=lambda: {
+            "mode": "live" if not dry_run else "dry_run",
+            "session_id": session_id,
+            "scan_count": portfolio.scan_count,
+            "open_positions": len(portfolio.open_positions),
+            "deployed_capital": round(portfolio.deployed_capital, 2),
+            "realized_pnl": round(portfolio.realized_pnl, 2),
+        },
+    )
+    heartbeat.start()
     logger.info(f"{'='*50}")
     logger.info(f"LIVE TRADING STARTED ({mode_label})")
     logger.info(f"{'='*50}")
@@ -333,6 +348,7 @@ def run_live_trading(
 
     _log_event(log_path, {
         "type": "session_start",
+        "session_id": session_id,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "mode": mode_label,
         "max_cost_per_trade": max_cost_per_trade,
@@ -366,6 +382,7 @@ def run_live_trading(
                 )
                 _log_event(log_path, {
                     "type": "kill_switch",
+                    "session_id": session_id,
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                     "reason": portfolio.kill_reason,
                 })
@@ -446,6 +463,7 @@ def run_live_trading(
                     )
                     _log_event(log_path, {
                         "type": "dry_run_signal",
+                        "session_id": session_id,
                         "timestamp": scan_ts,
                         "ticker": edge.ticker,
                         "side": edge.recommended_side,
@@ -502,6 +520,7 @@ def run_live_trading(
 
                 _log_event(log_path, {
                     "type": "order_placed",
+                    "session_id": session_id,
                     "timestamp": scan_ts,
                     "ticker": edge.ticker,
                     "event_ticker": edge.event_ticker,
@@ -531,6 +550,7 @@ def run_live_trading(
 
             _log_event(log_path, {
                 "type": "scan_summary",
+                "session_id": session_id,
                 "timestamp": scan_ts,
                 "scan": scan_n,
                 "markets_scanned": len(markets),
@@ -553,18 +573,20 @@ def run_live_trading(
             severity="critical",
         )
         raise
-
-    _log_event(log_path, {
-        "type": "session_end",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "scans": scan_n,
-        "trades_taken": portfolio.trades_taken,
-        "trades_won": portfolio.trades_won,
-        "trades_lost": portfolio.trades_lost,
-        "realized_pnl": portfolio.realized_pnl,
-        "open_positions": len(portfolio.open_positions),
-        "killed": portfolio.killed,
-        "kill_reason": portfolio.kill_reason,
-    })
+    finally:
+        _log_event(log_path, {
+            "type": "session_end",
+            "session_id": session_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "scans": scan_n,
+            "trades_taken": portfolio.trades_taken,
+            "trades_won": portfolio.trades_won,
+            "trades_lost": portfolio.trades_lost,
+            "realized_pnl": portfolio.realized_pnl,
+            "open_positions": len(portfolio.open_positions),
+            "killed": portfolio.killed,
+            "kill_reason": portfolio.kill_reason,
+        })
+        heartbeat.stop()
 
     return portfolio

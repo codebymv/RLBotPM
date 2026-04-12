@@ -38,6 +38,12 @@ PAPER_TRADES_LOG_PATH = Path(
         str(Path(__file__).resolve().parent.parent / "bot" / "logs" / "paper_trades.jsonl"),
     )
 )
+LIVE_TRADES_LOG_PATH = Path(
+    os.getenv(
+        "LIVE_TRADES_LOG_PATH",
+        str(Path(__file__).resolve().parent.parent / "bot" / "logs" / "live_trades.jsonl"),
+    )
+)
 
 # Configure CORS
 origins = [o.strip() for o in os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",") if o.strip()]
@@ -153,6 +159,319 @@ def _read_paper_log_metadata(log_path: Path) -> dict:
         "jsonl_session_starts": starts,
         "jsonl_session_ends": ends,
         "latest_session_start": latest_start,
+        "current_session": current_session,
+    }
+
+
+def _read_live_trade_log_metrics(log_path: Path) -> dict:
+    """Rebuild standalone live Kalshi metrics from live_trades.jsonl."""
+    empty_metrics = {
+        "total_trades": 0,
+        "wins": 0,
+        "losses": 0,
+        "settled_trades": 0,
+        "win_rate": 0.0,
+        "realized_pnl": 0.0,
+        "open_positions": 0,
+        "open_cost": 0.0,
+        "side_breakdown": {},
+        "mode_breakdown": {
+            "live": {
+                "total": 0,
+                "wins": 0,
+                "losses": 0,
+                "settled_trades": 0,
+                "realized_pnl": 0.0,
+                "open_positions": 0,
+                "open_cost": 0.0,
+            }
+        },
+        "recent_trades": [],
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+    empty = {
+        "metrics": empty_metrics,
+        "positions": [],
+        "pnl_series": {"series": [], "total_pnl": 0.0},
+        "edge_health": {
+            "by_side": {},
+            "by_edge_type": {},
+            "timestamp": datetime.utcnow().isoformat(),
+        },
+        "current_session": None,
+    }
+    if not log_path.exists():
+        return empty
+
+    trades: List[dict] = []
+    open_by_ticker: Dict[str, dict] = {}
+    cur_session_id: Optional[str] = None
+    cur_started_at: Optional[str] = None
+    cur_open: Dict[str, dict] = {}
+    cur_settled = 0
+    cur_wins = 0
+    cur_losses = 0
+    cur_realized_pnl = 0.0
+    cur_last_scan: Optional[dict] = None
+    cur_active = False
+
+    try:
+        with open(log_path, encoding="utf-8") as f:
+            for raw in f:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    event = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+
+                etype = event.get("type")
+                event_session_id = event.get("session_id")
+
+                if etype == "session_start":
+                    cur_session_id = event_session_id or event.get("timestamp")
+                    cur_started_at = event.get("timestamp")
+                    cur_open = {}
+                    cur_settled = 0
+                    cur_wins = 0
+                    cur_losses = 0
+                    cur_realized_pnl = 0.0
+                    cur_last_scan = None
+                    cur_active = True
+                    continue
+
+                if etype == "session_end":
+                    if cur_session_id and (event_session_id == cur_session_id or event_session_id is None):
+                        cur_active = False
+                    continue
+
+                if etype == "order_placed":
+                    trade = {
+                        "ticker": event.get("ticker"),
+                        "event_ticker": event.get("event_ticker"),
+                        "series_ticker": (event.get("ticker") or "").split("-")[0] or None,
+                        "side": event.get("side"),
+                        "entry_price_cents": float(event.get("price_cents") or 0),
+                        "fair_price_cents": None,
+                        "edge": float(event.get("edge")) if event.get("edge") is not None else None,
+                        "edge_type": event.get("edge_type"),
+                        "contracts": int(event.get("contracts") or 0),
+                        "cost": float(event.get("cost") or 0),
+                        "reasoning": event.get("reasoning"),
+                        "status": "open",
+                        "outcome": None,
+                        "pnl": None,
+                        "mode": "live",
+                        "session_id": event_session_id or cur_session_id,
+                        "opened_at": event.get("timestamp"),
+                        "settled_at": None,
+                        "order_id": event.get("order_id"),
+                    }
+                    trades.append(trade)
+                    ticker = trade.get("ticker")
+                    if ticker:
+                        open_by_ticker[ticker] = trade
+                        if cur_session_id and ((event_session_id or cur_session_id) == cur_session_id):
+                            cur_open[ticker] = trade
+                    continue
+
+                if etype == "settlement":
+                    ticker = event.get("ticker")
+                    pnl = float(event.get("pnl") or 0)
+                    trade = open_by_ticker.pop(ticker, None)
+                    if trade is None:
+                        trade = {
+                            "ticker": ticker,
+                            "event_ticker": None,
+                            "series_ticker": (ticker or "").split("-")[0] or None,
+                            "side": event.get("side"),
+                            "entry_price_cents": float(event.get("price_cents") or 0),
+                            "fair_price_cents": None,
+                            "edge": None,
+                            "edge_type": None,
+                            "contracts": int(event.get("contracts") or 0),
+                            "cost": float(event.get("cost") or 0),
+                            "reasoning": None,
+                            "status": "settled",
+                            "outcome": event.get("outcome"),
+                            "pnl": pnl,
+                            "mode": "live",
+                            "session_id": event_session_id or cur_session_id,
+                            "opened_at": None,
+                            "settled_at": event.get("timestamp"),
+                            "order_id": None,
+                        }
+                        trades.append(trade)
+                    else:
+                        trade["status"] = "settled"
+                        trade["outcome"] = event.get("outcome")
+                        trade["pnl"] = pnl
+                        trade["settled_at"] = event.get("timestamp")
+
+                    if cur_session_id and ((event_session_id or cur_session_id) == cur_session_id):
+                        cur_settled += 1
+                        cur_realized_pnl += pnl
+                        if pnl > 0:
+                            cur_wins += 1
+                        else:
+                            cur_losses += 1
+                        if ticker:
+                            cur_open.pop(ticker, None)
+                    continue
+
+                if etype == "scan_summary":
+                    if cur_session_id and ((event_session_id or cur_session_id) == cur_session_id):
+                        cur_last_scan = event
+
+    except OSError:
+        return empty
+
+    settled_trades = [t for t in trades if t.get("status") == "settled"]
+    open_trades = [t for t in trades if t.get("status") == "open"]
+    wins = sum(1 for t in settled_trades if (t.get("pnl") or 0) > 0)
+    losses = sum(1 for t in settled_trades if (t.get("pnl") or 0) <= 0)
+    realized_pnl = sum(float(t.get("pnl") or 0) for t in settled_trades)
+    open_cost = sum(float(t.get("cost") or 0) for t in open_trades)
+    settled_count = len(settled_trades)
+
+    side_breakdown: Dict[str, dict] = {}
+    edge_breakdown: Dict[str, dict] = {}
+    pnl_series_rows: List[dict] = []
+    for trade in settled_trades:
+        side = trade.get("side") or "unknown"
+        edge_type = trade.get("edge_type") or "unknown"
+        pnl = float(trade.get("pnl") or 0)
+        edge = float(trade.get("edge") or 0)
+
+        side_stats = side_breakdown.setdefault(
+            side, {"total": 0, "wins": 0, "losses": 0, "edge_sum": 0.0, "pnl_sum": 0.0, "total_pnl": 0.0}
+        )
+        side_stats["total"] += 1
+        side_stats["wins"] += 1 if pnl > 0 else 0
+        side_stats["losses"] += 0 if pnl > 0 else 1
+        side_stats["edge_sum"] += edge
+        side_stats["pnl_sum"] += pnl
+        side_stats["total_pnl"] += pnl
+
+        edge_stats = edge_breakdown.setdefault(
+            edge_type, {"total": 0, "wins": 0, "edge_sum": 0.0, "total_pnl": 0.0}
+        )
+        edge_stats["total"] += 1
+        edge_stats["wins"] += 1 if pnl > 0 else 0
+        edge_stats["edge_sum"] += edge
+        edge_stats["total_pnl"] += pnl
+
+        pnl_series_rows.append(trade)
+
+    by_side = {
+        side: {
+            "total": stats["total"],
+            "wins": stats["wins"],
+            "losses": stats["losses"],
+            "win_rate": (stats["wins"] / stats["total"]) if stats["total"] else 0.0,
+            "avg_edge": (stats["edge_sum"] / stats["total"]) if stats["total"] else 0.0,
+            "avg_pnl": (stats["pnl_sum"] / stats["total"]) if stats["total"] else 0.0,
+            "total_pnl": stats["total_pnl"],
+        }
+        for side, stats in side_breakdown.items()
+    }
+    by_edge_type = {
+        edge_type: {
+            "total": stats["total"],
+            "wins": stats["wins"],
+            "win_rate": (stats["wins"] / stats["total"]) if stats["total"] else 0.0,
+            "avg_edge": (stats["edge_sum"] / stats["total"]) if stats["total"] else 0.0,
+            "total_pnl": stats["total_pnl"],
+        }
+        for edge_type, stats in edge_breakdown.items()
+    }
+
+    cumulative = 0.0
+    pnl_series = []
+    for trade in sorted(pnl_series_rows, key=lambda t: t.get("settled_at") or ""):
+        pnl = float(trade.get("pnl") or 0)
+        cumulative += pnl
+        pnl_series.append({
+            "timestamp": trade.get("settled_at"),
+            "pnl": pnl,
+            "cumulative_pnl": cumulative,
+            "side": trade.get("side"),
+            "ticker": trade.get("ticker"),
+        })
+
+    recent_trades = sorted(
+        trades,
+        key=lambda t: t.get("opened_at") or t.get("settled_at") or "",
+        reverse=True,
+    )[:20]
+
+    current_session = None
+    if cur_session_id and cur_active:
+        current_session = {
+            "session_id": cur_session_id,
+            "started_at": cur_started_at,
+            "open_positions": len(cur_open),
+            "open_cost": sum(float(p.get("cost") or 0) for p in cur_open.values()),
+            "settled_trades": cur_settled,
+            "wins": cur_wins,
+            "losses": cur_losses,
+            "win_rate": (cur_wins / cur_settled) if cur_settled else None,
+            "realized_pnl": cur_realized_pnl,
+            "last_scan": cur_last_scan,
+        }
+
+    return {
+        "metrics": {
+            "total_trades": len(trades),
+            "wins": wins,
+            "losses": losses,
+            "settled_trades": settled_count,
+            "win_rate": (wins / settled_count) if settled_count else 0.0,
+            "realized_pnl": realized_pnl,
+            "open_positions": len(open_trades),
+            "open_cost": open_cost,
+            "side_breakdown": {
+                side: {"total": stats["total"], "wins": stats["wins"], "pnl": stats["total_pnl"]}
+                for side, stats in by_side.items()
+            },
+            "mode_breakdown": {
+                "live": {
+                    "total": len(trades),
+                    "wins": wins,
+                    "losses": losses,
+                    "settled_trades": settled_count,
+                    "realized_pnl": realized_pnl,
+                    "open_positions": len(open_trades),
+                    "open_cost": open_cost,
+                }
+            },
+            "recent_trades": recent_trades,
+            "timestamp": datetime.utcnow().isoformat(),
+        },
+        "positions": [
+            {
+                "ticker": t.get("ticker"),
+                "side": t.get("side"),
+                "entry_price_cents": t.get("entry_price_cents"),
+                "fair_price_cents": None,
+                "edge": t.get("edge"),
+                "edge_type": t.get("edge_type"),
+                "contracts": t.get("contracts"),
+                "cost": t.get("cost"),
+                "reasoning": t.get("reasoning"),
+                "opened_at": t.get("opened_at"),
+                "series_ticker": t.get("series_ticker"),
+                "mode": "live",
+            }
+            for t in open_trades
+        ],
+        "pnl_series": {"series": pnl_series, "total_pnl": cumulative},
+        "edge_health": {
+            "by_side": by_side,
+            "by_edge_type": by_edge_type,
+            "timestamp": datetime.utcnow().isoformat(),
+        },
         "current_session": current_session,
     }
 
@@ -434,6 +753,9 @@ async def get_paper_trading_metrics(
     Return trading portfolio metrics from the kalshi_trades table.
     Supports mode filtering: paper, live, or all (no filter).
     """
+    if mode == "live":
+        return _read_live_trade_log_metrics(LIVE_TRADES_LOG_PATH)["metrics"]
+
     if not DB_ENGINE:
         raise HTTPException(status_code=503, detail="Database not configured")
 
@@ -563,6 +885,7 @@ async def get_combined_metrics(
 
     try:
         kalshi_metrics = await get_paper_trading_metrics(mode=mode)
+        live_log_metrics = _read_live_trade_log_metrics(LIVE_TRADES_LOG_PATH) if mode == "live" else None
 
         with DB_ENGINE.connect() as conn:
             # Single aggregation — replaces 5 sequential queries
@@ -625,8 +948,11 @@ async def get_combined_metrics(
 
         # Pull current-session snapshot straight from the JSONL log so the
         # dashboard can show "this run" PnL separately from the DB lifetime total.
-        log_meta = _read_paper_log_metadata(PAPER_TRADES_LOG_PATH)
-        current_session_snapshot = log_meta.get("current_session")
+        if mode == "live":
+            current_session_snapshot = (live_log_metrics or {}).get("current_session")
+        else:
+            log_meta = _read_paper_log_metadata(PAPER_TRADES_LOG_PATH)
+            current_session_snapshot = log_meta.get("current_session")
 
         combined_trades = kalshi_metrics["total_trades"] + rl_total
         combined_pnl = kalshi_metrics["realized_pnl"] + rl_pnl
@@ -859,6 +1185,11 @@ async def get_kalshi_positions(
     mode: Optional[str] = Query(None, description="paper, live, or omit for all"),
 ):
     """Get currently open Kalshi positions."""
+    if mode == "live":
+        live_metrics = _read_live_trade_log_metrics(LIVE_TRADES_LOG_PATH)
+        positions = live_metrics["positions"]
+        return {"positions": positions, "count": len(positions)}
+
     if not DB_ENGINE:
         raise HTTPException(status_code=503, detail="Database not configured")
 
@@ -900,6 +1231,9 @@ async def get_kalshi_pnl_series(
     mode: Optional[str] = Query("paper", description="paper or live"),
 ):
     """Get cumulative P&L time series for charting."""
+    if mode == "live":
+        return _read_live_trade_log_metrics(LIVE_TRADES_LOG_PATH)["pnl_series"]
+
     if not DB_ENGINE:
         raise HTTPException(status_code=503, detail="Database not configured")
 
@@ -933,6 +1267,9 @@ async def get_kalshi_edge_health(
     mode: Optional[str] = Query("paper", description="paper or live"),
 ):
     """Edge health metrics — rolling win rate and avg edge size."""
+    if mode == "live":
+        return _read_live_trade_log_metrics(LIVE_TRADES_LOG_PATH)["edge_health"]
+
     if not DB_ENGINE:
         raise HTTPException(status_code=503, detail="Database not configured")
 

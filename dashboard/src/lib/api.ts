@@ -233,6 +233,20 @@ export async function fetchHeartbeat(botId = "fleet") {
   return get<HeartbeatResponse>(`/api/bot/heartbeat?bot_id=${botId}`);
 }
 
+export async function fetchHeartbeatFallback(botIds: string[]) {
+  let firstResult: HeartbeatResponse | null = null;
+  for (const botId of botIds) {
+    const result = await fetchHeartbeat(botId);
+    if (!firstResult) {
+      firstResult = result;
+    }
+    if (result?.is_alive) {
+      return result;
+    }
+  }
+  return firstResult;
+}
+
 export async function fetchRiskStatus() {
   return get<RiskStatusResponse>(`/api/risk/status`);
 }
