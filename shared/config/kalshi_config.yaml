@@ -47,7 +47,7 @@ trading:
     method: "fixed_percent"  # fixed_percent, half_kelly, quarter_kelly
     fixed_percent: 0.01      # 1% of balance per trade
     max_position_percent: 0.05  # Max 5% in single market
-    max_total_exposure: 0.25    # Max 25% total exposure
+    max_total_exposure: 0       # Disabled; CLI --max-total controls new deployment
   
   # Edge requirements
   min_edge_threshold: 0.10   # Only trade if model prob differs by >10%
@@ -61,7 +61,7 @@ trading:
   # Risk limits
   max_daily_trades: 20         # Prevent overtrading
   max_daily_loss_percent: 0.05 # Stop trading if down 5% in a day
-  max_concurrent_positions: 10 # Diversify
+  max_concurrent_positions: 30 # Diversify
 
 strategy:
   # Canonical defaults for `python main.py kalshi paper-trade`
