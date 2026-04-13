@@ -30,6 +30,8 @@ markets:
       priority: 3
     - category: "Economics"  # CPI, jobs data
       priority: 4
+    - category: "Climate"    # Weather / temperature contracts
+      priority: 5
   
   # Market filters
   filters:

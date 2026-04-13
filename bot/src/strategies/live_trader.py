@@ -32,6 +32,7 @@ from ..strategies.paper_trader import (
     _fetch_live_markets,
     _extract_asset,
     CRYPTO_SERIES,
+    LIVE_SERIES,
     DEFAULT_MIN_EDGE,
     DEFAULT_MAX_EDGE,
     DEFAULT_MIN_PRICE,
@@ -464,7 +465,7 @@ def run_live_trading(
     from ..monitoring import AlertSystem
     from ..monitoring.heartbeat import BotHeartbeat
 
-    series_list = series or CRYPTO_SERIES
+    series_list = series or LIVE_SERIES
     log_path = LOG_DIR / "live_trades.jsonl"
 
     env_allowed_sides = os.getenv("LIVE_ALLOWED_SIDES", "no")
@@ -665,22 +666,46 @@ def run_live_trading(
             # 4. Filter and place orders
             new_trades = 0
             position_limit_hit = False
+            _blk = {"type": 0, "side": 0, "dup": 0, "edge_range": 0, "dead": 0, "price": 0}
             for edge in edges:
-                if edge.edge_type not in ("crypto_spot_mispricing",):
+                if edge.edge_type not in ("spot_vs_strike", "crypto_spot_mispricing", "macro_data", "weather"):
+                    _blk["type"] += 1
                     continue
 
                 # BUY_NO only
                 if edge.recommended_side not in allowed_side_set:
+                    _blk["side"] += 1
                     continue
 
                 if edge.ticker in portfolio.open_positions or edge.ticker in portfolio.resting_orders:
+                    _blk["dup"] += 1
                     continue
 
                 if edge.edge_value < min_edge or edge.edge_value > max_edge:
+                    _blk["edge_range"] += 1
                     continue
 
-                price = edge.market_price
-                if price < min_price or price > max_price:
+                # Skip completely dead markets (zero activity = no counterparty)
+                mkt_volume = float(edge.market_data.get("volume", 0) or 0)
+                mkt_oi = float(edge.market_data.get("open_interest", 0) or 0)
+                if mkt_volume + mkt_oi < 1:
+                    _blk["dead"] += 1
+                    continue
+
+                # Determine actual order price from live bid/ask.
+                yes_bid = float(edge.market_data.get("yes_bid", 0) or 0)
+                yes_ask = float(edge.market_data.get("yes_ask", 100) or 100)
+                edge_price = edge.market_price
+                if edge.recommended_side == "no":
+                    price = yes_bid if yes_bid > 0 else edge_price
+                    our_cost_cents = 100 - price
+                else:
+                    price = yes_ask if yes_ask < 100 else edge_price
+                    our_cost_cents = price
+
+                # Price filter: applied to OUR cost (what we actually pay).
+                if our_cost_cents < min_price or our_cost_cents > max_price:
+                    _blk["price"] += 1
                     continue
 
                 if portfolio.active_market_count >= max_positions or position_limit_hit:
@@ -854,6 +879,13 @@ def run_live_trading(
                 f"deployed=${portfolio.deployed_capital:.2f} | "
                 f"P&L=${portfolio.realized_pnl:+.2f}"
             )
+            if new_trades == 0 and edges:
+                logger.info(
+                    f"  Filter breakdown: type={_blk['type']} side={_blk['side']} "
+                    f"dup={_blk['dup']} edge_range={_blk['edge_range']} "
+                    f"dead={_blk['dead']} price={_blk['price']} "
+                    f"other={len(edges) - sum(_blk.values())}"
+                )
 
             _log_event(log_path, {
                 "type": "scan_summary",

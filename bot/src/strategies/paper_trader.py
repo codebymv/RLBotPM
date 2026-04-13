@@ -89,12 +89,22 @@ def _db_settle_trade(ticker: str, outcome: str, pnl: float, mode: str = "paper",
 
 CRYPTO_SERIES = ["KXBTC", "KXBTCD", "KXETH", "KXETHD", "KXSOLD", "KXDOGE", "KXXRP"]
 
-# Map series prefixes to canonical asset names
+INDEX_SERIES = ["KXINXU", "INXI"]
+FX_COMMODITY_SERIES = ["KXEURUSDH", "KXWTIH"]
+MACRO_SERIES = ["KXCPI", "KXUSNFP", "KXPAYROLLS", "KXFFR"]
+WEATHER_SERIES = ["KXTEMP", "KXHMONTHRANGE"]
+
+LIVE_SERIES = CRYPTO_SERIES + INDEX_SERIES + FX_COMMODITY_SERIES + MACRO_SERIES + WEATHER_SERIES
+
 _ASSET_MAP = {
     "KXBTC": "BTC", "KXBTCD": "BTC",
     "KXETH": "ETH", "KXETHD": "ETH",
     "KXSOLD": "SOL", "KXDOGE": "DOGE", "KXXRP": "XRP",
-    "KXINXU": "INXU", "KXEURUSDH": "EURUSD",
+    "KXINXU": "SPX", "INXI": "SPX",
+    "KXEURUSDH": "EURUSD",
+    "KXWTIH": "WTI",
+    "KXCPI": "CPI", "KXUSNFP": "NFP", "KXPAYROLLS": "NFP", "KXFFR": "FED",
+    "KXTEMP": "WEATHER", "KXHMONTHRANGE": "WEATHER",
 }
 
 def _extract_asset(ticker: str) -> str:
@@ -357,7 +367,7 @@ def run_paper_trading(
     """
     from ..data.sources.kalshi import KalshiAdapter
 
-    series_list = series or CRYPTO_SERIES
+    series_list = series or LIVE_SERIES
     log_path = LOG_DIR / "paper_trades.jsonl"
 
     import uuid as _uuid
@@ -470,7 +480,7 @@ def run_paper_trading(
                     if new_trades >= max_new_trades_per_scan:
                         break
 
-                    if edge.edge_type not in ("crypto_spot_mispricing", "strike_dominance"):
+                    if edge.edge_type not in ("spot_vs_strike", "crypto_spot_mispricing", "strike_dominance", "macro_data", "weather"):
                         filter_counts["edge_type"] += 1
                         continue
 

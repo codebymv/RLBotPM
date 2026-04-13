@@ -228,8 +228,8 @@ class KalshiExecutionClient:
         
         trading = self._kalshi_config.get("trading", {})
         max_positions = trading.get("max_concurrent_positions", 10)
-        positions = self.get_positions()
-        if len(positions) >= max_positions:
+        active_positions = self.get_active_positions()
+        if len(active_positions) >= max_positions:
             return False, f"Max concurrent positions ({max_positions}) reached"
         
         max_exposure_pct = (
@@ -239,7 +239,7 @@ class KalshiExecutionClient:
         )
         if max_exposure_pct > 0:
             avail, total = self.get_balance()
-            total_exposure = sum(p.market_exposure for p in positions)
+            total_exposure = sum(p.market_exposure for p in active_positions)
             if total > 0 and (total_exposure / total) >= max_exposure_pct:
                 return False, f"Max total exposure ({max_exposure_pct:.0%}) reached"
         

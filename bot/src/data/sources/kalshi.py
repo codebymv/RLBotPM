@@ -87,12 +87,13 @@ class KalshiAdapter(ExchangeAdapter):
     PROD_URL = "https://api.elections.kalshi.com/trade-api/v2"
     DEMO_URL = "https://demo-api.kalshi.co/trade-api/v2"
     
-    # Market categories we focus on
     SUPPORTED_CATEGORIES = [
         "Crypto",
         "Economics",
         "Financial",
         "Fed",
+        "Climate",
+        "Weather",
     ]
     
     def __init__(self, demo: bool = False):
@@ -337,7 +338,22 @@ class KalshiAdapter(ExchangeAdapter):
             m for m in all_markets
             if any(kw in m.title.lower() for kw in keywords)
         ]
-    
+
+    def get_weather_markets(self) -> List[KalshiMarket]:
+        """Get weather/climate/temperature markets."""
+        keywords = ["temperature", "weather", "climate", "degrees", "temp"]
+        try:
+            markets = self.get_markets(status="open", category="Climate", limit=200)
+            if markets:
+                return markets
+        except DataUnavailableError:
+            pass
+        all_markets = self.get_markets(status="open", limit=500)
+        return [
+            m for m in all_markets
+            if any(kw in m.title.lower() for kw in keywords)
+        ]
+
     def get_market_history(
         self,
         ticker: str,

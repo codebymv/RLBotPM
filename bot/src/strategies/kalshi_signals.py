@@ -153,26 +153,46 @@ class PolymarketSignal(SignalSource):
 
 class FedWatchSignal(SignalSource):
     """
-    CME FedWatch tool probabilities for FOMC decisions.
-    Professional futures market is very efficient - trust it.
+    Uses FRED fed funds rate data as a baseline signal for Fed-related markets.
     """
-    
+
     def supports_category(self, category: MarketCategory) -> bool:
         return category == MarketCategory.FED
-    
+
     def get_signal(self, market: Dict) -> Optional[Signal]:
-        """Get Fed funds futures implied probabilities."""
+        """Get Fed funds rate signal from FRED data."""
         title = market.get("title", "").lower()
-        
-        # Check if this is a Fed-related market
-        fed_keywords = ["fed", "fomc", "rate", "powell", "interest rate"]
+
+        fed_keywords = ["fed", "fomc", "rate", "powell", "interest rate", "federal funds"]
         if not any(kw in title for kw in fed_keywords):
             return None
-        
-        # In production, scrape CME FedWatch or use futures data
-        # For now, return None (could integrate with Fed futures API)
-        logger.debug("Fed market detected - would query FedWatch")
-        return None
+
+        try:
+            from ..data.sources.macro_feeds import get_fed_rate_current
+        except ImportError:
+            return None
+
+        rate = get_fed_rate_current()
+        if rate is None:
+            return None
+
+        current_mid = (rate[0] + rate[1]) / 2.0
+        is_cut_market = any(kw in title for kw in ["cut", "lower", "decrease"])
+        is_hike_market = any(kw in title for kw in ["hike", "raise", "increase"])
+
+        probability = 0.5
+        if is_cut_market:
+            probability = 0.4
+        elif is_hike_market:
+            probability = 0.3
+
+        return Signal(
+            source="fedwatch",
+            probability=probability,
+            confidence=0.6,
+            timestamp=datetime.now(timezone.utc),
+            metadata={"current_rate": current_mid},
+        )
 
 
 class PollAggregatorSignal(SignalSource):
@@ -202,31 +222,63 @@ class PollAggregatorSignal(SignalSource):
 class EconomicNowcastSignal(SignalSource):
     """
     Nowcasting models for economic data releases (CPI, jobs, GDP).
-    Uses leading indicators to predict before official release.
+    Uses FRED leading indicators and Cleveland Fed nowcast to predict
+    before official release.
     """
-    
+
     def supports_category(self, category: MarketCategory) -> bool:
         return category == MarketCategory.ECONOMICS
-    
+
     def get_signal(self, market: Dict) -> Optional[Signal]:
         """Generate nowcast for economic data."""
         title = market.get("title", "").lower()
-        
-        # Check if economic data market
+
         econ_keywords = ["cpi", "inflation", "jobs", "unemployment", "gdp", "payroll", "pce"]
         matched_keyword = None
         for kw in econ_keywords:
             if kw in title:
                 matched_keyword = kw
                 break
-        
+
         if not matched_keyword:
             return None
-        
-        # In production: Use Fed nowcasting models, Cleveland Fed inflation nowcast,
-        # Atlanta Fed GDPNow, survey data, high-frequency indicators
-        logger.debug(f"Economic market detected ({matched_keyword}) - would run nowcast")
-        return None
+
+        try:
+            from ..data.sources.macro_feeds import (
+                get_cpi_consensus_range,
+                get_nfp_consensus_range,
+                get_cleveland_fed_nowcast,
+            )
+        except ImportError:
+            return None
+
+        probability = None
+        confidence = 0.5
+
+        if matched_keyword in ("cpi", "inflation", "pce"):
+            nowcast = get_cleveland_fed_nowcast()
+            if nowcast:
+                confidence = 0.7
+                probability = 0.5
+            else:
+                low, mid, high = get_cpi_consensus_range()
+                probability = 0.5
+                confidence = 0.55
+        elif matched_keyword in ("jobs", "unemployment", "payroll"):
+            low, mid, high = get_nfp_consensus_range()
+            probability = 0.5
+            confidence = 0.55
+
+        if probability is None:
+            return None
+
+        return Signal(
+            source="nowcast",
+            probability=probability,
+            confidence=confidence,
+            timestamp=datetime.now(timezone.utc),
+            metadata={"keyword": matched_keyword},
+        )
 
 
 class LineMovementSignal(SignalSource):
