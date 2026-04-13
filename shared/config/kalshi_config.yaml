@@ -36,7 +36,7 @@ markets:
     min_volume: 100          # Skip illiquid markets
     min_open_interest: 50    # At least some positions exist
     max_spread_cents: 10     # Skip wide markets (>10 cent spread)
-    min_time_to_expiry_hours: 2  # Avoid last-minute volatility
+    min_time_to_expiry_hours: 0.1  # ~6 min; was 2h which blocked all hourly contracts
     max_time_to_expiry_days: 30  # Don't bet too far out
 
 trading:

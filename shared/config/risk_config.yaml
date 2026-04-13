@@ -38,7 +38,7 @@ market_requirements:
   min_volume_24h: 0.0  # Was $1000
   
   # Don't trade within N seconds of resolution
-  no_trade_window_before_resolution: 7200  # 2 hours
+  no_trade_window_before_resolution: 300  # 5 minutes (matches scan interval; was 7200 which blocked all hourly contracts)
   
   # Maximum slippage tolerance
   max_slippage_pct: 0.02  # 2%

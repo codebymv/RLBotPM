@@ -152,15 +152,26 @@ class KalshiExecutionClient:
         
         logger.info(f"KalshiExecutionClient initialized (demo={demo}, base_url={self.base_url})")
     
+    @staticmethod
+    def _find_shared_config(filename: str) -> Path:
+        """Locate shared/config/<filename> relative to the bot dir or repo root."""
+        bot_dir = Path(__file__).resolve().parents[2]        # .../bot
+        repo_dir = bot_dir.parent                            # .../RLBotPM
+        for base in (bot_dir, repo_dir):
+            candidate = base / "shared" / "config" / filename
+            if candidate.exists():
+                return candidate
+        return bot_dir / "shared" / "config" / filename      # fallback (will not exist)
+
     def _load_risk_config(self) -> Dict:
-        cfg_path = Path(__file__).parents[2] / "shared" / "config" / "risk_config.yaml"
+        cfg_path = self._find_shared_config("risk_config.yaml")
         if cfg_path.exists():
             with open(cfg_path) as f:
                 return yaml.safe_load(f) or {}
         return {}
     
     def _load_kalshi_config(self) -> Dict:
-        cfg_path = Path(__file__).parents[2] / "shared" / "config" / "kalshi_config.yaml"
+        cfg_path = self._find_shared_config("kalshi_config.yaml")
         if cfg_path.exists():
             with open(cfg_path) as f:
                 return yaml.safe_load(f) or {}

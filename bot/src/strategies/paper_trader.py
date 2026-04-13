@@ -190,9 +190,31 @@ def _log_event(log_path: Path, event: Dict):
         f.flush()
 
 
+def _load_min_tte_seconds() -> float:
+    """Read min_time_to_expiry_hours from kalshi_config.yaml, convert to seconds."""
+    import yaml
+    bot_dir = Path(__file__).resolve().parents[2]
+    for base in (bot_dir, bot_dir.parent):
+        cfg_path = base / "shared" / "config" / "kalshi_config.yaml"
+        if cfg_path.exists():
+            with open(cfg_path) as f:
+                cfg = yaml.safe_load(f) or {}
+            hours = (
+                cfg.get("markets", {})
+                .get("filters", {})
+                .get("min_time_to_expiry_hours", 0)
+            )
+            return float(hours) * 3600.0
+    return 0.0
+
+
 def _fetch_live_markets(adapter, series_list: List[str]) -> List[Dict]:
     """Fetch live markets from Kalshi API and convert to detector format."""
+    min_tte_seconds = _load_min_tte_seconds()
+    now = datetime.now(timezone.utc)
+
     all_markets = []
+    skipped = 0
     for st in series_list:
         try:
             markets = adapter.get_markets(series_ticker=st, status="open", limit=100)
@@ -201,6 +223,13 @@ def _fetch_live_markets(adapter, series_list: List[str]) -> List[Dict]:
             continue
 
         for m in markets:
+            ct = getattr(m, "close_time", None)
+            if min_tte_seconds > 0 and ct is not None:
+                secs_left = (ct - now).total_seconds()
+                if 0 < secs_left <= min_tte_seconds:
+                    skipped += 1
+                    continue
+
             all_markets.append({
                 "ticker": m.ticker,
                 "event_ticker": getattr(m, "event_ticker", None) or m.ticker.rsplit("-", 1)[0],
@@ -208,7 +237,7 @@ def _fetch_live_markets(adapter, series_list: List[str]) -> List[Dict]:
                 "title": getattr(m, "title", ""),
                 "subtitle": getattr(m, "subtitle", ""),
                 "category": getattr(m, "category", ""),
-                "close_time": getattr(m, "close_time", None),
+                "close_time": ct,
                 "expiration_time": getattr(m, "expiration_time", None),
                 "last_price": m.yes_price,
                 "yes_bid": m.yes_bid,
@@ -220,6 +249,10 @@ def _fetch_live_markets(adapter, series_list: List[str]) -> List[Dict]:
                 "liquidity": float(m.open_interest or 0) or float(m.volume or 0),
                 "previous_price": m.yes_price,
             })
+
+    if skipped:
+        logger.debug("Filtered %d near-expiry markets (min TTE %.0fs)", skipped, min_tte_seconds)
+
     return all_markets
 
 

@@ -732,6 +732,17 @@ def run_live_trading(
                     })
                     continue
 
+                # Pre-check: skip markets closing within one scan interval
+                close_time_utc = detector._parse_ts(edge.market_data.get("close_time"))
+                if close_time_utc is not None:
+                    secs_to_close = (close_time_utc - datetime.now(timezone.utc)).total_seconds()
+                    if 0 < secs_to_close <= interval_seconds:
+                        logger.debug(
+                            "Skipping %s: closes in %ds (< scan interval %ds)",
+                            edge.ticker, int(secs_to_close), interval_seconds,
+                        )
+                        continue
+
                 # PLACE REAL ORDER
                 logger.info(
                     f"PLACING ORDER: BUY_{edge.recommended_side.upper()} {contracts}@{price}¢ on {edge.ticker} "
@@ -740,7 +751,6 @@ def run_live_trading(
 
                 order_side = OrderSide.YES if edge.recommended_side == "yes" else OrderSide.NO
                 order_price = price if edge.recommended_side == "yes" else (100 - price)
-                close_time_utc = detector._parse_ts(edge.market_data.get("close_time"))
 
                 order = client.place_limit_order(
                     ticker=edge.ticker,
