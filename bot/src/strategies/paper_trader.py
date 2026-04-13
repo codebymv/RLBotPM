@@ -258,6 +258,9 @@ def _fetch_live_markets(adapter, series_list: List[str]) -> List[Dict]:
                 "open_interest": m.open_interest or 0,
                 "liquidity": float(m.open_interest or 0) or float(m.volume or 0),
                 "previous_price": m.yes_price,
+                "strike_type": getattr(m, "strike_type", None),
+                "floor_strike": getattr(m, "floor_strike", None),
+                "cap_strike": getattr(m, "cap_strike", None),
             })
 
     if skipped:

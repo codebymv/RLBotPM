@@ -55,6 +55,7 @@ class OrderStatus(Enum):
     RESTING = "resting"
     OPEN = "open"
     FILLED = "filled"
+    EXECUTED = "executed"  # Kalshi v2 uses this for fully filled
     PARTIALLY_FILLED = "partially_filled"
     CANCELED = "canceled"
     CANCELLED = "cancelled"
@@ -201,6 +202,33 @@ class KalshiExecutionClient:
         except ValueError:
             logger.warning("Unknown Kalshi order type '%s'; defaulting to %s", raw, default.value)
             return default
+
+    @staticmethod
+    def _parse_fill_count(order: Dict, default: int = 0) -> int:
+        """Extract filled contract count from Kalshi API v2 response.
+
+        Tries fill_count_fp (new) -> fill_count (new) -> filled_count (legacy).
+        """
+        for key in ("fill_count_fp", "fill_count", "filled_count"):
+            val = order.get(key)
+            if val is not None:
+                try:
+                    return int(float(val))
+                except (ValueError, TypeError):
+                    continue
+        return default
+
+    @staticmethod
+    def _parse_contract_count(order: Dict, default: int = 0) -> int:
+        """Extract total contract count from order response."""
+        for key in ("initial_count_fp", "initial_count", "count"):
+            val = order.get(key)
+            if val is not None:
+                try:
+                    return int(float(val))
+                except (ValueError, TypeError):
+                    continue
+        return default
     
     def _can_place_kalshi_order(
         self,
@@ -367,12 +395,41 @@ class KalshiExecutionClient:
         
         positions = []
         for pos in resp.get("market_positions", []):
+            # Kalshi v2 uses _fp/_dollars string fields
+            position_raw = pos.get("position_fp", pos.get("position", 0))
+            exposure_raw = pos.get("market_exposure_dollars", None)
+            pnl_raw = pos.get("realized_pnl_dollars", None)
+            cost_raw = pos.get("total_traded_dollars", pos.get("total_cost", 0))
+
+            try:
+                position_val = int(float(position_raw))
+            except (ValueError, TypeError):
+                position_val = 0
+
+            # v2 fields are already in dollars; legacy fields are in cents
+            if exposure_raw is not None:
+                exposure_dollars = float(exposure_raw)
+            else:
+                exposure_dollars = float(pos.get("market_exposure", 0)) / 100.0
+
+            if pnl_raw is not None:
+                pnl_dollars = float(pnl_raw)
+            else:
+                pnl_dollars = float(pos.get("realized_pnl", 0)) / 100.0
+
+            try:
+                cost_dollars = float(cost_raw)
+            except (ValueError, TypeError):
+                cost_dollars = 0.0
+            if "total_traded_dollars" not in pos and "market_exposure_dollars" not in pos:
+                cost_dollars = cost_dollars / 100.0
+
             positions.append(KalshiPosition(
                 ticker=pos["ticker"],
-                position=pos.get("position", 0),
-                market_exposure=pos.get("market_exposure", 0) / 100.0,
-                realized_pnl=pos.get("realized_pnl", 0) / 100.0,
-                total_cost=pos.get("total_cost", 0) / 100.0,
+                position=position_val,
+                market_exposure=exposure_dollars,
+                realized_pnl=pnl_dollars,
+                total_cost=cost_dollars,
             ))
         
         return positions
@@ -463,7 +520,7 @@ class KalshiExecutionClient:
             order_type=OrderType.LIMIT,
             price=price,
             contracts=contracts,
-            filled_contracts=int(order.get("filled_count", 0) or 0),
+            filled_contracts=self._parse_fill_count(order),
             status=self._parse_order_status(order.get("status", "pending")),
             created_at=datetime.now(timezone.utc),
             client_order_id=client_order_id,
@@ -527,7 +584,7 @@ class KalshiExecutionClient:
             order_type=OrderType.MARKET,
             price=int(avg_price or 50),
             contracts=contracts,
-            filled_contracts=int(order.get("filled_count", contracts) or contracts),
+            filled_contracts=self._parse_fill_count(order, default=contracts),
             status=OrderStatus.FILLED,
             created_at=datetime.now(timezone.utc),
             client_order_id=client_order_id,
@@ -596,7 +653,7 @@ class KalshiExecutionClient:
             order_type=OrderType.MARKET if use_market else OrderType.LIMIT,
             price=int(order.get("average_fill_price", 50) or 50),
             contracts=num_contracts,
-            filled_contracts=int(order.get("filled_count", 0) or 0),
+            filled_contracts=self._parse_fill_count(order),
             status=self._parse_order_status(order.get("status", "pending")),
             created_at=datetime.now(timezone.utc),
             client_order_id=client_order_id,
@@ -657,8 +714,8 @@ class KalshiExecutionClient:
             side=self._parse_order_side(order.get("side", "yes")),
             order_type=self._parse_order_type(order.get("type", "limit")),
             price=int(order.get("price", 50) or 50),
-            contracts=int(order.get("count", 0) or 0),
-            filled_contracts=int(order.get("filled_count", 0) or 0),
+            contracts=self._parse_contract_count(order),
+            filled_contracts=self._parse_fill_count(order),
             status=self._parse_order_status(order.get("status", "pending")),
             created_at=datetime.now(timezone.utc),
         )
@@ -684,8 +741,8 @@ class KalshiExecutionClient:
                 side=self._parse_order_side(order.get("side", "yes")),
                 order_type=self._parse_order_type(order.get("type", "limit")),
                 price=int(order.get("price", 50) or 50),
-                contracts=int(order.get("count", 0) or 0),
-                filled_contracts=int(order.get("filled_count", 0) or 0),
+                contracts=self._parse_contract_count(order),
+                filled_contracts=self._parse_fill_count(order),
                 status=self._parse_order_status(order.get("status", "open"), default=OrderStatus.OPEN),
                 created_at=datetime.now(timezone.utc),
             ))

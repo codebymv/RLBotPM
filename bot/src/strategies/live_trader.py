@@ -315,7 +315,7 @@ def _check_resting_fills(client, portfolio: LivePortfolio, log_path: Path, sessi
             completed.append(ticker)
             continue
 
-        if resting.remaining_contracts <= 0 or status_str == "filled":
+        if resting.remaining_contracts <= 0 or status_str in ("filled", "executed"):
             completed.append(ticker)
 
     for t in completed:
@@ -793,6 +793,11 @@ def run_live_trading(
 
                 filled = order.filled_contracts or 0
                 status_str = order.status.value if order.status else "unknown"
+
+                # Kalshi v2 returns 'executed' for immediately-filled orders.
+                # If status says executed but fill_count is missing, assume fully filled.
+                if filled == 0 and status_str in ("executed", "filled"):
+                    filled = contracts
 
                 if filled == 0:
                     logger.info(

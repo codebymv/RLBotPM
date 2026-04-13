@@ -57,6 +57,13 @@ class KalshiMarket:
     close_time: datetime
     status: str  # 'open', 'closed', 'settled'
     result: Optional[str]  # 'yes', 'no', None if not settled
+    event_ticker: Optional[str] = None
+    series_ticker: Optional[str] = None
+    strike_type: Optional[str] = None      # 'greater', 'less', 'between'
+    floor_strike: Optional[float] = None
+    cap_strike: Optional[float] = None
+    yes_ask_size: float = 0
+    yes_bid_size: float = 0
 
 
 @dataclass(frozen=True)
@@ -418,23 +425,82 @@ class KalshiAdapter(ExchangeAdapter):
             for p in positions
         ]
     
+    @staticmethod
+    def _dollars_to_cents(val: Any, default: float = 0) -> float:
+        """Convert a dollar-string (e.g. '0.0100') to cents (1.0)."""
+        if val is None:
+            return default
+        try:
+            return round(float(val) * 100, 2)
+        except (ValueError, TypeError):
+            return default
+
+    @staticmethod
+    def _parse_fp(val: Any, default: float = 0) -> float:
+        """Parse a floating-point string field (e.g. '123.00') to float."""
+        if val is None:
+            return default
+        try:
+            return float(val)
+        except (ValueError, TypeError):
+            return default
+
     def _parse_market(self, data: Dict) -> KalshiMarket:
-        """Parse API response into KalshiMarket object."""
+        """Parse API response into KalshiMarket object.
+
+        Kalshi API v2 returns dollar-denominated string fields:
+          yes_bid_dollars, yes_ask_dollars, last_price_dollars,
+          volume_fp, open_interest_fp, etc.
+        We convert everything to our internal cents/integer representation.
+        """
+        d2c = self._dollars_to_cents
+        fp = self._parse_fp
+
+        yes_bid = d2c(data.get("yes_bid_dollars"), default=0)
+        yes_ask = d2c(data.get("yes_ask_dollars"), default=100)
+        last_price = d2c(data.get("last_price_dollars"), default=50)
+
+        # Fallback for older/demo API formats that use integer cents directly
+        if "yes_bid_dollars" not in data and "yes_bid" in data:
+            yes_bid = float(data.get("yes_bid", 0) or 0)
+        if "yes_ask_dollars" not in data and "yes_ask" in data:
+            yes_ask = float(data.get("yes_ask", 100) or 100)
+        if "last_price_dollars" not in data:
+            last_price = float(data.get("yes_price", data.get("last_price", 50)) or 50)
+
+        volume = int(fp(data.get("volume_fp"), default=0))
+        if "volume_fp" not in data:
+            volume = int(data.get("volume", 0) or 0)
+
+        oi = int(fp(data.get("open_interest_fp"), default=0))
+        if "open_interest_fp" not in data:
+            oi = int(data.get("open_interest", 0) or 0)
+
+        floor_strike_raw = data.get("floor_strike")
+        cap_strike_raw = data.get("cap_strike")
+
         return KalshiMarket(
             ticker=data.get("ticker", ""),
             title=data.get("title", ""),
             subtitle=data.get("subtitle", ""),
             category=data.get("category", ""),
-            yes_price=data.get("yes_price", data.get("last_price", 50)),
-            no_price=100 - data.get("yes_price", data.get("last_price", 50)),
-            yes_bid=data.get("yes_bid", 0),
-            yes_ask=data.get("yes_ask", 100),
-            volume=data.get("volume", 0),
-            open_interest=data.get("open_interest", 0),
+            yes_price=last_price,
+            no_price=max(0, 100 - last_price),
+            yes_bid=yes_bid,
+            yes_ask=yes_ask,
+            volume=volume,
+            open_interest=oi,
             expiration_time=self._parse_timestamp(data.get("expiration_time")),
             close_time=self._parse_timestamp(data.get("close_time")),
             status=data.get("status", "unknown"),
-            result=data.get("result"),
+            result=data.get("result") or None,
+            event_ticker=data.get("event_ticker"),
+            series_ticker=data.get("series_ticker"),
+            strike_type=data.get("strike_type"),
+            floor_strike=float(floor_strike_raw) if floor_strike_raw is not None else None,
+            cap_strike=float(cap_strike_raw) if cap_strike_raw is not None else None,
+            yes_ask_size=fp(data.get("yes_ask_size_fp"), default=0),
+            yes_bid_size=fp(data.get("yes_bid_size_fp"), default=0),
         )
     
     def _parse_timestamp(self, ts: Any) -> datetime:
