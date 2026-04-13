@@ -71,8 +71,8 @@ export default function OverviewClient({
   });
 
   const { data: botStatus } = useQuery({
-    queryKey: ["botStatus"],
-    queryFn: fetchBotStatus,
+    queryKey: ["botStatus", mode],
+    queryFn: () => fetchBotStatus(mode),
     initialData: initialBotStatus,
     refetchInterval: 60_000,
   });

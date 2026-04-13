@@ -17,9 +17,9 @@ type TrainingRun = {
   config_snapshot: unknown;
 };
 
-async function getBotStatus(): Promise<BotData | null> {
+async function getBotStatus(mode: string): Promise<BotData | null> {
   try {
-    const res = await fetch(`${baseUrl}/api/bot/status`, {
+    const res = await fetch(`${baseUrl}/api/bot/status?mode=${mode}`, {
       cache: "no-store",
     });
     if (!res.ok) return null;
@@ -54,9 +54,14 @@ async function getTrainingRuns(): Promise<{ runs: TrainingRun[]; total: number }
   }
 }
 
-export default async function BotStatusPage() {
+type PageProps = {
+  searchParams?: { mode?: string };
+};
+
+export default async function BotStatusPage({ searchParams }: PageProps) {
+  const mode = searchParams?.mode || "paper";
   const [kalshiBot, mkt, trainingRuns] = await Promise.all([
-    getBotStatus(),
+    getBotStatus(mode),
     getMarketStats(),
     getTrainingRuns(),
   ]);

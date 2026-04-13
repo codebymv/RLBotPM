@@ -143,6 +143,10 @@ class KalshiExecutionClient:
         
         # Risk: circuit breaker and Kalshi-specific rules
         self._circuit_breaker = CircuitBreaker(on_trigger=alert_callback)
+        if not demo:
+            # Live Kalshi trading should honor safety enforcement even if the
+            # broader app defaults are training-friendly.
+            self._circuit_breaker.settings.TRAINING_MODE = False
         self._risk_config = self._load_risk_config()
         self._kalshi_config = self._load_kalshi_config()
         
@@ -161,6 +165,31 @@ class KalshiExecutionClient:
             with open(cfg_path) as f:
                 return yaml.safe_load(f) or {}
         return {}
+
+    def _parse_order_status(self, value: Optional[str], default: OrderStatus = OrderStatus.PENDING) -> OrderStatus:
+        """Map API order status strings defensively."""
+        raw = str(value or default.value).strip().lower()
+        try:
+            return OrderStatus(raw)
+        except ValueError:
+            logger.warning("Unknown Kalshi order status '%s'; defaulting to %s", raw, default.value)
+            return default
+
+    def _parse_order_side(self, value: Optional[str], default: OrderSide = OrderSide.YES) -> OrderSide:
+        raw = str(value or default.value).strip().lower()
+        try:
+            return OrderSide(raw)
+        except ValueError:
+            logger.warning("Unknown Kalshi order side '%s'; defaulting to %s", raw, default.value)
+            return default
+
+    def _parse_order_type(self, value: Optional[str], default: OrderType = OrderType.LIMIT) -> OrderType:
+        raw = str(value or default.value).strip().lower()
+        try:
+            return OrderType(raw)
+        except ValueError:
+            logger.warning("Unknown Kalshi order type '%s'; defaulting to %s", raw, default.value)
+            return default
     
     def _can_place_kalshi_order(
         self,
@@ -280,15 +309,18 @@ class KalshiExecutionClient:
             
             if resp.status_code not in [200, 201]:
                 error_msg = resp.text
+                self._circuit_breaker.record_api_error()
                 logger.error(f"API error: {resp.status_code} - {error_msg}")
                 return {"error": error_msg, "status_code": resp.status_code}
-            
+            self._circuit_breaker.reset_api_errors()
             return resp.json()
             
         except requests.exceptions.Timeout:
+            self._circuit_breaker.record_api_error()
             logger.error(f"Request timeout: {endpoint}")
             return {"error": "Request timeout"}
         except Exception as e:
+            self._circuit_breaker.record_api_error()
             logger.error(f"Request failed: {e}")
             return {"error": str(e)}
     
@@ -313,11 +345,13 @@ class KalshiExecutionClient:
         
         return available, total
     
-    def get_positions(self) -> List[KalshiPosition]:
+    def get_positions(self, strict: bool = False) -> List[KalshiPosition]:
         """Get all open positions."""
         resp = self._request("GET", "/portfolio/positions")
         
         if "error" in resp:
+            if strict:
+                raise RuntimeError(f"Kalshi positions request failed: {resp['error']}")
             return []
         
         positions = []
@@ -332,13 +366,25 @@ class KalshiExecutionClient:
         
         return positions
     
-    def get_position(self, ticker: str) -> Optional[KalshiPosition]:
+    def get_position(self, ticker: str, strict: bool = False) -> Optional[KalshiPosition]:
         """Get position for a specific market."""
-        positions = self.get_positions()
+        positions = self.get_positions(strict=strict)
         for pos in positions:
             if pos.ticker == ticker:
                 return pos
         return None
+
+    @staticmethod
+    def is_active_position(position: KalshiPosition) -> bool:
+        """True when a Kalshi position row represents actual live exposure."""
+        return any(
+            abs(float(value or 0)) > 0
+            for value in (position.position, position.market_exposure, position.total_cost)
+        )
+
+    def get_active_positions(self, strict: bool = False) -> List[KalshiPosition]:
+        """Get only positions with non-zero quantity or exposure."""
+        return [pos for pos in self.get_positions(strict=strict) if self.is_active_position(pos)]
     
     # ------------------------------------------------------------------
     # Order Methods
@@ -351,6 +397,7 @@ class KalshiExecutionClient:
         price: int,
         contracts: int,
         expiration_seconds: int = 300,
+        close_time_utc: Optional[datetime] = None,
     ) -> Optional[KalshiOrder]:
         """
         Place a limit order.
@@ -365,7 +412,7 @@ class KalshiExecutionClient:
         Returns:
             KalshiOrder if successful, None otherwise
         """
-        allowed, reason = self._can_place_kalshi_order(ticker, close_time_utc=None)
+        allowed, reason = self._can_place_kalshi_order(ticker, close_time_utc=close_time_utc)
         if not allowed:
             logger.warning(f"Kalshi order blocked: {reason}")
             return None
@@ -405,8 +452,8 @@ class KalshiExecutionClient:
             order_type=OrderType.LIMIT,
             price=price,
             contracts=contracts,
-            filled_contracts=order.get("filled_count", 0),
-            status=OrderStatus(order.get("status", "pending")),
+            filled_contracts=int(order.get("filled_count", 0) or 0),
+            status=self._parse_order_status(order.get("status", "pending")),
             created_at=datetime.now(timezone.utc),
             client_order_id=client_order_id,
         )
@@ -421,6 +468,7 @@ class KalshiExecutionClient:
         ticker: str,
         side: OrderSide,
         contracts: int,
+        close_time_utc: Optional[datetime] = None,
     ) -> Optional[KalshiOrder]:
         """
         Place a market order (takes liquidity).
@@ -433,7 +481,7 @@ class KalshiExecutionClient:
         Returns:
             KalshiOrder if successful, None otherwise
         """
-        allowed, reason = self._can_place_kalshi_order(ticker, close_time_utc=None)
+        allowed, reason = self._can_place_kalshi_order(ticker, close_time_utc=close_time_utc)
         if not allowed:
             logger.warning(f"Kalshi order blocked: {reason}")
             return None
@@ -466,9 +514,9 @@ class KalshiExecutionClient:
             ticker=ticker,
             side=side,
             order_type=OrderType.MARKET,
-            price=avg_price,
+            price=int(avg_price or 50),
             contracts=contracts,
-            filled_contracts=order.get("filled_count", contracts),
+            filled_contracts=int(order.get("filled_count", contracts) or contracts),
             status=OrderStatus.FILLED,
             created_at=datetime.now(timezone.utc),
             client_order_id=client_order_id,
@@ -535,10 +583,10 @@ class KalshiExecutionClient:
             ticker=ticker,
             side=side,
             order_type=OrderType.MARKET if use_market else OrderType.LIMIT,
-            price=order.get("average_fill_price", 50),
+            price=int(order.get("average_fill_price", 50) or 50),
             contracts=num_contracts,
-            filled_contracts=order.get("filled_count", 0),
-            status=OrderStatus(order.get("status", "pending")),
+            filled_contracts=int(order.get("filled_count", 0) or 0),
+            status=self._parse_order_status(order.get("status", "pending")),
             created_at=datetime.now(timezone.utc),
             client_order_id=client_order_id,
         )
@@ -582,27 +630,29 @@ class KalshiExecutionClient:
         logger.info(f"Canceled {canceled} orders")
         return canceled
     
-    def get_order(self, order_id: str) -> Optional[KalshiOrder]:
+    def get_order(self, order_id: str, strict: bool = False) -> Optional[KalshiOrder]:
         """Get order details by ID."""
         resp = self._request("GET", f"/portfolio/orders/{order_id}")
         
         if "error" in resp:
+            if strict:
+                raise RuntimeError(f"Kalshi order request failed for {order_id}: {resp['error']}")
             return None
         
         order = resp.get("order", {})
         return KalshiOrder(
             order_id=order.get("order_id", order_id),
             ticker=order.get("ticker", ""),
-            side=OrderSide(order.get("side", "yes")),
-            order_type=OrderType(order.get("type", "limit")),
-            price=order.get("price", 50),
-            contracts=order.get("count", 0),
-            filled_contracts=order.get("filled_count", 0),
-            status=OrderStatus(order.get("status", "pending")),
+            side=self._parse_order_side(order.get("side", "yes")),
+            order_type=self._parse_order_type(order.get("type", "limit")),
+            price=int(order.get("price", 50) or 50),
+            contracts=int(order.get("count", 0) or 0),
+            filled_contracts=int(order.get("filled_count", 0) or 0),
+            status=self._parse_order_status(order.get("status", "pending")),
             created_at=datetime.now(timezone.utc),
         )
     
-    def get_open_orders(self, ticker: Optional[str] = None) -> List[KalshiOrder]:
+    def get_open_orders(self, ticker: Optional[str] = None, strict: bool = False) -> List[KalshiOrder]:
         """Get all open orders."""
         params = {"status": "open"}
         if ticker:
@@ -611,6 +661,8 @@ class KalshiExecutionClient:
         resp = self._request("GET", "/portfolio/orders", params=params)
         
         if "error" in resp:
+            if strict:
+                raise RuntimeError(f"Kalshi open orders request failed: {resp['error']}")
             return []
         
         orders = []
@@ -618,12 +670,12 @@ class KalshiExecutionClient:
             orders.append(KalshiOrder(
                 order_id=order.get("order_id", ""),
                 ticker=order.get("ticker", ""),
-                side=OrderSide(order.get("side", "yes")),
-                order_type=OrderType(order.get("type", "limit")),
-                price=order.get("price", 50),
-                contracts=order.get("count", 0),
-                filled_contracts=order.get("filled_count", 0),
-                status=OrderStatus(order.get("status", "open")),
+                side=self._parse_order_side(order.get("side", "yes")),
+                order_type=self._parse_order_type(order.get("type", "limit")),
+                price=int(order.get("price", 50) or 50),
+                contracts=int(order.get("count", 0) or 0),
+                filled_contracts=int(order.get("filled_count", 0) or 0),
+                status=self._parse_order_status(order.get("status", "open"), default=OrderStatus.OPEN),
                 created_at=datetime.now(timezone.utc),
             ))
         
@@ -733,3 +785,18 @@ class KalshiExecutionClient:
                 "ok": False,
                 "error": str(e),
             }
+
+    def record_trade_outcome(
+        self,
+        pnl: float,
+        capital: float,
+        is_win: bool,
+        timestamp: Optional[datetime] = None,
+    ) -> None:
+        """Record a live trade outcome in the shared circuit breaker state."""
+        self._circuit_breaker.record_trade(
+            pnl=pnl,
+            capital=capital,
+            is_win=is_win,
+            timestamp=timestamp,
+        )

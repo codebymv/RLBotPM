@@ -2,6 +2,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { useBot } from "../components/BotSelector";
+import { useMode } from "../components/ModeToggle";
 import { SectionHeader } from "../components/SectionHeader";
 import { EmptyState } from "../components/EmptyState";
 import { KpiCard } from "../components/KpiCard";
@@ -46,10 +47,11 @@ export default function BotStatusClient({
   trainingRuns: initialTrainingRuns,
 }: Props) {
   const bot = useBot();
+  const mode = useMode();
 
   const { data: kalshiBot, dataUpdatedAt: botUpdatedAt } = useQuery({
-    queryKey: ["botStatus"],
-    queryFn: fetchBotStatus,
+    queryKey: ["botStatus", mode],
+    queryFn: () => fetchBotStatus(mode),
     initialData: initialKalshiBot,
     refetchInterval: 60_000,
   });
@@ -234,7 +236,7 @@ export default function BotStatusClient({
                       <div className="text-[10px] text-cyan-600 uppercase mb-2 font-mono font-bold tracking-widest">
                         Current Session · {cs.session_id}
                       </div>
-                      <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 text-sm font-mono">
+                      <div className="grid grid-cols-2 sm:grid-cols-6 gap-3 text-sm font-mono">
                         <Stat
                           label="Session P&L"
                           value={`$${pnl >= 0 ? "+" : ""}${fmt(pnl)}`}
@@ -257,6 +259,10 @@ export default function BotStatusClient({
                         <Stat
                           label="Open Cost"
                           value={`$${fmt(cs.open_cost)}`}
+                        />
+                        <Stat
+                          label="Resting"
+                          value={String(cs.resting_orders ?? 0)}
                         />
                       </div>
                     </div>

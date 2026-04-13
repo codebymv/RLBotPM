@@ -15,6 +15,8 @@ export type StrategyMetrics = {
   realized_pnl: number;
   open_positions: number;
   open_cost: number;
+  resting_orders?: number;
+  resting_cost?: number;
   side_breakdown?: Record<string, { total: number; wins: number; pnl: number }>;
   recent_trades?: Array<Record<string, unknown>>;
 };
@@ -24,6 +26,8 @@ export type CurrentSessionSnapshot = {
   started_at: string | null;
   open_positions: number;
   open_cost: number;
+  resting_orders?: number;
+  resting_cost?: number;
   settled_trades: number;
   wins: number;
   losses: number;
@@ -174,8 +178,8 @@ export async function fetchCryptoPrices() {
 // Bot status
 // ---------------------------------------------------------------------------
 
-export async function fetchBotStatus() {
-  return get<BotStatusResponse>(`/api/bot/status`);
+export async function fetchBotStatus(mode = "paper") {
+  return get<BotStatusResponse>(`/api/bot/status?mode=${mode}`);
 }
 
 // ---------------------------------------------------------------------------

@@ -1934,6 +1934,11 @@ def fleet_start(dry_run, skip_gates, kalshi_only, rl_only, model):
 
     mode_str = "DRY RUN (no real orders)" if dry_run else "LIVE"
     console.print(f"\n[bold cyan]Starting fleet in {mode_str} mode[/bold cyan]\n")
+    if not dry_run and fleet_section.get("max_combined_daily_loss_usd") is not None:
+        console.print(
+            "[yellow]Warning:[/yellow] Fleet-level combined loss limits in "
+            "`shared/config/fleet.yaml` are advisory only unless you add an external supervisor."
+        )
 
     procs = []
     env = os.environ.copy()

@@ -65,16 +65,19 @@ def _probe(demo: bool) -> dict:
     client = KalshiExecutionClient(demo=demo)
     health = client.healthcheck()
     positions: list = []
+    active_positions: list = []
     pos_error = None
     if health.get("ok"):
         try:
             positions = client.get_positions()
+            active_positions = [p for p in positions if client.is_active_position(p)]
         except Exception as e:
             pos_error = str(e)
     return {
         "demo": demo,
         "health": health,
         "position_count": len(positions) if positions is not None else None,
+        "active_position_count": len(active_positions) if active_positions is not None else None,
         "positions_error": pos_error,
     }
 
@@ -148,6 +151,7 @@ def main() -> int:
         api_ok
         and authed
         and avail >= args.min_balance
+        and int(prod.get("active_position_count") or 0) == 0
     )
 
     if args.json:
@@ -167,6 +171,9 @@ def main() -> int:
         pc = prod.get("position_count")
         if pc is not None:
             print(f"  Open positions:  {pc}")
+        apc = prod.get("active_position_count")
+        if apc is not None:
+            print(f"  Active positions:{apc:>4}")
         if prod.get("positions_error"):
             print(f"  Positions note:  {prod['positions_error'][:120]}")
 
@@ -178,6 +185,11 @@ def main() -> int:
             print(
                 f"  [FAIL] Available balance ${avail:.2f} is below "
                 f"--min-balance ${args.min_balance:.2f}."
+            )
+        elif api_ok and int(prod.get("active_position_count") or 0) > 0:
+            print(
+                f"  [FAIL] Account still has {int(prod.get('active_position_count') or 0)} "
+                "active open positions."
             )
         elif not api_ok:
             print("  [FAIL] Production API check did not succeed.")

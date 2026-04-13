@@ -25,9 +25,9 @@ async function getCryptoPrices() {
   }
 }
 
-async function getBotStatus() {
+async function getBotStatus(mode: string) {
   try {
-    const res = await fetch(`${baseUrl}/api/bot/status`, {
+    const res = await fetch(`${baseUrl}/api/bot/status?mode=${mode}`, {
       cache: "no-store",
     });
     if (!res.ok) return null;
@@ -72,7 +72,7 @@ export default async function Page({ searchParams }: PageProps) {
     getHealth(),
     getCombinedMetrics(mode),
     getCryptoPrices(),
-    getBotStatus(),
+    getBotStatus(mode),
     getMarketStats(),
   ]);
 

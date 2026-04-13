@@ -71,6 +71,31 @@ class LivePosition:
 
 
 @dataclass
+class RestingOrder:
+    """An order that was accepted by Kalshi but hasn't filled yet."""
+    ticker: str
+    event_ticker: str
+    side: str
+    order_id: str
+    price_cents: int
+    contracts_requested: int
+    cost_per_contract: float
+    edge_value: float
+    edge_type: str
+    reasoning: str
+    placed_at: str
+    filled_contracts: int = 0
+
+    @property
+    def remaining_contracts(self) -> int:
+        return max(0, self.contracts_requested - self.filled_contracts)
+
+    @property
+    def reserved_cost_dollars(self) -> float:
+        return self.remaining_contracts * self.cost_per_contract
+
+
+@dataclass
 class LivePortfolio:
     """Tracks live trading state."""
     max_cost_per_trade: float = DEFAULT_MAX_COST_PER_TRADE
@@ -80,6 +105,7 @@ class LivePortfolio:
     max_daily_loss: float = DEFAULT_MAX_DAILY_LOSS
 
     open_positions: Dict[str, LivePosition] = field(default_factory=dict)
+    resting_orders: Dict[str, RestingOrder] = field(default_factory=dict)
     closed_positions: List[LivePosition] = field(default_factory=list)
     realized_pnl: float = 0.0
     trades_taken: int = 0
@@ -93,11 +119,23 @@ class LivePortfolio:
 
     @property
     def deployed_capital(self) -> float:
+        return self.open_position_capital + self.resting_capital
+
+    @property
+    def open_position_capital(self) -> float:
         return sum(p.cost_dollars for p in self.open_positions.values())
+
+    @property
+    def resting_capital(self) -> float:
+        return sum(o.reserved_cost_dollars for o in self.resting_orders.values())
 
     @property
     def available_to_deploy(self) -> float:
         return max(0, self.max_total_deployed - self.deployed_capital)
+
+    @property
+    def active_market_count(self) -> int:
+        return len(set(self.open_positions) | set(self.resting_orders))
 
     @property
     def win_rate(self) -> float:
@@ -123,11 +161,15 @@ class LivePortfolio:
             "=" * 55,
             f"Scans completed   : {self.scan_count}",
             f"Deployed capital  : ${self.deployed_capital:.2f} / ${self.max_total_deployed:.2f}",
+            f"  Open cost       : ${self.open_position_capital:.2f}",
+            f"  Resting reserved: ${self.resting_capital:.2f}",
             f"Realized P&L      : ${self.realized_pnl:+.2f}",
             f"Trades taken      : {self.trades_taken}",
             f"  Won             : {self.trades_won} ({self.win_rate:.1%})",
             f"  Lost            : {self.trades_lost}",
+            f"Resting orders    : {len(self.resting_orders)}",
             f"Open positions    : {len(self.open_positions)}",
+            f"Active markets    : {self.active_market_count}",
             f"Closed positions  : {len(self.closed_positions)}",
             f"Loss streak       : {self.consecutive_losses} / {self.max_loss_streak} (kill switch)",
         ]
@@ -146,7 +188,7 @@ class LivePortfolio:
         return "\n".join(lines)
 
 
-def _push_event_to_api(event: Dict) -> None:
+def _push_event_to_api(event: Dict) -> bool:
     """Fire-and-forget POST of a trade event to the remote API."""
     import urllib.request
 
@@ -162,9 +204,14 @@ def _push_event_to_api(event: Dict) -> None:
     )
     try:
         with urllib.request.urlopen(req, timeout=5):
-            pass
-    except Exception:
-        pass
+            return True
+    except Exception as exc:
+        event_type = event.get("type", "unknown")
+        if event_type != "scan_summary":
+            logger.warning("Failed to push live-trade event '%s' to API: %s", event_type, exc)
+        else:
+            logger.debug("Failed to push live-trade event '%s' to API: %s", event_type, exc)
+        return False
 
 
 def _log_event(log_path: Path, event: Dict):
@@ -175,6 +222,105 @@ def _log_event(log_path: Path, event: Dict):
     _push_event_to_api(event)
 
 
+def _check_resting_fills(client, portfolio: LivePortfolio, log_path: Path, session_id: str):
+    """Poll resting orders to see if any have filled. Promote to positions."""
+    completed = []
+    for ticker, resting in portfolio.resting_orders.items():
+        try:
+            order = client.get_order(resting.order_id, strict=True)
+        except Exception as e:
+            logger.warning("Failed to poll resting order %s for %s: %s", resting.order_id[:8], ticker, e)
+            continue
+
+        if order is None:
+            continue
+
+        status_str = order.status.value if order.status else "unknown"
+        filled = order.filled_contracts or 0
+
+        newly_filled = max(0, filled - resting.filled_contracts)
+        if newly_filled > 0:
+            actual_cost = newly_filled * resting.cost_per_contract
+            pos = portfolio.open_positions.get(ticker)
+            if pos is None:
+                portfolio.trades_taken += 1
+                pos = LivePosition(
+                    ticker=ticker,
+                    event_ticker=resting.event_ticker,
+                    side=resting.side,
+                    order_id=resting.order_id,
+                    price_cents=resting.price_cents,
+                    contracts=newly_filled,
+                    cost_dollars=actual_cost,
+                    edge_value=resting.edge_value,
+                    edge_type=resting.edge_type,
+                    reasoning=resting.reasoning,
+                    opened_at=resting.placed_at,
+                )
+                portfolio.open_positions[ticker] = pos
+            else:
+                pos.contracts += newly_filled
+                pos.cost_dollars += actual_cost
+
+            resting.filled_contracts = filled
+            _log_event(log_path, {
+                "type": "order_filled",
+                "session_id": session_id,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "ticker": ticker,
+                "event_ticker": resting.event_ticker,
+                "side": resting.side,
+                "price_cents": resting.price_cents,
+                "contracts": newly_filled,
+                "filled_contracts_total": filled,
+                "remaining_contracts": resting.remaining_contracts,
+                "cost": actual_cost,
+                "edge": resting.edge_value,
+                "edge_type": resting.edge_type,
+                "order_id": resting.order_id,
+                "order_status": status_str,
+                "reasoning": resting.reasoning,
+            })
+            logger.info(
+                "RESTING ORDER FILL: %s %s +%s@%s¢ remaining=%s order=%s",
+                ticker,
+                resting.side.upper(),
+                newly_filled,
+                resting.price_cents,
+                resting.remaining_contracts,
+                resting.order_id[:8],
+            )
+
+        if status_str in ("canceled", "cancelled", "expired"):
+            logger.info("Resting order %s: %s order=%s", status_str, ticker, resting.order_id[:8])
+            _log_event(log_path, {
+                "type": "order_closed",
+                "session_id": session_id,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "ticker": ticker,
+                "event_ticker": resting.event_ticker,
+                "side": resting.side,
+                "price_cents": resting.price_cents,
+                "contracts": resting.contracts_requested,
+                "filled_contracts_total": resting.filled_contracts,
+                "remaining_contracts": resting.remaining_contracts,
+                "cost": resting.reserved_cost_dollars,
+                "edge": resting.edge_value,
+                "edge_type": resting.edge_type,
+                "order_id": resting.order_id,
+                "order_status": status_str,
+                "reasoning": resting.reasoning,
+            })
+            completed.append(ticker)
+            continue
+
+        if resting.remaining_contracts <= 0 or status_str == "filled":
+            completed.append(ticker)
+
+    for t in completed:
+        portfolio.resting_orders.pop(t, None)
+
+
 def _check_live_settlements(client, portfolio: LivePortfolio, log_path: Path):
     """Check if any open positions have settled on Kalshi."""
     from ..data.sources.kalshi import KalshiAdapter
@@ -182,7 +328,40 @@ def _check_live_settlements(client, portfolio: LivePortfolio, log_path: Path):
     adapter = KalshiAdapter(demo=False)
     settled_tickers = []
 
+    actual_positions = None
+    try:
+        actual_positions = {}
+        for kp in client.get_positions(strict=True):
+            actual_positions[kp.ticker] = kp.position
+    except Exception as exc:
+        logger.warning("Skipping live settlement reconciliation: unable to fetch Kalshi positions (%s)", exc)
+
     for ticker, pos in portfolio.open_positions.items():
+        actual_qty = actual_positions.get(ticker, 0) if actual_positions is not None else None
+        if actual_qty == 0:
+            logger.warning(
+                f"Position {ticker} tracked locally but Kalshi shows 0 contracts — "
+                f"removing phantom position"
+            )
+            settled_tickers.append(ticker)
+            _log_event(log_path, {
+                "type": "phantom_removed",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "ticker": ticker,
+                "side": pos.side,
+                "local_contracts": pos.contracts,
+                "kalshi_contracts": 0,
+            })
+            continue
+        if actual_qty is not None and abs(actual_qty) < pos.contracts:
+            logger.warning(
+                "Kalshi position for %s is smaller than local tracking (%s vs %s contracts); "
+                "using the exchange quantity for settlement",
+                ticker,
+                abs(actual_qty),
+                pos.contracts,
+            )
+
         try:
             market = adapter.get_market(ticker)
         except Exception:
@@ -194,21 +373,41 @@ def _check_live_settlements(client, portfolio: LivePortfolio, log_path: Path):
         pos.settled = True
         pos.outcome = market.result
 
+        settled_contracts = pos.contracts if actual_qty is None else min(pos.contracts, abs(actual_qty))
+        settled_cost = pos.cost_dollars
+        if actual_qty is not None and settled_contracts < pos.contracts and pos.contracts > 0:
+            settled_cost = pos.cost_dollars * (settled_contracts / pos.contracts)
+
         if pos.side == "yes":
             payout = 1.0 if market.result == "yes" else 0.0
         else:
             payout = 1.0 if market.result == "no" else 0.0
 
-        pos.pnl = (payout * pos.contracts) - pos.cost_dollars
+        pos.pnl = (payout * settled_contracts) - settled_cost
         portfolio.realized_pnl += pos.pnl
 
         if pos.pnl > 0:
             portfolio.trades_won += 1
             portfolio.consecutive_losses = 0
-        else:
+        elif pos.pnl < 0:
             portfolio.trades_lost += 1
             portfolio.consecutive_losses += 1
             portfolio.daily_loss += abs(pos.pnl)
+        else:
+            portfolio.consecutive_losses = 0
+
+        if pos.pnl != 0:
+            try:
+                _, total_value = client.get_balance()
+                circuit_capital = total_value if total_value > 0 else (portfolio.max_total_deployed + portfolio.realized_pnl)
+                client.record_trade_outcome(
+                    pnl=pos.pnl,
+                    capital=max(0.0, circuit_capital),
+                    is_win=pos.pnl > 0,
+                    timestamp=datetime.now(timezone.utc),
+                )
+            except Exception as exc:
+                logger.warning("Failed to record live trade outcome in circuit breaker state: %s", exc)
 
         settled_tickers.append(ticker)
 
@@ -218,6 +417,8 @@ def _check_live_settlements(client, portfolio: LivePortfolio, log_path: Path):
             "ticker": ticker,
             "side": pos.side,
             "price_cents": pos.price_cents,
+            "contracts": settled_contracts,
+            "cost": settled_cost,
             "outcome": market.result,
             "pnl": pos.pnl,
             "cumulative_pnl": portfolio.realized_pnl,
@@ -318,6 +519,7 @@ def run_live_trading(
         max_loss_streak=max_loss_streak,
         max_daily_loss=max_daily_loss,
     )
+    session_id = datetime.now(timezone.utc).strftime("live_%Y%m%d_%H%M%S")
 
     # Check account balance first
     try:
@@ -330,8 +532,30 @@ def run_live_trading(
         logger.error(f"Failed to get account balance: {e}")
         return portfolio
 
+    allow_unreconciled_start = os.getenv("KALSHI_ALLOW_UNRECONCILED_STARTUP", "false").lower() == "true"
+    try:
+        existing_positions = client.get_active_positions(strict=True)
+        existing_orders = client.get_open_orders(strict=True)
+    except Exception as exc:
+        logger.error("Startup reconciliation failed: %s", exc)
+        return portfolio
+    if (existing_positions or existing_orders) and not allow_unreconciled_start:
+        logger.error(
+            "Startup blocked: Kalshi account already has %s open positions and %s open orders. "
+            "Resolve them first or set KALSHI_ALLOW_UNRECONCILED_STARTUP=true to override.",
+            len(existing_positions),
+            len(existing_orders),
+        )
+        _log_event(log_path, {
+            "type": "startup_reconcile_blocked",
+            "session_id": session_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "open_positions": len(existing_positions),
+            "open_orders": len(existing_orders),
+        })
+        return portfolio
+
     mode_label = "DRY RUN" if dry_run else "LIVE"
-    session_id = datetime.now(timezone.utc).strftime("live_%Y%m%d_%H%M%S")
     heartbeat = BotHeartbeat(
         interval=60,
         bot_id="kalshi_live" if not dry_run else "kalshi_live_dry_run",
@@ -339,7 +563,9 @@ def run_live_trading(
             "mode": "live" if not dry_run else "dry_run",
             "session_id": session_id,
             "scan_count": portfolio.scan_count,
+            "resting_orders": len(portfolio.resting_orders),
             "open_positions": len(portfolio.open_positions),
+            "active_markets": portfolio.active_market_count,
             "deployed_capital": round(portfolio.deployed_capital, 2),
             "realized_pnl": round(portfolio.realized_pnl, 2),
         },
@@ -412,7 +638,11 @@ def run_live_trading(
 
             scan_ts = datetime.now(timezone.utc).isoformat()
 
-            # 1. Check settlements
+            # 1a. Poll resting orders for fills
+            if portfolio.resting_orders:
+                _check_resting_fills(client, portfolio, log_path, session_id)
+
+            # 1b. Check settlements
             if portfolio.open_positions:
                 _check_live_settlements(client, portfolio, log_path)
 
@@ -434,6 +664,7 @@ def run_live_trading(
 
             # 4. Filter and place orders
             new_trades = 0
+            position_limit_hit = False
             for edge in edges:
                 if edge.edge_type not in ("crypto_spot_mispricing",):
                     continue
@@ -442,7 +673,7 @@ def run_live_trading(
                 if edge.recommended_side not in allowed_side_set:
                     continue
 
-                if edge.ticker in portfolio.open_positions:
+                if edge.ticker in portfolio.open_positions or edge.ticker in portfolio.resting_orders:
                     continue
 
                 if edge.edge_value < min_edge or edge.edge_value > max_edge:
@@ -452,7 +683,7 @@ def run_live_trading(
                 if price < min_price or price > max_price:
                     continue
 
-                if len(portfolio.open_positions) >= max_positions:
+                if portfolio.active_market_count >= max_positions or position_limit_hit:
                     break
 
                 # Concentration limit: max 40% per asset
@@ -460,6 +691,10 @@ def run_live_trading(
                 asset_cost = sum(
                     p.cost_dollars for p in portfolio.open_positions.values()
                     if _extract_asset(p.ticker) == asset
+                )
+                asset_cost += sum(
+                    o.reserved_cost_dollars for o in portfolio.resting_orders.values()
+                    if _extract_asset(o.ticker) == asset
                 )
                 if asset_cost >= max_total_deployed * 0.40:
                     continue
@@ -505,6 +740,7 @@ def run_live_trading(
 
                 order_side = OrderSide.YES if edge.recommended_side == "yes" else OrderSide.NO
                 order_price = price if edge.recommended_side == "yes" else (100 - price)
+                close_time_utc = detector._parse_ts(edge.market_data.get("close_time"))
 
                 order = client.place_limit_order(
                     ticker=edge.ticker,
@@ -512,17 +748,54 @@ def run_live_trading(
                     price=order_price,
                     contracts=contracts,
                     expiration_seconds=interval_seconds,  # Cancel if not filled by next scan
+                    close_time_utc=close_time_utc,
                 )
 
                 if order is None:
                     logger.warning(f"Order failed for {edge.ticker}")
-                    _send_alert(
-                        "Live order failed",
-                        f"Ticker={edge.ticker} side={edge.recommended_side} price={price} contracts={contracts}",
-                        severity="warning",
+                    position_limit_hit = True
+                    break
+
+                filled = order.filled_contracts or 0
+                status_str = order.status.value if order.status else "unknown"
+
+                if filled == 0:
+                    logger.info(
+                        f"ORDER RESTING (not filled): {edge.ticker} status={status_str} "
+                        f"order={order.order_id[:8]} — will poll for fills"
                     )
+                    portfolio.resting_orders[edge.ticker] = RestingOrder(
+                        ticker=edge.ticker,
+                        event_ticker=edge.event_ticker,
+                        side=edge.recommended_side,
+                        order_id=order.order_id,
+                        price_cents=price,
+                        contracts_requested=contracts,
+                        cost_per_contract=cost_per_contract,
+                        edge_value=edge.edge_value,
+                        edge_type=edge.edge_type,
+                        reasoning=edge.reasoning,
+                        placed_at=scan_ts,
+                    )
+                    _log_event(log_path, {
+                        "type": "order_resting",
+                        "session_id": session_id,
+                        "timestamp": scan_ts,
+                        "ticker": edge.ticker,
+                        "side": edge.recommended_side,
+                        "price_cents": price,
+                        "contracts": contracts,
+                        "remaining_contracts": contracts,
+                        "cost": total_cost,
+                        "edge": edge.edge_value,
+                        "edge_type": edge.edge_type,
+                        "order_id": order.order_id,
+                        "order_status": status_str,
+                        "reasoning": edge.reasoning,
+                    })
                     continue
 
+                actual_cost = filled * cost_per_contract
                 portfolio.trades_taken += 1
                 pos = LivePosition(
                     ticker=edge.ticker,
@@ -530,8 +803,8 @@ def run_live_trading(
                     side=edge.recommended_side,
                     order_id=order.order_id,
                     price_cents=price,
-                    contracts=contracts,
-                    cost_dollars=total_cost,
+                    contracts=filled,
+                    cost_dollars=actual_cost,
                     edge_value=edge.edge_value,
                     edge_type=edge.edge_type,
                     reasoning=edge.reasoning,
@@ -548,17 +821,18 @@ def run_live_trading(
                     "event_ticker": edge.event_ticker,
                     "side": edge.recommended_side,
                     "price_cents": price,
-                    "contracts": contracts,
-                    "cost": total_cost,
+                    "contracts": filled,
+                    "cost": actual_cost,
                     "edge": edge.edge_value,
                     "edge_type": edge.edge_type,
                     "order_id": order.order_id,
+                    "order_status": status_str,
                     "reasoning": edge.reasoning,
                 })
 
                 logger.info(
-                    f"ORDER FILLED: {edge.ticker} BUY_{edge.recommended_side.upper()} {contracts}@{price}¢ "
-                    f"cost=${total_cost:.2f} order={order.order_id[:8]}"
+                    f"ORDER FILLED: {edge.ticker} BUY_{edge.recommended_side.upper()} "
+                    f"{filled}@{price}¢ cost=${actual_cost:.2f} order={order.order_id[:8]}"
                 )
 
             # 5. Summary
@@ -566,6 +840,7 @@ def run_live_trading(
                 f"Scan {scan_n}: {len(markets)} markets | "
                 f"{len(edges)} edges | {new_trades} new orders | "
                 f"open={len(portfolio.open_positions)} | "
+                f"resting={len(portfolio.resting_orders)} | "
                 f"deployed=${portfolio.deployed_capital:.2f} | "
                 f"P&L=${portfolio.realized_pnl:+.2f}"
             )
@@ -578,6 +853,7 @@ def run_live_trading(
                 "markets_scanned": len(markets),
                 "edges_found": len(edges),
                 "new_trades": new_trades,
+                "resting_orders": len(portfolio.resting_orders),
                 "open_positions": len(portfolio.open_positions),
                 "deployed_capital": portfolio.deployed_capital,
                 "realized_pnl": portfolio.realized_pnl,
@@ -605,6 +881,7 @@ def run_live_trading(
             "trades_won": portfolio.trades_won,
             "trades_lost": portfolio.trades_lost,
             "realized_pnl": portfolio.realized_pnl,
+            "resting_orders": len(portfolio.resting_orders),
             "open_positions": len(portfolio.open_positions),
             "killed": portfolio.killed,
             "kill_reason": portfolio.kill_reason,
