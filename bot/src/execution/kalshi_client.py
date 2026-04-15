@@ -379,8 +379,19 @@ class KalshiExecutionClient:
         if "error" in resp:
             return 0.0, 0.0
         
-        available = resp.get("balance", 0) / 100.0  # Convert cents to dollars
-        total = resp.get("portfolio_value", available * 100) / 100.0
+        # Kalshi v2 may return dollar-denominated string fields.
+        # Try _dollars fields first, then legacy cent integers.
+        if "balance_dollars" in resp:
+            available = float(resp["balance_dollars"])
+        else:
+            available = float(resp.get("balance", 0)) / 100.0
+
+        if "portfolio_value_dollars" in resp:
+            total = float(resp["portfolio_value_dollars"])
+        elif "portfolio_value" in resp:
+            total = float(resp["portfolio_value"]) / 100.0
+        else:
+            total = available
         
         return available, total
     
@@ -837,8 +848,16 @@ class KalshiExecutionClient:
                     "error": resp.get("error", "unknown error"),
                 }
 
-            available = resp.get("balance", 0) / 100.0
-            total = resp.get("portfolio_value", resp.get("balance", 0)) / 100.0
+            if "balance_dollars" in resp:
+                available = float(resp["balance_dollars"])
+            else:
+                available = float(resp.get("balance", 0)) / 100.0
+            if "portfolio_value_dollars" in resp:
+                total = float(resp["portfolio_value_dollars"])
+            elif "portfolio_value" in resp:
+                total = float(resp["portfolio_value"]) / 100.0
+            else:
+                total = available
             return {
                 "source": "kalshi",
                 "ok": True,

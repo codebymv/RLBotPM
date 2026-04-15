@@ -187,6 +187,9 @@ def get_spot_price(asset: str, max_age_s: int = 30) -> Optional[float]:
 
 # ── Volatility estimates ─────────────────────────────────────────────
 
+# Static annualized vol estimates. These are regime-dependent approximations
+# and should be periodically re-calibrated against recent realized vol.
+# Using stale vol during a regime shift will mis-price the lognormal model.
 ANNUALIZED_VOL: Dict[str, float] = {
     "BTC": 0.56,
     "ETH": 0.70,
@@ -203,5 +206,9 @@ ANNUALIZED_VOL: Dict[str, float] = {
 
 
 def get_annualized_vol(asset: str) -> float:
-    """Return calibrated annualized vol for the asset, defaulting to 0.50."""
+    """Return calibrated annualized vol for the asset, defaulting to 0.50.
+
+    WARNING: These are static estimates. In high-vol regimes the model will
+    understate tail probabilities, and in low-vol regimes it will overstate them.
+    """
     return ANNUALIZED_VOL.get(asset, 0.50)

@@ -280,7 +280,7 @@ def run_walk_forward(
     np.random.seed(seed)
 
     if edge_types is None:
-        edge_types = ["crypto_spot_mispricing"]
+        edge_types = ["spot_vs_strike", "crypto_spot_mispricing"]
 
     logger.info("Loading settled markets for walk-forward...")
     session = get_db_session()

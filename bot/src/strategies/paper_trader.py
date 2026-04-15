@@ -96,6 +96,65 @@ WEATHER_SERIES = ["KXTEMP", "KXHMONTHRANGE"]
 
 LIVE_SERIES = CRYPTO_SERIES + INDEX_SERIES + FX_COMMODITY_SERIES + MACRO_SERIES + WEATHER_SERIES
 
+# ---------------------------------------------------------------------------
+# Sleeve classification for hybrid turnover strategy
+# ---------------------------------------------------------------------------
+# "Fast" series resolve daily/intraday (crypto dailies, hourly FX/commodity,
+# short index). "Macro" series resolve on scheduled data releases (monthly+).
+FAST_SERIES = set(CRYPTO_SERIES + INDEX_SERIES + FX_COMMODITY_SERIES)
+MACRO_SERIES_SET = set(MACRO_SERIES + WEATHER_SERIES)
+
+# Default hybrid-mode settings
+HYBRID_FAST_HORIZON_HOURS = 72  # contracts closing within this window qualify as fast
+HYBRID_FAST_CAPITAL_FRAC = 0.60  # 60 % of budget reserved for fast-turnover sleeve
+HYBRID_FAST_POSITION_FRAC = 0.60  # 60 % of position slots reserved for fast sleeve
+
+
+def classify_sleeve(market: Dict, fast_horizon_hours: float = HYBRID_FAST_HORIZON_HOURS) -> str:
+    """Classify a market dict into 'fast', 'macro', or 'other'.
+
+    Classification uses both the series prefix and time-to-close:
+      - If the series is in FAST_SERIES *and* the market closes within
+        ``fast_horizon_hours``, it is 'fast'.
+      - If the series is in MACRO_SERIES_SET, it is always 'macro'.
+      - Otherwise 'other'.
+    """
+    series = market.get("series_ticker", "")
+    close_time = market.get("close_time")
+
+    if series in MACRO_SERIES_SET:
+        return "macro"
+
+    if series in FAST_SERIES:
+        if close_time is not None:
+            now = datetime.now(timezone.utc)
+            try:
+                if isinstance(close_time, str):
+                    close_time = datetime.fromisoformat(close_time.replace("Z", "+00:00"))
+                hours_left = (close_time - now).total_seconds() / 3600.0
+                if hours_left <= fast_horizon_hours:
+                    return "fast"
+            except (ValueError, TypeError):
+                pass
+        return "fast"
+
+    return "other"
+
+
+def hours_to_close(market: Dict) -> Optional[float]:
+    """Return hours until close_time, or None if unavailable."""
+    ct = market.get("close_time")
+    if ct is None:
+        return None
+    try:
+        now = datetime.now(timezone.utc)
+        if isinstance(ct, str):
+            ct = datetime.fromisoformat(ct.replace("Z", "+00:00"))
+        secs = (ct - now).total_seconds()
+        return secs / 3600.0 if secs > 0 else 0.0
+    except (ValueError, TypeError):
+        return None
+
 _ASSET_MAP = {
     "KXBTC": "BTC", "KXBTCD": "BTC",
     "KXETH": "ETH", "KXETHD": "ETH",
@@ -114,13 +173,13 @@ def _extract_asset(ticker: str) -> str:
             return asset
     return ticker.split("-")[0]
 
-# Backtest-validated parameters (sweep: 98.2% win, Sharpe 2.36)
-DEFAULT_MIN_EDGE = 0.02      # 2% minimum edge (sweet spot)
-DEFAULT_MAX_EDGE = 0.05      # 5% max — large "edges" are often wrong
+# Paper-trading defaults. Historical backtest results used different edge
+# naming and spot-price paths — treat those stats as indicative, not guaranteed.
+DEFAULT_MIN_EDGE = 0.02      # 2% minimum edge
+DEFAULT_MAX_EDGE = 0.05      # 5% max — large "edges" are often noise
 DEFAULT_MIN_PRICE = 1        # Skip 0-priced markets
-DEFAULT_MAX_PRICE = 15       # Low-price markets have best win rate (99%+ at 1-15¢)
-DEFAULT_SIDE_FILTER = "no"   # BUY_NO only: 100% win rate in backtest (959/959), Sharpe 21.55
-                              # BUY_YES was 1.8% win rate, negative PnL — skip it
+DEFAULT_MAX_PRICE = 15       # Low-price markets tend to be cheaper entry
+DEFAULT_SIDE_FILTER = "no"   # BUY_NO default; BUY_YES allowed via env flag
 
 
 @dataclass

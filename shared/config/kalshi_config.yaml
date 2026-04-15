@@ -99,6 +99,13 @@ strategy:
     bearish_action: "yes_on_lower_ranges"
     neutral_threshold: 0.1  # Hold if signal strength < 10%
 
+  # Hybrid turnover mode: split capital between fast-settling and macro sleeves
+  hybrid:
+    enabled: true
+    fast_capital_fraction: 0.60   # 60% of budget for short-dated (daily/intraday) markets
+    fast_position_fraction: 0.60  # 60% of position slots for short-dated markets
+    fast_horizon_hours: 72        # Contracts closing within this window qualify as "fast"
+
   # Time-based adjustments
   time_decay:
     enable: true

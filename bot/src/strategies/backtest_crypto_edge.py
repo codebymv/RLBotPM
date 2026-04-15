@@ -250,8 +250,8 @@ def run_backtest(
 
         # Simulate trades on edges with tradeable prices
         for edge in edges:
-            if edge.edge_type not in ("crypto_spot_mispricing", "strike_dominance", "ladder_overpriced"):
-                continue  # Only test crypto-relevant edges
+            if edge.edge_type not in ("spot_vs_strike", "crypto_spot_mispricing", "strike_dominance", "ladder_overpriced"):
+                continue
 
             price = edge.market_price
             if price < min_tradeable_price or price > max_tradeable_price:

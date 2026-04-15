@@ -1791,6 +1791,9 @@ def paper_status():
 @click.option('--max-scans', default=None, type=int, help='Stop after N scans')
 @click.option('--series', default=None, help='Comma-separated series')
 @click.option('--dry-run', is_flag=True, help='Find edges + log but do NOT place orders')
+@click.option('--hybrid/--no-hybrid', default=True, help='Enable hybrid turnover mode (default: on)')
+@click.option('--fast-split', default=0.60, type=float, help='Fraction of capital/slots for fast sleeve (default 60%%)')
+@click.option('--fast-horizon', default=72.0, type=float, help='Max hours-to-close for fast sleeve (default 72h)')
 @click.confirmation_option(
     prompt='\n⚠️  WARNING: This places REAL orders with REAL money on Kalshi.\n'
            '   Safety limits: $1/trade, $10 total, kill switch at 3 losses.\n'
@@ -1798,7 +1801,7 @@ def paper_status():
 )
 def live_trade(interval, max_cost, max_total, max_positions, max_loss_streak,
                max_daily_loss, min_edge, max_edge, min_price, max_price,
-               max_scans, series, dry_run):
+               max_scans, series, dry_run, hybrid, fast_split, fast_horizon):
     """
     Live trade the crypto edge detector on Kalshi.
 
@@ -1823,7 +1826,9 @@ def live_trade(interval, max_cost, max_total, max_positions, max_loss_streak,
     console.print(f"Max per trade: ${max_cost:.2f} | Max total: ${max_total:.2f}")
     console.print(f"Edge: {min_edge:.1%}-{max_edge:.1%} | Price: {min_price}-{max_price}c")
     console.print(f"Kill switch: {max_loss_streak} losses or ${max_daily_loss:.2f} daily loss")
-    console.print(f"Side policy: LIVE_ALLOWED_SIDES (default BUY_NO) | Interval: {interval}s\n")
+    hybrid_label = f"Hybrid {fast_split:.0%}/{1-fast_split:.0%} fast/macro (<{fast_horizon:.0f}h)" if hybrid else "Off"
+    console.print(f"Side policy: LIVE_ALLOWED_SIDES (default BUY_NO) | Interval: {interval}s")
+    console.print(f"Hybrid mode: {hybrid_label}\n")
 
     try:
         series_list = None
@@ -1844,6 +1849,10 @@ def live_trade(interval, max_cost, max_total, max_positions, max_loss_streak,
             series=series_list,
             max_scans=max_scans,
             dry_run=dry_run,
+            hybrid_mode=hybrid,
+            fast_capital_frac=fast_split,
+            fast_position_frac=fast_split,
+            fast_horizon_hours=fast_horizon,
         )
         console.print(portfolio.summary())
     except Exception as e:

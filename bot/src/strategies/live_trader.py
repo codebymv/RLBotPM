@@ -31,8 +31,15 @@ from ..strategies.kalshi_edges import StatisticalEdgeDetector, Edge
 from ..strategies.paper_trader import (
     _fetch_live_markets,
     _extract_asset,
+    classify_sleeve,
+    hours_to_close,
     CRYPTO_SERIES,
     LIVE_SERIES,
+    FAST_SERIES,
+    MACRO_SERIES_SET,
+    HYBRID_FAST_HORIZON_HOURS,
+    HYBRID_FAST_CAPITAL_FRAC,
+    HYBRID_FAST_POSITION_FRAC,
     DEFAULT_MIN_EDGE,
     DEFAULT_MAX_EDGE,
     DEFAULT_MIN_PRICE,
@@ -114,9 +121,25 @@ class LivePortfolio:
     trades_lost: int = 0
     consecutive_losses: int = 0
     daily_loss: float = 0.0
+    _daily_loss_date: str = ""
     scan_count: int = 0
     killed: bool = False
     kill_reason: str = ""
+
+    def maybe_reset_daily_loss(self):
+        """Reset daily_loss and un-kill the bot at the start of each new UTC day."""
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if self._daily_loss_date != today:
+            if self.daily_loss > 0:
+                logger.info(
+                    "Daily loss reset: $%.2f (from %s) -> $0.00 (new day %s)",
+                    self.daily_loss, self._daily_loss_date or "session-start", today,
+                )
+            self.daily_loss = 0.0
+            self._daily_loss_date = today
+            if self.killed and "daily loss" in self.kill_reason:
+                self.killed = False
+                self.kill_reason = ""
 
     @property
     def deployed_capital(self) -> float:
@@ -330,29 +353,64 @@ def _check_live_settlements(client, portfolio: LivePortfolio, log_path: Path):
     settled_tickers = []
 
     actual_positions = None
+    exchange_pnl_map = {}
     try:
         actual_positions = {}
         for kp in client.get_positions(strict=True):
             actual_positions[kp.ticker] = kp.position
+            if kp.realized_pnl and abs(kp.realized_pnl) > 1e-9:
+                exchange_pnl_map[kp.ticker] = kp.realized_pnl
     except Exception as exc:
         logger.warning("Skipping live settlement reconciliation: unable to fetch Kalshi positions (%s)", exc)
 
     for ticker, pos in portfolio.open_positions.items():
         actual_qty = actual_positions.get(ticker, 0) if actual_positions is not None else None
         if actual_qty == 0:
-            logger.warning(
-                f"Position {ticker} tracked locally but Kalshi shows 0 contracts — "
-                f"removing phantom position"
-            )
+            # Position gone from exchange. Try to reconcile P&L from exchange
+            # data rather than silently dropping it.
+            exchange_pnl = exchange_pnl_map.get(ticker)
+            if exchange_pnl is not None:
+                pos.pnl = exchange_pnl
+                pos.settled = True
+                portfolio.realized_pnl += pos.pnl
+                if pos.pnl > 0:
+                    portfolio.trades_won += 1
+                    portfolio.consecutive_losses = 0
+                elif pos.pnl < 0:
+                    portfolio.trades_lost += 1
+                    portfolio.consecutive_losses += 1
+                    portfolio.daily_loss += abs(pos.pnl)
+                else:
+                    portfolio.consecutive_losses = 0
+                logger.info(
+                    "RECONCILED %s: exchange realized_pnl=$%+.2f (cumulative: $%+.2f)",
+                    ticker, pos.pnl, portfolio.realized_pnl,
+                )
+                _log_event(log_path, {
+                    "type": "reconciled_settlement",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "ticker": ticker,
+                    "side": pos.side,
+                    "local_contracts": pos.contracts,
+                    "exchange_realized_pnl": exchange_pnl,
+                    "cumulative_pnl": portfolio.realized_pnl,
+                })
+            else:
+                logger.warning(
+                    "Position %s: Kalshi shows 0 contracts, no exchange P&L available — "
+                    "removing as phantom (cost=$%.2f unreconciled)",
+                    ticker, pos.cost_dollars,
+                )
+                _log_event(log_path, {
+                    "type": "phantom_removed",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "ticker": ticker,
+                    "side": pos.side,
+                    "local_contracts": pos.contracts,
+                    "kalshi_contracts": 0,
+                    "unreconciled_cost": pos.cost_dollars,
+                })
             settled_tickers.append(ticker)
-            _log_event(log_path, {
-                "type": "phantom_removed",
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "ticker": ticker,
-                "side": pos.side,
-                "local_contracts": pos.contracts,
-                "kalshi_contracts": 0,
-            })
             continue
         if actual_qty is not None and abs(actual_qty) < pos.contracts:
             logger.warning(
@@ -450,6 +508,11 @@ def run_live_trading(
     allowed_sides: Optional[List[str]] = None,
     max_scans: Optional[int] = None,
     dry_run: bool = False,
+    # Hybrid turnover settings
+    hybrid_mode: bool = True,
+    fast_capital_frac: float = HYBRID_FAST_CAPITAL_FRAC,
+    fast_position_frac: float = HYBRID_FAST_POSITION_FRAC,
+    fast_horizon_hours: float = HYBRID_FAST_HORIZON_HOURS,
 ) -> LivePortfolio:
     """
     Run live trading against the Kalshi API.
@@ -583,6 +646,13 @@ def run_live_trading(
     logger.info(f"Price range:   {min_price}–{max_price}¢")
     logger.info(f"Sides:         {', '.join(sorted(f'BUY_{s.upper()}' for s in allowed_side_set))}")
     logger.info(f"Series:        {', '.join(series_list)}")
+    if hybrid_mode:
+        fast_max_pos = max(1, int(max_positions * fast_position_frac))
+        macro_max_pos = max(1, max_positions - fast_max_pos)
+        logger.info(f"Hybrid mode:   ON (fast {fast_capital_frac:.0%} / macro {1-fast_capital_frac:.0%})")
+        logger.info(f"  Fast slots:  {fast_max_pos} | Macro slots: {macro_max_pos}")
+        logger.info(f"  Fast budget: ${max_total_deployed * fast_capital_frac:.2f} | Macro budget: ${max_total_deployed * (1-fast_capital_frac):.2f}")
+        logger.info(f"  Fast horizon: {fast_horizon_hours:.0f}h")
 
     _send_alert(
         "Live trading session started",
@@ -620,6 +690,9 @@ def run_live_trading(
             if max_scans and scan_n > max_scans:
                 logger.info(f"Reached max_scans={max_scans}, stopping.")
                 break
+
+            # Reset daily loss at UTC day boundary
+            portfolio.maybe_reset_daily_loss()
 
             # Kill switch check
             if portfolio.check_kill_switch():
@@ -663,16 +736,62 @@ def run_live_trading(
             # 3. Detect edges
             edges = detector.scan_series(markets, top_n=500)
 
+            # 3b. Hybrid mode: classify edges into sleeves, compute budgets
+            if hybrid_mode:
+                fast_max_positions = max(1, int(max_positions * fast_position_frac))
+                macro_max_positions = max(1, max_positions - fast_max_positions)
+                fast_max_capital = max_total_deployed * fast_capital_frac
+                macro_max_capital = max_total_deployed * (1.0 - fast_capital_frac)
+
+                fast_open = sum(
+                    1 for t in portfolio.open_positions
+                    if classify_sleeve(portfolio.open_positions[t].__dict__, fast_horizon_hours) == "fast"
+                       or _extract_asset(t) in {a for s in FAST_SERIES for a in [_extract_asset(s)]}
+                )
+                macro_open = len(portfolio.open_positions) - fast_open
+                fast_resting = sum(
+                    1 for t in portfolio.resting_orders
+                    if _extract_asset(t) in {a for s in FAST_SERIES for a in [_extract_asset(s)]}
+                )
+                macro_resting = len(portfolio.resting_orders) - fast_resting
+
+                fast_deployed = sum(
+                    p.cost_dollars for p in portfolio.open_positions.values()
+                    if _extract_asset(p.ticker) not in {"CPI", "NFP", "FED", "WEATHER"}
+                ) + sum(
+                    o.reserved_cost_dollars for o in portfolio.resting_orders.values()
+                    if _extract_asset(o.ticker) not in {"CPI", "NFP", "FED", "WEATHER"}
+                )
+                macro_deployed = portfolio.deployed_capital - fast_deployed
+
+                fast_slots_left = max(0, fast_max_positions - fast_open - fast_resting)
+                macro_slots_left = max(0, macro_max_positions - macro_open - macro_resting)
+                fast_capital_left = max(0.0, fast_max_capital - fast_deployed)
+                macro_capital_left = max(0.0, macro_max_capital - macro_deployed)
+
+                def _hybrid_score(e):
+                    """Score an edge: base edge*confidence + time bonus for fast sleeve."""
+                    base = e.edge_value * (e.confidence if hasattr(e, "confidence") and e.confidence else 1.0)
+                    h = hours_to_close(e.market_data) if e.market_data else None
+                    if h is not None and h <= 24:
+                        base *= 1.5
+                    elif h is not None and h <= fast_horizon_hours:
+                        base *= 1.2
+                    return base
+
+                edges = sorted(edges, key=_hybrid_score, reverse=True)
+
             # 4. Filter and place orders
             new_trades = 0
-            position_limit_hit = False
-            _blk = {"type": 0, "side": 0, "dup": 0, "edge_range": 0, "dead": 0, "price": 0}
+            _blk = {"type": 0, "side": 0, "dup": 0, "edge_range": 0, "dead": 0, "price": 0,
+                     "sleeve_full": 0}
+            _sleeve_stats = {"fast_candidates": 0, "macro_candidates": 0, "other_candidates": 0,
+                             "fast_placed": 0, "macro_placed": 0}
             for edge in edges:
                 if edge.edge_type not in ("spot_vs_strike", "crypto_spot_mispricing", "macro_data", "weather"):
                     _blk["type"] += 1
                     continue
 
-                # BUY_NO only
                 if edge.recommended_side not in allowed_side_set:
                     _blk["side"] += 1
                     continue
@@ -708,10 +827,35 @@ def run_live_trading(
                     _blk["price"] += 1
                     continue
 
-                if portfolio.active_market_count >= max_positions or position_limit_hit:
+                # Hybrid sleeve gating
+                sleeve = classify_sleeve(edge.market_data, fast_horizon_hours) if hybrid_mode else "any"
+                if hybrid_mode:
+                    _sleeve_stats[f"{sleeve}_candidates"] = _sleeve_stats.get(f"{sleeve}_candidates", 0) + 1
+
+                    if sleeve == "fast":
+                        if fast_slots_left <= 0 or fast_capital_left <= 0:
+                            _blk["sleeve_full"] += 1
+                            continue
+                    elif sleeve == "macro":
+                        if macro_slots_left <= 0 or macro_capital_left <= 0:
+                            _blk["sleeve_full"] += 1
+                            continue
+                    else:
+                        # 'other' markets: only allow if both sleeves have room
+                        if (fast_slots_left <= 0 and macro_slots_left <= 0):
+                            _blk["sleeve_full"] += 1
+                            continue
+
+                if portfolio.active_market_count >= max_positions:
                     break
 
-                # Concentration limit: max 40% per asset
+                MAX_NEW_TRADES_PER_SCAN = 6
+                if new_trades >= MAX_NEW_TRADES_PER_SCAN:
+                    break
+
+                # Concentration limit: max 30% per asset, max 50% per correlated
+                # cluster (e.g. CPI+NFP are both macro-employment linked).
+                MACRO_CLUSTER = {"CPI", "NFP", "FED"}
                 asset = _extract_asset(edge.ticker)
                 asset_cost = sum(
                     p.cost_dollars for p in portfolio.open_positions.values()
@@ -721,8 +865,20 @@ def run_live_trading(
                     o.reserved_cost_dollars for o in portfolio.resting_orders.values()
                     if _extract_asset(o.ticker) == asset
                 )
-                if asset_cost >= max_total_deployed * 0.40:
+                if asset_cost >= max_total_deployed * 0.30:
                     continue
+
+                if asset in MACRO_CLUSTER:
+                    cluster_cost = sum(
+                        p.cost_dollars for p in portfolio.open_positions.values()
+                        if _extract_asset(p.ticker) in MACRO_CLUSTER
+                    )
+                    cluster_cost += sum(
+                        o.reserved_cost_dollars for o in portfolio.resting_orders.values()
+                        if _extract_asset(o.ticker) in MACRO_CLUSTER
+                    )
+                    if cluster_cost >= max_total_deployed * 0.50:
+                        continue
 
                 # Size: how many contracts can we afford?
                 if edge.recommended_side == "yes":
@@ -787,9 +943,11 @@ def run_live_trading(
                 )
 
                 if order is None:
-                    logger.warning(f"Order failed for {edge.ticker}")
-                    position_limit_hit = True
-                    break
+                    # Order rejected by exchange client (circuit breaker, no-trade
+                    # window, or exchange-side position limit). Do NOT break the
+                    # whole scan -- skip this edge and try the next one.
+                    logger.warning("Order blocked for %s (client returned None)", edge.ticker)
+                    continue
 
                 filled = order.filled_contracts or 0
                 status_str = order.status.value if order.status else "unknown"
@@ -817,6 +975,14 @@ def run_live_trading(
                         reasoning=edge.reasoning,
                         placed_at=scan_ts,
                     )
+                    # Update hybrid sleeve counters for resting orders too
+                    if hybrid_mode:
+                        if sleeve == "fast":
+                            fast_slots_left -= 1
+                            fast_capital_left -= total_cost
+                        elif sleeve == "macro":
+                            macro_slots_left -= 1
+                            macro_capital_left -= total_cost
                     _log_event(log_path, {
                         "type": "order_resting",
                         "session_id": session_id,
@@ -852,6 +1018,17 @@ def run_live_trading(
                 )
                 portfolio.open_positions[edge.ticker] = pos
                 new_trades += 1
+
+                # Update hybrid sleeve counters
+                if hybrid_mode:
+                    if sleeve == "fast":
+                        fast_slots_left -= 1
+                        fast_capital_left -= actual_cost
+                        _sleeve_stats["fast_placed"] += 1
+                    elif sleeve == "macro":
+                        macro_slots_left -= 1
+                        macro_capital_left -= actual_cost
+                        _sleeve_stats["macro_placed"] += 1
 
                 _log_event(log_path, {
                     "type": "order_placed",
@@ -889,7 +1066,24 @@ def run_live_trading(
                     f"  Filter breakdown: type={_blk['type']} side={_blk['side']} "
                     f"dup={_blk['dup']} edge_range={_blk['edge_range']} "
                     f"dead={_blk['dead']} price={_blk['price']} "
+                    f"sleeve_full={_blk.get('sleeve_full', 0)} "
                     f"other={len(edges) - sum(_blk.values())}"
+                )
+            if hybrid_mode:
+                settling_24h = sum(
+                    1 for p in portfolio.open_positions.values()
+                    if hours_to_close(p.__dict__) is not None and 0 < hours_to_close(p.__dict__) <= 24
+                )
+                settling_72h = sum(
+                    1 for p in portfolio.open_positions.values()
+                    if hours_to_close(p.__dict__) is not None and 0 < hours_to_close(p.__dict__) <= 72
+                )
+                logger.info(
+                    f"  Sleeves: fast_cand={_sleeve_stats.get('fast_candidates', 0)} "
+                    f"macro_cand={_sleeve_stats.get('macro_candidates', 0)} "
+                    f"fast_placed={_sleeve_stats.get('fast_placed', 0)} "
+                    f"macro_placed={_sleeve_stats.get('macro_placed', 0)} | "
+                    f"settling <24h={settling_24h} <72h={settling_72h}"
                 )
 
             _log_event(log_path, {
@@ -905,6 +1099,22 @@ def run_live_trading(
                 "deployed_capital": portfolio.deployed_capital,
                 "realized_pnl": portfolio.realized_pnl,
             })
+
+            # Hourly status report (every ~12 scans at 300s interval)
+            if scan_n % 12 == 1 or scan_n == 1:
+                try:
+                    avail_bal, total_bal = client.get_balance()
+                except Exception:
+                    avail_bal = total_bal = 0.0
+                logger.info(
+                    "HOURLY STATUS | cash=$%.2f portfolio=$%.2f | open=%d resting=%d "
+                    "deployed=$%.2f | realized=$%+.2f daily_loss=$%.2f | W/L=%d/%d streak=%d",
+                    avail_bal, total_bal,
+                    len(portfolio.open_positions), len(portfolio.resting_orders),
+                    portfolio.deployed_capital, portfolio.realized_pnl,
+                    portfolio.daily_loss, portfolio.trades_won, portfolio.trades_lost,
+                    portfolio.consecutive_losses,
+                )
 
             time.sleep(interval_seconds)
 

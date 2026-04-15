@@ -404,26 +404,56 @@ class KalshiAdapter(ExchangeAdapter):
     def get_balance(self) -> Dict[str, float]:
         """Get account balance."""
         data = self._request("GET", "/portfolio/balance")
-        return {
-            "available": data.get("balance", 0) / 100.0,  # Convert cents to dollars
-            "total": data.get("portfolio_value", 0) / 100.0,
-        }
+        if "balance_dollars" in data:
+            available = float(data["balance_dollars"])
+        else:
+            available = float(data.get("balance", 0)) / 100.0
+        if "portfolio_value_dollars" in data:
+            total = float(data["portfolio_value_dollars"])
+        elif "portfolio_value" in data:
+            total = float(data["portfolio_value"]) / 100.0
+        else:
+            total = available
+        return {"available": available, "total": total}
     
     def get_positions(self) -> List[Dict]:
-        """Get current open positions."""
+        """Get current open positions (v2-aware)."""
         data = self._request("GET", "/portfolio/positions")
         positions = data.get("market_positions", [])
         
-        return [
-            {
+        result = []
+        for p in positions:
+            try:
+                pos_val = int(float(p.get("position_fp", p.get("position", 0))))
+            except (ValueError, TypeError):
+                pos_val = 0
+
+            if "market_exposure_dollars" in p:
+                exposure = float(p["market_exposure_dollars"])
+            else:
+                exposure = float(p.get("market_exposure", 0)) / 100.0
+
+            if "realized_pnl_dollars" in p:
+                pnl = float(p["realized_pnl_dollars"])
+            else:
+                pnl = float(p.get("realized_pnl", 0)) / 100.0
+
+            if "total_traded_dollars" in p:
+                cost = float(p["total_traded_dollars"])
+            elif "total_cost" in p:
+                raw = float(p["total_cost"])
+                cost = raw if "market_exposure_dollars" in p else raw / 100.0
+            else:
+                cost = 0.0
+
+            result.append({
                 "ticker": p["ticker"],
-                "position": p.get("position", 0),  # Positive = YES, Negative = NO
-                "market_exposure": p.get("market_exposure", 0) / 100.0,
-                "realized_pnl": p.get("realized_pnl", 0) / 100.0,
-                "total_cost": p.get("total_cost", 0) / 100.0,
-            }
-            for p in positions
-        ]
+                "position": pos_val,
+                "market_exposure": exposure,
+                "realized_pnl": pnl,
+                "total_cost": cost,
+            })
+        return result
     
     @staticmethod
     def _dollars_to_cents(val: Any, default: float = 0) -> float:

@@ -134,6 +134,13 @@ class StatisticalEdgeDetector:
         return get_annualized_vol(asset)
 
     def _get_spot_price(self, asset: str, max_age_s: int = 30) -> Optional[float]:
+        # Allow backtests to inject simulated spot prices via _spot_cache
+        import time as _time
+        cached = getattr(self, "_spot_cache", {}).get(asset)
+        if cached is not None:
+            value, ts = cached
+            if (_time.time() - ts) < max(max_age_s, 3600):
+                return value
         from ..data.sources.spot_feeds import get_spot_price
         return get_spot_price(asset, max_age_s=max_age_s)
 
