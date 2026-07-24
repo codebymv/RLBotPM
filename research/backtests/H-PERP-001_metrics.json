@@ -1,0 +1,8 @@
+{
+  "hypothesis": "H-PERP-001",
+  "n_intervals": 288,
+  "note": "OKX public history depth ~3 months from this environment; Phase 3 12-mo gate NOT MET.",
+  "sharpe_annualized_all_sample": 17.2665,
+  "cum_pnl_usdt": 0.649632,
+  "verdict": "INCONCLUSIVE_DATA"
+}

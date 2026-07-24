@@ -1,0 +1,22 @@
+{
+  "hypothesis": "H-SPOT-001",
+  "n_closes": 950,
+  "oos_days": 830,
+  "sharpe_oos": 0.8483,
+  "profit_factor_oos": 1.1846,
+  "cum_pnl_oos": 0.673999,
+  "cum_pnl_oos_2x_fee": 0.547999,
+  "seg_means": [
+    0.000878,
+    0.002325,
+    -0.000755
+  ],
+  "g1_sharpe": false,
+  "g2_pf": false,
+  "g3_2x_fee": true,
+  "g4_segpos": false,
+  "g5_concentration": true,
+  "g6_placebo_frac_beats": 1.0,
+  "g6_pass": false,
+  "verdict": "FAIL"
+}

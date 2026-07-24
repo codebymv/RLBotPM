@@ -1,5 +1,16 @@
 # RLTrade - Reinforcement Learning Crypto Trading Bot
 
+> **Status (2026-07-23):** No live capital. Kalshi + RL fleet sleeves stay
+> `enabled: false` (strategies parked / run-174 walk-forward FAIL). The active
+> paper path is **H-PERP-003** (`fleet.yaml` → `h_perp_003.enabled=true`, OKX
+> public REST, no orders). Phase 4 PASS; Phase 5 sample+tracking PASS but
+> Sharpe drift FAIL (~4.07 vs 7.97 on Phase 4 `sharpe_8h`) — see
+> [`research/09_paper_results_H-PERP-003.md`](research/09_paper_results_H-PERP-003.md).
+> Audits: [`architecture-audit-00`](research/architecture-audit-00.md) /
+> [`01`](research/architecture-audit-01.md) /
+> [`02`](research/architecture-audit-02.md) /
+> [`03`](research/architecture-audit-03.md).
+
 A comprehensive, safety-focused reinforcement learning trading bot for crypto spot markets. Built with a phased approach prioritizing learning, safety, and realistic performance expectations.
 
 ## 🎯 Project Overview
@@ -238,5 +249,5 @@ MIT License - See LICENSE file for details
 
 ---
 
-**Status**: Phase 1 - In Development
-**Last Updated**: February 2026
+**Status**: Architecture repair / hypothesis-gated research (see banner above)
+**Last Updated**: 2026-05-04

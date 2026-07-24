@@ -326,6 +326,22 @@ These are checked by `_passes_hard_gates()` in `EarlyStoppingCallback` and `_pas
 6. ~~Retune gates and patience~~ ✅ Done (run 173 optimization)
 7. ~~Add inactive-model detection~~ ✅ Done (run 173 optimization)
 8. ~~Define canonical deployment rule~~ ✅ Done (section 8 above)
-9. **Retrain with improved evaluator (recommended next step).** Run 173's best checkpoint (`step_130000`) demonstrated a marginal edge (+0.005%, pf=12.03) but with only 0.6 trades/episode — too thin for paper evidence-gathering. The evaluator, gate, and patience fixes from the run 173 optimization should allow the next training run to sustain improvement past the 130k plateau. Keep `pnl_only` reward profile and retrain from scratch (run 174).
-10. **Implement held-out date split** in the training/eval pipeline
-11. **Clean dead config** (`curriculum`, stale `specialist_router` paths)
+9. ~~**Retrain with improved evaluator.**~~ Done as **run 174**
+   ([RL_RUN_174_PLAN.md](research/RL_RUN_174_PLAN.md) →
+   [RL_RUN_174_RESULTS.md](research/RL_RUN_174_RESULTS.md)).
+   **Stage 1 verdict: FAIL → DO NOT PROMOTE.** Walk-forward returned 1/3
+   profitable folds (vs ≥75% required) with mean Sharpe -1.85 (vs > 0
+   required); held-out passed nominally but with a degenerate
+   `profit_factor` and a `held_out_days` deviation forced by the env's
+   row floor. `bot/models/best_model_run_176.zip` is archived, not
+   deployed. The audit-03 architectural fixes worked exactly as
+   designed — they surfaced an honest negative result instead of
+   shipping a stale one. No "run 175" is pre-registered yet; see the
+   results doc §5 for ranked candidate hypotheses.
+10. ~~**Implement held-out date split** in the training/eval pipeline~~
+    Done — `Evaluator.__init__` now accepts `dataset_split={"all","train","holdout"}`
+    and `held_out_days`; `EarlyStoppingCallback` defaults to `train` so the
+    trainer never sees the held-out tail. Promotion uses `holdout` for the
+    Stage 1 gate.
+11. **Clean dead config** (`curriculum`, stale `specialist_router` paths) — still pending,
+    not on the audit-03 critical path.

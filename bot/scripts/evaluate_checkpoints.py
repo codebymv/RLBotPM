@@ -57,15 +57,26 @@ def _evaluate_model(path: Path, policy: str, sequence_length: int, episodes: int
     return results
 
 
+DRAWDOWN_REFERENCE = 0.25  # multiplicative penalty origin (matches hard-gate cap)
+
+
 def _golden_score(metrics: Dict[str, float]) -> float:
-    """Composite score aligned with durable profitability."""
+    """Composite score aligned with durable profitability.
+
+    Architecture-audit-03 §B3: a multiplicative drawdown penalty is layered
+    on top of the existing additive `-6.0 * drawdown` term so that ranking
+    among healthy models is preserved while heavily-drawn models are
+    consistently de-prioritized. Replaces the legacy "zero profit_factor when
+    drawdown > threshold" rule (RL_PROFITABILITY_AUDIT.md §"Drawdown guard
+    zeros profit factor").
+    """
     sharpe = float(metrics.get("sharpe_ratio", 0.0))
     total_return = float(metrics.get("total_return", 0.0))
     profit_factor = float(metrics.get("profit_factor", 0.0))
     fees = float(metrics.get("fees_pct_of_gross_pnl", 1.0))
     drawdown = float(metrics.get("max_drawdown", 1.0))
     in_position = float(metrics.get("in_position_ratio", 0.0))
-    return (
+    raw = (
         0.35 * sharpe
         + 45.0 * total_return
         + 0.60 * profit_factor
@@ -73,6 +84,8 @@ def _golden_score(metrics: Dict[str, float]) -> float:
         - 6.0 * drawdown
         + 1.5 * in_position
     )
+    penalty = max(0.0, 1.0 - (drawdown / DRAWDOWN_REFERENCE))
+    return raw * penalty
 
 
 def _passes_golden_gate(metrics: Dict[str, float]) -> Tuple[bool, List[str]]:

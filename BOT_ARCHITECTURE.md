@@ -1,9 +1,20 @@
 # RLTrade Bot Architecture - Complete Overview
 
+> **Status banner (2026-05-04):** This document used to claim Run 170 produced
+> +0.80% return / 9.45 Sharpe / 6.35 Profit Factor. Those numbers were not
+> reproducible: see [`research/architecture-audit-01.md`](research/architecture-audit-01.md)
+> for the audit. The deployable model artifact referenced by `fleet.yaml`
+> (`models/best_model_run_174.zip`) does not exist on disk; the latest
+> completed training (run 173) is still under repair per Track B of
+> [`research/architecture-audit-03.md`](research/architecture-audit-03.md).
+> All command examples below now reference the most-recent run that actually
+> produced artifacts (`run_173`) and should be considered illustrative until
+> Track B (B1 → B6) lands.
+
 ## 🤖 Two Separate Trading Bots
 
-### Bot #1: RL Crypto Trading Bot (PRIMARY)
-**What it does:** Trades actual crypto spot on Coinbase using a trained reinforcement learning model
+### Bot #1: RL Crypto Trading Bot (under repair)
+**What it does:** Trades actual crypto spot on Coinbase using a trained reinforcement learning model. Currently has NO deployable model — `fleet.yaml` points at an artifact that does not exist.
 
 ```
 Coinbase Live Data → RL Model (PPO) → BUY/SELL/HOLD → Crypto Portfolio
@@ -16,9 +27,9 @@ Coinbase Live Data → RL Model (PPO) → BUY/SELL/HOLD → Crypto Portfolio
 - **Actions**: BUY, SELL, NO_ACTION
 - **Environment**: `CryptoTradingEnv` (Gym-style)
 - **Training**: `python main.py train --episodes 10000`
-- **Paper Trading**: `python main.py rl-paper-trade --model models/best_model_run_170`
+- **Paper Trading (post-Track-B)**: `python main.py rl-paper-trade --model models/best_model_run_174`
 
-**This is the bot you've been training!** (Run 170, 168, 169, etc.)
+**Status:** Most recent completed training is run 173 (artifacts in `bot/models/run173_checkpoint_sweep.json`); evidence too thin to deploy. Track B of audit-03 fixes evaluator + parity + DB schema before run 174 is started.
 
 ---
 
@@ -63,14 +74,13 @@ Crypto Prices → Statistical Model → Edge Detection → Kalshi YES/NO Contrac
 
 ## 🚀 Which Bot Should You Focus On?
 
-### For **Profitable Live Trading** → **RL Crypto Bot (#1)**
+### For **Profitable Live Trading** → **RL Crypto Bot (#1)** *(blocked on Track B)*
 
-**Why?**
-- This is your main project with trained models
-- You've already trained Run 170 (+0.80% return, 9.45 Sharpe)
-- Sophisticated RL strategy with regime specialists
-- Better scalability and capital efficiency
-- Direct crypto exposure
+**Why this is the primary track despite the current block:**
+- Most invested codebase with full training / serving / DB stack
+- Specialist router + regime-aware reward design already in place
+- Better scalability than Kalshi if it actually trains a positive-edge model
+- **Currently blocked**: see [`research/architecture-audit-01.md`](research/architecture-audit-01.md). Run 170 / +0.80% / 9.45 Sharpe claims have been retracted as not currently substantiated.
 
 **Next Steps:**
 1. Train for 10,000 episodes (as planned)
@@ -133,8 +143,8 @@ Crypto Prices → Statistical Model → Edge Detection → Kalshi YES/NO Contrac
 # Train new model
 python bot/main.py train --episodes 10000
 
-# Resume from checkpoint
-python bot/main.py train --episodes 10000 --checkpoint models/checkpoint_run_170
+# Resume from a real checkpoint produced by run 173
+python bot/main.py train --episodes 10000 --checkpoint models/checkpoint_run_173_step_130000
 
 # Train with specialist router
 python bot/main.py train --episodes 10000 --config shared/config/model_config.yaml
@@ -142,23 +152,23 @@ python bot/main.py train --episodes 10000 --config shared/config/model_config.ya
 
 #### Evaluation
 ```bash
-# Evaluate model
-python bot/main.py evaluate --model models/best_model_run_170 --episodes 100
+# Evaluate the most-recent run-173 best checkpoint that actually exists
+python bot/main.py evaluate --model models/best_model_run_173_step_130000 --episodes 100
 
 # Evaluate with specialist router
-python bot/main.py evaluate --model models/best_model_run_170 --specialist-router
+python bot/main.py evaluate --model models/best_model_run_173_step_130000 --specialist-router
 ```
 
 #### Paper Trading (Live Data)
 ```bash
-# Run indefinitely
-python bot/main.py rl-paper-trade --model models/best_model_run_170 --duration 0
+# Run indefinitely (substitute the real artifact filename in bot/models/)
+python bot/main.py rl-paper-trade --model models/best_model_run_173_step_130000 --duration 0
 
 # Run for 24 hours
-python bot/main.py rl-paper-trade --model models/best_model_run_170 --duration 24 --capital 1000
+python bot/main.py rl-paper-trade --model models/best_model_run_173_step_130000 --duration 24 --capital 1000
 
 # Specific symbols only
-python bot/main.py rl-paper-trade --model models/best_model_run_170 --symbols BTC-USD,ETH-USD
+python bot/main.py rl-paper-trade --model models/best_model_run_173_step_130000 --symbols BTC-USD,ETH-USD
 ```
 
 ---
@@ -288,8 +298,10 @@ python main.py kalshi paper-trade --live --interval 300 --bankroll 100
 
 #### RL Crypto Bot
 ```bash
-# When training completes, start paper trading
-python main.py rl-paper-trade --model models/best_model_run_171 --duration 0
+# When training completes, start paper trading (use the artifact filename
+# that the new run actually wrote — Track B unifies this so EarlyStopping is
+# the only writer of best_model_run_*).
+python main.py rl-paper-trade --model models/best_model_run_174 --duration 0
 ```
 
 #### Kalshi Bot

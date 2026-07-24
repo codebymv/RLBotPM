@@ -1,16 +1,26 @@
 # Live Trading Readiness Checklist
 
+> **Status banner (2026-05-04):** This checklist is **on hold**. The RL bot has
+> no deployable model artifact today (`shared/config/fleet.yaml` references
+> `models/best_model_run_174.zip` which does not exist) and the most recent
+> completed training (run 173) plateaued with thin trade volume per
+> [`RL_PROFITABILITY_AUDIT.md`](RL_PROFITABILITY_AUDIT.md) §9. Track B of
+> [`research/architecture-audit-03.md`](research/architecture-audit-03.md)
+> describes the repair sequence (B1 → B6) that must complete before this
+> document is meaningful again. Run 170 / +0.80% / 9.45 Sharpe claims
+> previously listed here have been removed as not currently substantiated.
+
 ## 🎯 Current Status Assessment
 
 ### What We Know
 - ✅ Paper trading infrastructure operational
 - ✅ Dashboard with Paper/Live mode separation
 - ✅ Specialist router system implemented
-- ✅ Recent training run (170) showed strong metrics:
-  - +0.80% return
-  - 9.45 Sharpe ratio
-  - 6.35 Profit Factor
-- ⚠️ **Need validation**: Performance consistency over time
+- ❌ No deployable RL model artifact in `bot/models/` (audit-01 §1)
+- ❌ Last completed training (run 173) plateaued at step 130k with ~0.6
+  trades/episode and golden score ~0.5 — too thin for live evidence
+- ⚠️ **Need validation**: Track B repair sequence + a fresh run 174 under
+  `pnl_only` profile with held-out date split before this checklist re-opens
 
 ### Critical Gaps
 - ❌ No sustained multi-week paper trading track record
@@ -58,8 +68,11 @@ python bot/main.py paper-trade --continuous --log-level INFO
 - [ ] **Backtest vs Live Comparison**: Check for overfitting
 
 ### 1.3 Model Confidence Assessment
-- [ ] Review recent training run results (Run 170+)
-- [ ] Analyze specialist routing effectiveness
+- [ ] Track B (audit-03) complete: B1 fleet path fix, B2 callback unification,
+      B3 held-out split + walk-forward gate, B4 db schema honest fee/equity,
+      B5 train-serve parity test
+- [ ] Run 174 under `pnl_only` profile shows ≥ 50 closed trades and gates pass
+- [ ] Analyze specialist routing effectiveness on the run-174 candidate
 - [ ] Check for any warning signs in edge-health metrics
 - [ ] Verify no data leakage or lookahead bias
 

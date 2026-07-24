@@ -40,6 +40,7 @@ from ..strategies.paper_trader import (
     HYBRID_FAST_HORIZON_HOURS,
     HYBRID_FAST_CAPITAL_FRAC,
     HYBRID_FAST_POSITION_FRAC,
+    HYBRID_MACRO_MAX_PORTFOLIO_FRAC,
     DEFAULT_MIN_EDGE,
     DEFAULT_MAX_EDGE,
     DEFAULT_MIN_PRICE,
@@ -56,6 +57,53 @@ DEFAULT_MAX_TOTAL_DEPLOYED = 10.00  # $10 max total capital at risk
 DEFAULT_MAX_POSITIONS = 10          # Max simultaneous positions
 DEFAULT_MAX_LOSS_STREAK = 3         # Kill switch after 3 consecutive losses
 DEFAULT_MAX_DAILY_LOSS = 5.00       # Stop trading if daily losses exceed $5
+
+# ── Trade admission rules (Phase 3 philosophy reset) ─────────────
+# These gates exist to prevent the three failure modes identified in
+# the edge audit: model overconfidence, execution friction, and
+# capital lock-up.
+
+# Execution edge: (payout - cost) / cost must exceed this.
+# A 50c cost needs to return >75c to clear a 0.50 threshold.
+MIN_EXECUTION_EDGE = 0.50
+
+# Spread gate: reject trades where bid-ask spread in cents exceeds this.
+MAX_SPREAD_CENTS = 25.0
+
+# Per-ticker contract cap to prevent concentration blowups.
+MAX_CONTRACTS_PER_TICKER = 5
+
+# Macro admission: macro_data edges are blocked unless this env var
+# is set to "true".  Macro must EARN its way back via evidence.
+# Set KALSHI_MACRO_ENABLED=true after 5+ positive macro settlements.
+MACRO_ENABLED_DEFAULT = False
+
+# Minimum activity (volume + OI) for a market to be tradeable.
+MIN_MARKET_ACTIVITY = 5
+
+# Don't enter a market that the exit logic will immediately flatten.
+# We flatten when hours_left <= 1.0h. Add a scan-interval buffer so a new
+# position can at least survive to the next scan without being force-sold.
+# Effective rule: market must have >= MIN_HOURS_TO_CLOSE_ON_ENTRY of life
+# left at entry time.
+MIN_HOURS_TO_CLOSE_ON_ENTRY = 1.5
+
+# H1-only mode: the most restrictive admission profile, derived from the
+# edge-audit's only proven hypothesis. Activated by env H1_ONLY=true.
+# Applies a hard set of filters in addition to the normal ones:
+#   - edge_type must be spot_vs_strike (no macro, no weather)
+#   - recommended_side must be 'no' (we sell tail probability)
+#   - asset must be a crypto from H1_CRYPTO_ASSETS
+#   - spot must be >= H1_MIN_SPOT_DISTANCE_PCT away from the strike
+#   - hours_to_close must be in [H1_MIN_HOURS, H1_MAX_HOURS]
+# When active, flatten_before_close exit is disabled so the trade rides to
+# settlement, and the kill switch is widened to allow the lottery-style
+# loss pattern this strategy expects.
+H1_CRYPTO_ASSETS = {"BTC", "ETH", "SOL", "DOGE", "XRP"}
+H1_MIN_SPOT_DISTANCE_PCT = 0.15
+H1_MIN_HOURS = 0.5
+H1_MAX_HOURS = 2.0
+H1_HARD_FLOOR_TOTAL_WEALTH = 25.0
 
 
 @dataclass
@@ -125,6 +173,7 @@ class LivePortfolio:
     scan_count: int = 0
     killed: bool = False
     kill_reason: str = ""
+    _phantom_count: int = 0
 
     def maybe_reset_daily_loss(self):
         """Reset daily_loss and un-kill the bot at the start of each new UTC day."""
@@ -345,6 +394,169 @@ def _check_resting_fills(client, portfolio: LivePortfolio, log_path: Path, sessi
         portfolio.resting_orders.pop(t, None)
 
 
+def _check_exit_opportunities(
+    client,
+    adapter,
+    portfolio: "LivePortfolio",
+    log_path: Path,
+    profit_target_pct: float = 0.40,
+    stop_loss_pct: float = 0.60,
+    max_hold_hours: float = 168.0,
+    flatten_before_close_hours: float = 1.0,
+):
+    """Scan open positions and sell any that meet exit criteria.
+
+    Exit policies (checked in priority order):
+      1. Profit target: mark-to-market gain >= profit_target_pct of cost
+      2. Stop-loss: mark-to-market loss >= stop_loss_pct of cost
+      3. Time decay flatten: market closes within flatten_before_close_hours
+      4. Max hold: position has been open longer than max_hold_hours
+
+    Uses limit sells priced at the current bid to maximize fill chance
+    while avoiding market-order slippage on thin books.
+    """
+    if not portfolio.open_positions:
+        return
+
+    now = datetime.now(timezone.utc)
+    exits = []
+
+    for ticker, pos in list(portfolio.open_positions.items()):
+        try:
+            market = adapter.get_market(ticker)
+        except Exception:
+            continue
+
+        if market.status in ("settled", "finalized"):
+            continue
+
+        # Mark-to-market the position
+        if pos.side == "yes":
+            bid = float(market.yes_bid or 0)
+            mark_value = bid * pos.contracts / 100.0
+        else:
+            no_bid = 100 - float(market.yes_ask or 100)
+            if no_bid <= 0:
+                continue
+            mark_value = no_bid * pos.contracts / 100.0
+
+        cost = pos.cost_dollars
+        mtm_pnl = mark_value - cost
+        mtm_pct = mtm_pnl / cost if cost > 0 else 0.0
+
+        # Time since open
+        try:
+            opened = datetime.fromisoformat(pos.opened_at)
+            if opened.tzinfo is None:
+                opened = opened.replace(tzinfo=timezone.utc)
+            hold_hours = (now - opened).total_seconds() / 3600.0
+        except (ValueError, TypeError):
+            hold_hours = 0.0
+
+        # Hours to market close
+        close_time = getattr(market, "close_time", None)
+        hours_left = None
+        if close_time:
+            try:
+                if isinstance(close_time, str):
+                    close_time = datetime.fromisoformat(close_time.replace("Z", "+00:00"))
+                if close_time.tzinfo is None:
+                    close_time = close_time.replace(tzinfo=timezone.utc)
+                hours_left = (close_time - now).total_seconds() / 3600.0
+            except (ValueError, TypeError):
+                pass
+
+        reason = None
+        if mtm_pct >= profit_target_pct:
+            reason = f"profit_target ({mtm_pct:+.0%} >= {profit_target_pct:.0%})"
+        elif mtm_pct <= -stop_loss_pct:
+            reason = f"stop_loss ({mtm_pct:+.0%} <= -{stop_loss_pct:.0%})"
+        elif hours_left is not None and 0 < hours_left <= flatten_before_close_hours:
+            reason = f"flatten_before_close ({hours_left:.1f}h left)"
+        elif hold_hours >= max_hold_hours:
+            reason = f"max_hold_exceeded ({hold_hours:.0f}h >= {max_hold_hours:.0f}h)"
+
+        if reason is None:
+            continue
+
+        # Sell at the bid to maximize fill probability
+        if pos.side == "yes":
+            sell_price = int(bid) if bid > 0 else None
+        else:
+            sell_price = int(no_bid) if no_bid > 0 else None
+
+        use_mkt = sell_price is None or sell_price < 2
+        logger.info(
+            "EXIT %s: %s | mtm=$%+.2f (%+.0f%%) hold=%.1fh | %s sell @%s",
+            ticker, reason, mtm_pnl, mtm_pct * 100, hold_hours,
+            "market" if use_mkt else "limit", sell_price if not use_mkt else "mkt",
+        )
+
+        try:
+            order = client.sell_position(
+                ticker=ticker,
+                contracts=pos.contracts,
+                use_market=use_mkt,
+                limit_price=sell_price if not use_mkt else None,
+            )
+        except Exception as exc:
+            logger.warning("Exit sell failed for %s: %s", ticker, exc)
+            continue
+
+        if order is None:
+            continue
+
+        filled = order.filled_contracts or 0
+        status_str = order.status.value if order.status else "unknown"
+        if filled == 0 and status_str in ("executed", "filled"):
+            filled = pos.contracts
+
+        if filled > 0:
+            if pos.side == "yes":
+                revenue = filled * (sell_price or order.price) / 100.0
+            else:
+                revenue = filled * (sell_price or order.price) / 100.0
+            exit_cost = pos.cost_dollars * (filled / pos.contracts) if pos.contracts > 0 else 0
+            exit_pnl = revenue - exit_cost
+
+            portfolio.realized_pnl += exit_pnl
+            if exit_pnl > 0:
+                portfolio.trades_won += 1
+                portfolio.consecutive_losses = 0
+            elif exit_pnl < 0:
+                portfolio.trades_lost += 1
+                portfolio.consecutive_losses += 1
+                portfolio.daily_loss += abs(exit_pnl)
+            else:
+                portfolio.consecutive_losses = 0
+
+            exits.append(ticker)
+            _log_event(log_path, {
+                "type": "active_exit",
+                "timestamp": now.isoformat(),
+                "ticker": ticker,
+                "reason": reason,
+                "side": pos.side,
+                "contracts_sold": filled,
+                "sell_price": sell_price or order.price,
+                "revenue": revenue,
+                "cost_basis": exit_cost,
+                "pnl": exit_pnl,
+                "cumulative_pnl": portfolio.realized_pnl,
+                "hold_hours": hold_hours,
+            })
+            win_label = "WIN" if exit_pnl > 0 else "LOSS"
+            logger.info(
+                "EXIT FILLED %s: %s $%+.2f (cumulative: $%+.2f)",
+                ticker, win_label, exit_pnl, portfolio.realized_pnl,
+            )
+
+    for t in exits:
+        pos = portfolio.open_positions.pop(t, None)
+        if pos:
+            portfolio.closed_positions.append(pos)
+
+
 def _check_live_settlements(client, portfolio: LivePortfolio, log_path: Path):
     """Check if any open positions have settled on Kalshi."""
     from ..data.sources.kalshi import KalshiAdapter
@@ -401,6 +613,7 @@ def _check_live_settlements(client, portfolio: LivePortfolio, log_path: Path):
                     "removing as phantom (cost=$%.2f unreconciled)",
                     ticker, pos.cost_dollars,
                 )
+                portfolio._phantom_count += 1
                 _log_event(log_path, {
                     "type": "phantom_removed",
                     "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -530,6 +743,7 @@ def run_live_trading(
 
     series_list = series or LIVE_SERIES
     log_path = LOG_DIR / "live_trades.jsonl"
+    h1_candidates_log = LOG_DIR / "h1_candidates.jsonl"
 
     env_allowed_sides = os.getenv("LIVE_ALLOWED_SIDES", "no")
     configured_sides = allowed_sides or [
@@ -576,14 +790,26 @@ def run_live_trading(
         max_spread=1000,
     )
 
+    # H1-only mode widens the loss-streak / daily-loss limits because the
+    # strategy is lottery-style: 80%+ of trades expected to lose, with rare
+    # 5x-10x wins. The hard floor is total wealth instead of streak count.
+    h1_only_run = os.getenv("H1_ONLY", "").lower() == "true"
+    if h1_only_run:
+        effective_loss_streak = 9999
+        effective_daily_loss = 9999.0
+    else:
+        effective_loss_streak = max_loss_streak
+        effective_daily_loss = max_daily_loss
+
     portfolio = LivePortfolio(
         max_cost_per_trade=max_cost_per_trade,
         max_total_deployed=max_total_deployed,
         max_positions=max_positions,
-        max_loss_streak=max_loss_streak,
-        max_daily_loss=max_daily_loss,
+        max_loss_streak=effective_loss_streak,
+        max_daily_loss=effective_daily_loss,
     )
-    session_id = datetime.now(timezone.utc).strftime("live_%Y%m%d_%H%M%S")
+    session_start_time = datetime.now(timezone.utc)
+    session_id = session_start_time.strftime("live_%Y%m%d_%H%M%S")
 
     # Check account balance first
     try:
@@ -653,6 +879,30 @@ def run_live_trading(
         logger.info(f"  Fast slots:  {fast_max_pos} | Macro slots: {macro_max_pos}")
         logger.info(f"  Fast budget: ${max_total_deployed * fast_capital_frac:.2f} | Macro budget: ${max_total_deployed * (1-fast_capital_frac):.2f}")
         logger.info(f"  Fast horizon: {fast_horizon_hours:.0f}h")
+        logger.info(f"  Macro portfolio cap: {HYBRID_MACRO_MAX_PORTFOLIO_FRAC:.0%} of total")
+        logger.info("  Active exits: profit>=40%% | stop<=-60%% | flatten<1h | max-hold<=168h")
+
+    macro_enabled = os.getenv("KALSHI_MACRO_ENABLED", "").lower() == "true" or MACRO_ENABLED_DEFAULT
+    logger.info(f"Trade admission gates:")
+    logger.info(f"  Min execution edge:  {MIN_EXECUTION_EDGE:.0%}")
+    logger.info(f"  Max spread:          {MAX_SPREAD_CENTS:.0f}c")
+    logger.info(f"  Max contracts/ticker: {MAX_CONTRACTS_PER_TICKER}")
+    logger.info(f"  Min activity (vol+OI): {MIN_MARKET_ACTIVITY}")
+    logger.info(f"  Min hours to expiry: {MIN_HOURS_TO_CLOSE_ON_ENTRY:.1f}h (prevents instant flatten)")
+    logger.info(f"  Macro enabled:       {'YES' if macro_enabled else 'NO (set KALSHI_MACRO_ENABLED=true)'}")
+    if h1_only_run:
+        logger.info("=" * 50)
+        logger.info("H1-ONLY MODE ACTIVE (audit-derived lottery edge)")
+        logger.info("=" * 50)
+        logger.info(f"  Side:               BUY_NO only")
+        logger.info(f"  Edge type:          spot_vs_strike only")
+        logger.info(f"  Crypto assets:      {sorted(H1_CRYPTO_ASSETS)}")
+        logger.info(f"  Min OTM distance:   {H1_MIN_SPOT_DISTANCE_PCT:.0%} from spot")
+        logger.info(f"  Time window:        {H1_MIN_HOURS:.1f}h - {H1_MAX_HOURS:.1f}h to settlement")
+        logger.info(f"  Flatten exit:       DISABLED (rides to settlement)")
+        logger.info(f"  Stop-loss exit:     DISABLED (lottery-style)")
+        logger.info(f"  Streak kill switch: DISABLED")
+        logger.info(f"  Hard floor:         total wealth < ${H1_HARD_FLOOR_TOTAL_WEALTH:.2f} stops bot")
 
     _send_alert(
         "Live trading session started",
@@ -720,6 +970,49 @@ def run_live_trading(
             if portfolio.open_positions:
                 _check_live_settlements(client, portfolio, log_path)
 
+            # 1c. Check active exit opportunities (profit-take / stop-loss / flatten)
+            # H1 mode disables flatten and stop-loss because the strategy is a
+            # lottery-ticket: trades are deliberately deep-OTM, expected to
+            # mostly expire worthless, and the rare wins must be allowed to
+            # ride to full $1 settlement. Profit-take and max-hold still apply.
+            if portfolio.open_positions:
+                h1_active = os.getenv("H1_ONLY", "").lower() == "true"
+                _check_exit_opportunities(
+                    client, adapter, portfolio, log_path,
+                    profit_target_pct=0.40,
+                    stop_loss_pct=10.0 if h1_active else 0.60,
+                    max_hold_hours=168.0,
+                    flatten_before_close_hours=0.0 if h1_active else 1.0,
+                )
+
+            # 1d. Refresh exchange-side available balance as hard cap for sizing
+            try:
+                exchange_cash, exchange_total = client.get_balance()
+            except Exception:
+                exchange_cash = 0.0
+                exchange_total = 0.0
+
+            # 1e. H1-mode hard wealth floor: stop everything if total wealth
+            # (cash + positions mark-to-market) falls below the floor. This
+            # replaces the kill switch as the discipline mechanism for the
+            # lottery-ticket strategy.
+            if h1_only_run:
+                total_wealth = exchange_cash + exchange_total
+                if total_wealth < H1_HARD_FLOOR_TOTAL_WEALTH and total_wealth > 0:
+                    logger.warning(
+                        f"H1 HARD FLOOR HIT: total wealth ${total_wealth:.2f} "
+                        f"< ${H1_HARD_FLOOR_TOTAL_WEALTH:.2f}. Stopping."
+                    )
+                    portfolio.killed = True
+                    portfolio.kill_reason = (
+                        f"H1 hard floor hit: total wealth ${total_wealth:.2f}"
+                    )
+                    _send_alert(
+                        "H1 hard floor hit",
+                        f"Total wealth ${total_wealth:.2f} below ${H1_HARD_FLOOR_TOTAL_WEALTH:.2f}. Bot stopped.",
+                    )
+                    break
+
             # 2. Fetch live markets
             try:
                 markets = _fetch_live_markets(adapter, series_list)
@@ -750,10 +1043,13 @@ def run_live_trading(
                 )
                 macro_open = len(portfolio.open_positions) - fast_open
                 fast_resting = sum(
-                    1 for t in portfolio.resting_orders
-                    if _extract_asset(t) in {a for s in FAST_SERIES for a in [_extract_asset(s)]}
+                    1 for t, o in portfolio.resting_orders.items()
+                    if classify_sleeve({"series_ticker": t.split("-")[0], "close_time": None}, fast_horizon_hours) == "fast"
                 )
-                macro_resting = len(portfolio.resting_orders) - fast_resting
+                macro_resting = sum(
+                    1 for t, o in portfolio.resting_orders.items()
+                    if classify_sleeve({"series_ticker": t.split("-")[0], "close_time": None}, fast_horizon_hours) == "macro"
+                )
 
                 fast_deployed = sum(
                     p.cost_dollars for p in portfolio.open_positions.values()
@@ -787,6 +1083,8 @@ def run_live_trading(
                      "sleeve_full": 0}
             _sleeve_stats = {"fast_candidates": 0, "macro_candidates": 0, "other_candidates": 0,
                              "fast_placed": 0, "macro_placed": 0}
+            h1_only = os.getenv("H1_ONLY", "").lower() == "true"
+
             for edge in edges:
                 if edge.edge_type not in ("spot_vs_strike", "crypto_spot_mispricing", "macro_data", "weather"):
                     _blk["type"] += 1
@@ -796,6 +1094,103 @@ def run_live_trading(
                     _blk["side"] += 1
                     continue
 
+                # H1-ONLY MODE: enforce the audit-derived "only proven edge"
+                # profile. All filters must pass or the edge is rejected with
+                # a counted-blocker reason for transparency.
+                # Also logs every NO-side crypto candidate (passing or not)
+                # to a JSONL so we can study the regime even when no trades
+                # fire.
+                if h1_only:
+                    if edge.edge_type != "spot_vs_strike":
+                        _blk["h1_type"] = _blk.get("h1_type", 0) + 1
+                        continue
+                    if edge.recommended_side != "no":
+                        _blk["h1_side"] = _blk.get("h1_side", 0) + 1
+                        continue
+                    asset = edge.market_data.get("_h1_asset") if edge.market_data else None
+                    if asset not in H1_CRYPTO_ASSETS:
+                        _blk["h1_asset"] = _blk.get("h1_asset", 0) + 1
+                        continue
+                    md = edge.market_data or {}
+                    spot = md.get("_h1_spot")
+                    strike_type = md.get("_h1_strike_type")
+                    floor_strike = md.get("_h1_floor_strike")
+                    cap_strike = md.get("_h1_cap_strike")
+                    h1_hours = hours_to_close(edge.market_data) if edge.market_data else None
+
+                    # OTM-distance: spot must be deep enough away from the
+                    # relevant strike that "buy NO" is buying obvious tail
+                    # probability, not a model-derived edge.
+                    #   greater [floor]: OTM YES means spot << floor
+                    #   less [floor]:    OTM YES means spot >> floor
+                    #   between [lo,hi]: OTM YES means spot is OUTSIDE [lo,hi];
+                    #                    distance is to the nearer boundary.
+                    distance_pct: Optional[float] = None
+                    if not spot or spot <= 0 or not strike_type:
+                        distance_pct = None
+                    elif strike_type == "between" and floor_strike is not None and cap_strike is not None:
+                        lo, hi = sorted((float(floor_strike), float(cap_strike)))
+                        if lo <= spot <= hi:
+                            distance_pct = 0.0
+                        else:
+                            distance_pct = min(abs(spot - lo), abs(spot - hi)) / spot
+                    elif strike_type == "greater" and floor_strike is not None:
+                        distance_pct = max(0.0, (float(floor_strike) - spot)) / spot
+                    elif strike_type == "less" and floor_strike is not None:
+                        distance_pct = max(0.0, (spot - float(floor_strike))) / spot
+
+                    # Determine pass/fail for each H1 gate. We do this even
+                    # for blocked candidates so we can study what the regime
+                    # looked like at decision-time.
+                    pass_distance = distance_pct is not None and distance_pct >= H1_MIN_SPOT_DISTANCE_PCT
+                    pass_window = h1_hours is not None and H1_MIN_HOURS <= h1_hours <= H1_MAX_HOURS
+                    h1_passes_all = (distance_pct is not None and h1_hours is not None
+                                     and pass_distance and pass_window)
+
+                    # Append candidate to the H1 ground-truth log. This file
+                    # accumulates every NO-side crypto edge we evaluated so
+                    # post-hoc analysis can correlate distance/time/edge to
+                    # actual market settlement outcomes.
+                    try:
+                        _log_event(h1_candidates_log, {
+                            "ts": scan_ts,
+                            "scan": scan_n,
+                            "ticker": edge.ticker,
+                            "asset": asset,
+                            "strike_type": strike_type,
+                            "floor_strike": floor_strike,
+                            "cap_strike": cap_strike,
+                            "spot": spot,
+                            "distance_pct": distance_pct,
+                            "hours_to_close": h1_hours,
+                            "edge_value": edge.edge_value,
+                            "market_price": edge.market_price,
+                            "fair_price": edge.fair_price,
+                            "yes_bid": float(md.get("yes_bid", 0) or 0),
+                            "yes_ask": float(md.get("yes_ask", 100) or 100),
+                            "volume": float(md.get("volume", 0) or 0),
+                            "open_interest": float(md.get("open_interest", 0) or 0),
+                            "pass_distance": pass_distance,
+                            "pass_window": pass_window,
+                            "h1_passes_all": h1_passes_all,
+                        })
+                    except Exception:
+                        pass
+
+                    # Now actually enforce the gates.
+                    if distance_pct is None:
+                        _blk["h1_no_spot"] = _blk.get("h1_no_spot", 0) + 1
+                        continue
+                    if not pass_distance:
+                        _blk["h1_near_money"] = _blk.get("h1_near_money", 0) + 1
+                        continue
+                    if h1_hours is None:
+                        _blk["h1_no_expiry"] = _blk.get("h1_no_expiry", 0) + 1
+                        continue
+                    if not pass_window:
+                        _blk["h1_window"] = _blk.get("h1_window", 0) + 1
+                        continue
+
                 if edge.ticker in portfolio.open_positions or edge.ticker in portfolio.resting_orders:
                     _blk["dup"] += 1
                     continue
@@ -804,16 +1199,23 @@ def run_live_trading(
                     _blk["edge_range"] += 1
                     continue
 
-                # Skip completely dead markets (zero activity = no counterparty)
+                # Macro admission gate: macro_data edges are blocked by default.
+                macro_enabled = os.getenv("KALSHI_MACRO_ENABLED", "").lower() == "true" or MACRO_ENABLED_DEFAULT
+                if edge.edge_type == "macro_data" and not macro_enabled:
+                    _blk["macro_blocked"] = _blk.get("macro_blocked", 0) + 1
+                    continue
+
+                # Skip dead markets (insufficient activity for a realistic fill)
                 mkt_volume = float(edge.market_data.get("volume", 0) or 0)
                 mkt_oi = float(edge.market_data.get("open_interest", 0) or 0)
-                if mkt_volume + mkt_oi < 1:
+                if mkt_volume + mkt_oi < MIN_MARKET_ACTIVITY:
                     _blk["dead"] += 1
                     continue
 
                 # Determine actual order price from live bid/ask.
                 yes_bid = float(edge.market_data.get("yes_bid", 0) or 0)
                 yes_ask = float(edge.market_data.get("yes_ask", 100) or 100)
+                spread = yes_ask - yes_bid
                 edge_price = edge.market_price
                 if edge.recommended_side == "no":
                     price = yes_bid if yes_bid > 0 else edge_price
@@ -822,10 +1224,38 @@ def run_live_trading(
                     price = yes_ask if yes_ask < 100 else edge_price
                     our_cost_cents = price
 
+                # Spread gate: wide spreads destroy the execution edge.
+                if spread > MAX_SPREAD_CENTS:
+                    _blk["spread"] = _blk.get("spread", 0) + 1
+                    continue
+
+                # Execution edge: what is the actual return profile?
+                # For a $1 payout contract, execution_edge = (100 - cost) / cost
+                if our_cost_cents > 0:
+                    execution_edge = (100.0 - our_cost_cents) / our_cost_cents
+                else:
+                    execution_edge = 99.0
+                if execution_edge < MIN_EXECUTION_EDGE:
+                    _blk["exec_edge"] = _blk.get("exec_edge", 0) + 1
+                    continue
+
                 # Price filter: applied to OUR cost (what we actually pay).
                 if our_cost_cents < min_price or our_cost_cents > max_price:
                     _blk["price"] += 1
                     continue
+
+                # Time-to-expiry guard: never open a position the exit logic
+                # will immediately flatten on the next scan. We enforce a
+                # minimum life-left at entry of MIN_HOURS_TO_CLOSE_ON_ENTRY
+                # hours, which is flatten_threshold + a scan-interval buffer.
+                # In H1-only mode this guard is bypassed because its narrow
+                # 0.5–2h window is intentional and the flatten exit is also
+                # disabled so trades ride to settlement.
+                if not h1_only:
+                    mkt_hours_left = hours_to_close(edge.market_data) if edge.market_data else None
+                    if mkt_hours_left is not None and mkt_hours_left < MIN_HOURS_TO_CLOSE_ON_ENTRY:
+                        _blk["expiring_soon"] = _blk.get("expiring_soon", 0) + 1
+                        continue
 
                 # Hybrid sleeve gating
                 sleeve = classify_sleeve(edge.market_data, fast_horizon_hours) if hybrid_mode else "any"
@@ -838,6 +1268,12 @@ def run_live_trading(
                             continue
                     elif sleeve == "macro":
                         if macro_slots_left <= 0 or macro_capital_left <= 0:
+                            _blk["sleeve_full"] += 1
+                            continue
+                        # Absolute macro cap: block new macro entries if macro
+                        # exposure already exceeds HYBRID_MACRO_MAX_PORTFOLIO_FRAC
+                        # of total portfolio value.
+                        if exchange_total > 0 and macro_deployed / exchange_total >= HYBRID_MACRO_MAX_PORTFOLIO_FRAC:
                             _blk["sleeve_full"] += 1
                             continue
                     else:
@@ -881,13 +1317,24 @@ def run_live_trading(
                         continue
 
                 # Size: how many contracts can we afford?
+                # Use the lesser of local accounting, exchange cash, and per-ticker cap.
                 if edge.recommended_side == "yes":
                     cost_per_contract = price / 100.0
                 else:
                     cost_per_contract = (100 - price) / 100.0
                 max_by_trade_limit = int(max_cost_per_trade / cost_per_contract) if cost_per_contract > 0 else 0
                 max_by_capital = int(portfolio.available_to_deploy / cost_per_contract) if cost_per_contract > 0 else 0
-                contracts = min(max_by_trade_limit, max_by_capital)
+                max_by_exchange = int(exchange_cash / cost_per_contract) if cost_per_contract > 0 else 0
+
+                # Per-ticker cap: count existing contracts on this exact ticker
+                existing_on_ticker = 0
+                if edge.ticker in portfolio.open_positions:
+                    existing_on_ticker += portfolio.open_positions[edge.ticker].contracts
+                if edge.ticker in portfolio.resting_orders:
+                    existing_on_ticker += portfolio.resting_orders[edge.ticker].contracts_requested
+                max_by_ticker = max(0, MAX_CONTRACTS_PER_TICKER - existing_on_ticker)
+
+                contracts = min(max_by_trade_limit, max_by_capital, max_by_exchange, max_by_ticker)
 
                 if contracts <= 0:
                     continue
@@ -975,7 +1422,7 @@ def run_live_trading(
                         reasoning=edge.reasoning,
                         placed_at=scan_ts,
                     )
-                    # Update hybrid sleeve counters for resting orders too
+                    exchange_cash -= total_cost
                     if hybrid_mode:
                         if sleeve == "fast":
                             fast_slots_left -= 1
@@ -1018,6 +1465,7 @@ def run_live_trading(
                 )
                 portfolio.open_positions[edge.ticker] = pos
                 new_trades += 1
+                exchange_cash -= actual_cost
 
                 # Update hybrid sleeve counters
                 if hybrid_mode:
@@ -1041,6 +1489,8 @@ def run_live_trading(
                     "contracts": filled,
                     "cost": actual_cost,
                     "edge": edge.edge_value,
+                    "execution_edge": round(execution_edge, 3),
+                    "spread": spread,
                     "edge_type": edge.edge_type,
                     "order_id": order.order_id,
                     "order_status": status_str,
@@ -1065,10 +1515,23 @@ def run_live_trading(
                 logger.info(
                     f"  Filter breakdown: type={_blk['type']} side={_blk['side']} "
                     f"dup={_blk['dup']} edge_range={_blk['edge_range']} "
-                    f"dead={_blk['dead']} price={_blk['price']} "
+                    f"dead={_blk['dead']} spread={_blk.get('spread', 0)} "
+                    f"exec_edge={_blk.get('exec_edge', 0)} price={_blk['price']} "
+                    f"macro_blocked={_blk.get('macro_blocked', 0)} "
+                    f"expiring_soon={_blk.get('expiring_soon', 0)} "
                     f"sleeve_full={_blk.get('sleeve_full', 0)} "
                     f"other={len(edges) - sum(_blk.values())}"
                 )
+                if os.getenv("H1_ONLY", "").lower() == "true":
+                    logger.info(
+                        f"  H1 filter:        h1_type={_blk.get('h1_type', 0)} "
+                        f"h1_side={_blk.get('h1_side', 0)} "
+                        f"h1_asset={_blk.get('h1_asset', 0)} "
+                        f"h1_no_spot={_blk.get('h1_no_spot', 0)} "
+                        f"h1_near_money={_blk.get('h1_near_money', 0)} "
+                        f"h1_no_expiry={_blk.get('h1_no_expiry', 0)} "
+                        f"h1_window={_blk.get('h1_window', 0)}"
+                    )
             if hybrid_mode:
                 settling_24h = sum(
                     1 for p in portfolio.open_positions.values()
@@ -1098,6 +1561,10 @@ def run_live_trading(
                 "open_positions": len(portfolio.open_positions),
                 "deployed_capital": portfolio.deployed_capital,
                 "realized_pnl": portfolio.realized_pnl,
+                "exchange_cash": exchange_cash,
+                "exchange_total": exchange_total,
+                "closed_positions": len(portfolio.closed_positions),
+                "blocked_by": {k: v for k, v in _blk.items() if v > 0},
             })
 
             # Hourly status report (every ~12 scans at 300s interval)
@@ -1129,20 +1596,104 @@ def run_live_trading(
         )
         raise
     finally:
+        # Compute turnover metrics for session report
+        session_end = datetime.now(timezone.utc)
+        session_hours = (session_end - session_start_time).total_seconds() / 3600.0
+        total_closed = len(portfolio.closed_positions)
+        avg_hold_hours = 0.0
+        if total_closed > 0:
+            hold_sum = 0.0
+            for cp in portfolio.closed_positions:
+                try:
+                    opened = datetime.fromisoformat(cp.opened_at)
+                    if opened.tzinfo is None:
+                        opened = opened.replace(tzinfo=timezone.utc)
+                    hold_sum += (session_end - opened).total_seconds() / 3600.0
+                except (ValueError, TypeError):
+                    pass
+            avg_hold_hours = hold_sum / total_closed
+        daily_pnl = portfolio.realized_pnl / max(session_hours / 24.0, 0.01)
+        win_rate = portfolio.trades_won / max(portfolio.trades_won + portfolio.trades_lost, 1)
+
+        # Sleeve-level analytics
+        sleeve_stats = {"fast": {"pnl": 0.0, "wins": 0, "losses": 0, "cost": 0.0, "open": 0},
+                        "macro": {"pnl": 0.0, "wins": 0, "losses": 0, "cost": 0.0, "open": 0},
+                        "other": {"pnl": 0.0, "wins": 0, "losses": 0, "cost": 0.0, "open": 0}}
+
+        def _ticker_sleeve(ticker: str) -> str:
+            series = ticker.split("-")[0] if ticker else ""
+            if series in FAST_SERIES:
+                return "fast"
+            if series in MACRO_SERIES_SET:
+                return "macro"
+            return "other"
+
+        for cp in portfolio.closed_positions:
+            sl = _ticker_sleeve(cp.ticker)
+            sleeve_stats[sl]["pnl"] += cp.pnl
+            sleeve_stats[sl]["cost"] += cp.cost_dollars
+            if cp.pnl > 0:
+                sleeve_stats[sl]["wins"] += 1
+            elif cp.pnl < 0:
+                sleeve_stats[sl]["losses"] += 1
+
+        for pos in portfolio.open_positions.values():
+            sl = _ticker_sleeve(pos.ticker)
+            sleeve_stats[sl]["open"] += 1
+            sleeve_stats[sl]["cost"] += pos.cost_dollars
+
+        open_capital = sum(p.cost_dollars for p in portfolio.open_positions.values())
+        resting_capital = sum(r.reserved_cost_dollars for r in portfolio.resting_orders.values())
+        phantom_count = getattr(portfolio, "_phantom_count", 0)
+
         _log_event(log_path, {
             "type": "session_end",
             "session_id": session_id,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": session_end.isoformat(),
             "scans": scan_n,
+            "session_hours": round(session_hours, 2),
             "trades_taken": portfolio.trades_taken,
             "trades_won": portfolio.trades_won,
             "trades_lost": portfolio.trades_lost,
+            "win_rate": round(win_rate, 3),
             "realized_pnl": portfolio.realized_pnl,
+            "daily_pnl_rate": round(daily_pnl, 4),
+            "positions_closed": total_closed,
+            "positions_open": len(portfolio.open_positions),
+            "avg_hold_hours": round(avg_hold_hours, 1),
             "resting_orders": len(portfolio.resting_orders),
-            "open_positions": len(portfolio.open_positions),
             "killed": portfolio.killed,
             "kill_reason": portfolio.kill_reason,
+            "open_capital": round(open_capital, 2),
+            "resting_capital": round(resting_capital, 2),
+            "phantom_count": phantom_count,
+            "sleeves": {k: {kk: round(vv, 2) if isinstance(vv, float) else vv
+                            for kk, vv in v.items()}
+                        for k, v in sleeve_stats.items()},
         })
+
+        logger.info("=" * 50)
+        logger.info("SESSION TURNOVER REPORT")
+        logger.info("=" * 50)
+        logger.info("Duration:       %.1f hours", session_hours)
+        logger.info("Trades taken:   %d (W:%d L:%d, %.0f%% win)",
+                     portfolio.trades_taken, portfolio.trades_won,
+                     portfolio.trades_lost, win_rate * 100)
+        logger.info("Realized P&L:   $%+.2f", portfolio.realized_pnl)
+        logger.info("Daily P&L rate: $%+.2f/day", daily_pnl)
+        logger.info("Positions:      %d closed, %d still open",
+                     total_closed, len(portfolio.open_positions))
+        logger.info("Avg hold time:  %.1f hours", avg_hold_hours)
+        for sl_name in ("fast", "macro", "other"):
+            sl = sleeve_stats[sl_name]
+            if sl["wins"] or sl["losses"] or sl["open"]:
+                logger.info("  %s: %dW/%dL pnl=$%+.2f open=%d cost=$%.2f",
+                            sl_name, sl["wins"], sl["losses"],
+                            sl["pnl"], sl["open"], sl["cost"])
+        if phantom_count:
+            logger.info("Phantoms:       %d removed this session", phantom_count)
+        logger.info("=" * 50)
+
         heartbeat.stop()
 
     return portfolio

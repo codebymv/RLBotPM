@@ -347,6 +347,16 @@ class RLCryptoTrade(Base):
     hold_steps = Column(Integer, nullable=True)
     exit_reason = Column(String(100), nullable=True)  # MODEL_DECISION, STOP_LOSS, TAKE_PROFIT
 
+    # Honest accounting (architecture-audit-03 §B4): replaces the placeholder
+    # `fee_drag_pct = 0.0` in bot/scripts/rl_promotion_check.py. These columns
+    # let the promotion check compute fee drag, equity curve, and drawdown
+    # from real DB data instead of hardcoded zeros.
+    fee_usdt = Column(Float, nullable=True)            # round-trip fees on this trade
+    cumulative_equity = Column(Float, nullable=True)   # equity AT close of this trade
+    peak_equity = Column(Float, nullable=True)         # max equity observed up to and including this trade
+    order_type = Column(String(20), nullable=True)     # market, limit, post_only, ...
+    fill_was_maker = Column(Boolean, nullable=True)    # True if fill was a maker order
+
     # Standard fields
     mode = Column(String(20), default="paper", index=True)
     status = Column(String(20), default="open", index=True)

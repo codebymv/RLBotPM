@@ -1,0 +1,114 @@
+# H-PERP-003 perpetual-side risk defaults
+#
+# These are the concrete operational values backing items 12 (capacity), 13
+# (kill-switch + wealth floor), and 14 (re-evaluation cadence) of
+# `research/10_fundability_review_H-PERP-003.md`. They are intentionally
+# separate from `shared/config/risk_config.yaml` (which is tuned for
+# Coinbase / RL crypto) and from `shared/config/kalshi_config.yaml`
+# (event-contract specific).
+#
+# Nothing in this file is wired into a live trader yet. The values exist so
+# items 12-14 can flip from `_PENDING_` to `YES` in the fundability review
+# with real evidence rather than vague placeholders. When live capital is
+# eventually requested, the perp execution module is expected to read this
+# file as its risk source of truth.
+
+hypothesis_id: "H-PERP-003"
+venue: "OKX"
+instrument:
+  swap: "BTC-USDT-SWAP"
+  spot: "BTC-USDT"
+notional_per_trade_usdt: 100.0  # `V = 100`, frozen in 06 §3.
+
+# -----------------------------------------------------------------------------
+# Item 12: Capacity (>= 5x per-trade $)
+# -----------------------------------------------------------------------------
+capacity:
+  per_trade_notional_usdt: 100.0
+  capacity_floor_multiple: 5.0  # i.e. require >= 5 * per_trade_notional_usdt headroom
+  capacity_floor_usdt: 500.0
+  # OKX VIP-0 single-account position cap on BTC-USDT-SWAP is documented at
+  # ~50,000 contracts (1 ct = 0.01 BTC face). At BTC = $80,000 the per-account
+  # face capacity is ~$40,000,000, ~80,000x the per-trade notional. The 5x
+  # floor is therefore satisfied by ~5 orders of magnitude. The script
+  # `bot/scripts/check_h_perp_003_tracking.py` is also notional-agnostic.
+  evidence_url: "https://www.okx.com/help/perpetual-swap-tier-position-limit"
+  basis_impact:
+    # At $V = $100 USDT vs. mark $80,000 the trade is ~0.0013 BTC. OKX
+    # BTC-USDT-SWAP top-of-book typically holds tens of contracts; a
+    # 0.0013-BTC market order is well under one contract. Slippage is
+    # bounded by `transaction_costs.taker_slippage_pct` in `risk_config.yaml`
+    # (5 bps), and the maker default in 06 §3 keeps it at zero by design.
+    expected_slippage_pct_at_per_trade: 0.0005
+    pause_threshold_slippage_pct: 0.0050  # if observed slippage exceeds this, halt and re-cap
+  scale_up_rule: |
+    Increase notional only after Phase 5 PASS AND a fresh capacity probe at
+    the new notional shows expected_slippage_pct < 0.0010 on a 24h sample.
+    Do NOT scale by more than 2x per quarterly review.
+
+# -----------------------------------------------------------------------------
+# Item 13: Kill-switch + wealth floor
+# -----------------------------------------------------------------------------
+kill_switch:
+  # Tracking error: paper rebuild must agree with offline.
+  tracking_error:
+    verifier: "bot/scripts/check_h_perp_003_tracking.py"
+    consecutive_fail_threshold: 2  # FAIL twice in a row -> halt
+    daily_check: true
+  # Data staleness: OKX BTC-USDT-SWAP funding cycles every 8h. Anything
+  # >12h between snapshots indicates a feed outage.
+  staleness:
+    max_minutes_between_funding_snapshots: 720
+  # Funding-sign flip: positive `fundingRate` pays the SHORT (06 §4). A
+  # sustained negative regime inverts the carry and invalidates the
+  # hypothesis sign convention.
+  funding_regime_flip:
+    rolling_window_days: 7
+    flip_threshold_mean_rate: -0.0001  # -0.01% rolling mean -> halt
+  # Per-day P&L drawdown on the live perp leg.
+  daily_pnl:
+    max_daily_loss_usdt: 5.0      # 5% of $100 notional, fail-closed
+    max_daily_loss_pct: 0.05
+  # Total drawdown vs. paper-window peak.
+  total_drawdown:
+    max_drawdown_pct: 0.15        # halt at 15% drawdown, mirror of risk_config max_total_drawdown but tighter for perps
+  # Operator escalation: requires manual reset, no auto-resume.
+  auto_resume: false
+  alert_channels:
+    - "log"     # always
+    - "email"   # configure SMTP in env when wiring live
+  log_path: "logs/risk/h_perp_003_kill_switch.jsonl"
+
+wealth_floor:
+  # Hard floor on the trading sub-account that must not be breached. Below
+  # the floor, the kill-switch halts new orders and forces unwind.
+  account_floor_usdt: 200.0      # twice the per-trade notional
+  # Maximum fraction of liquid net worth that may be allocated to this
+  # hypothesis. Operator self-attests at every quarterly review.
+  max_pct_of_liquid_net_worth: 0.05
+  # Forced unwind cadence if the floor is hit.
+  unwind_within_minutes: 15
+
+# -----------------------------------------------------------------------------
+# Item 14: Re-evaluation cadence
+# -----------------------------------------------------------------------------
+re_evaluation:
+  # Scheduled re-runs of the Phase 4 backtest on a rolling 365d window.
+  scheduled:
+    cadence_days: 90
+    rolling_window_days: 365
+    runner: "python research/backtests/H-PERP-003.py"
+  # Quantitative regression triggers: any of these forces an immediate
+  # re-run regardless of the calendar cadence.
+  forced_triggers:
+    sharpe_regression_pct: 0.50          # OOS Sharpe drops > 50% vs. last PASS
+    profit_factor_regression_pct: 0.50
+    g6_placebo_frac_beats_above: 0.05    # placebo gate would now FAIL
+    weekly_align_ok_below_pct: 99.0      # data quality regression
+    oos_segment_turns_negative: true     # any OOS segment mean turns negative
+    venue_mechanism_change: true         # OKX changes funding interval / sign convention
+  # On any forced trigger, capital is paused via the kill-switch BEFORE the
+  # re-run starts. Capital remains paused until the new Phase 4 verdict is
+  # PASS and a fresh fundability review is committed.
+  pause_on_trigger: true
+  log_path: "logs/risk/h_perp_003_re_evaluation.jsonl"

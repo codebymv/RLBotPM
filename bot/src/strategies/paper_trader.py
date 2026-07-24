@@ -13,7 +13,9 @@ Logs are written to bot/logs/paper_trades.jsonl for audit.
 from __future__ import annotations
 
 import json
+import math
 import os
+import subprocess
 import time
 from datetime import datetime, timezone
 from dataclasses import dataclass, field, asdict
@@ -26,6 +28,258 @@ from ..strategies.kalshi_edges import StatisticalEdgeDetector, Edge
 logger = get_logger(__name__)
 
 LOG_DIR = Path(__file__).resolve().parent.parent.parent / "logs"
+RESEARCH_H_SPOT_LOG = LOG_DIR / "paper_research_H-SPOT-001.jsonl"
+RESEARCH_H_PERP_003_LOG = LOG_DIR / "paper_research_H-PERP-003.jsonl"
+# Keep the offline panel in lockstep with paper snapshots so Phase 5 tracking
+# cannot silently go INSUFFICIENT when daily_capture cron stalls (audit-03 A1).
+H_PERP_003_PANEL_CSV = (
+    Path(__file__).resolve().parents[3]
+    / "research"
+    / "datasets"
+    / "H-PERP-003"
+    / "btc_hedged_panel_okx.csv"
+)
+H_PERP_003_PANEL_FIELDS = [
+    "fundingTime",
+    "fundingRate",
+    "mark_candle_ts",
+    "mark_close",
+    "spot_candle_ts",
+    "spot_close",
+    "align_ok",
+    "mark_skew_ms",
+    "spot_skew_ms",
+]
+OKX_BASE_URL = "https://www.okx.com"
+H_PERP_003_INST_SWAP = "BTC-USDT-SWAP"
+H_PERP_003_INST_SPOT = "BTC-USDT"
+H_PERP_003_NOTIONAL_USDT = 100.0
+H_PERP_003_CANDLE_MS = 60 * 60 * 1000
+H_PERP_003_MAX_SKEW_MS = 60 * 1000
+
+
+def append_h_spot_001_research_snapshot(scan_n: int) -> None:
+    """Log one H-SPOT-001 signal snapshot (Coinbase public candles; no orders).
+
+    Edge Research Reset — Phase 5. Controlled by env ``RESEARCH_LOG_H_SPOT=true``
+    from :func:`run_paper_trading`.
+    """
+    import requests
+
+    url = "https://api.exchange.coinbase.com/products/BTC-USD/candles"
+    r = requests.get(url, params={"granularity": "86400"}, timeout=45)
+    r.raise_for_status()
+    raw = r.json()
+    rows = sorted(raw, key=lambda x: int(x[0]))
+    closes = [float(x[4]) for x in rows]
+    n = len(closes)
+    ts = int(rows[-1][0]) if rows else 0
+    close = closes[-1] if closes else None
+    sma20 = sma120 = None
+    pos = None
+    if n >= 120:
+        t = n - 1
+        sma120 = sum(closes[t - 119 : t + 1]) / 120.0
+        sma20 = sum(closes[t - 19 : t + 1]) / 20.0
+        pos = 1 if (close > sma120 and sma20 > sma120) else 0
+    ev = {
+        "type": "research_h_spot_001",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "kalshi_scan": scan_n,
+        "coinbase_time": ts,
+        "close": close,
+        "sma20": sma20,
+        "sma120": sma120,
+        "pos_raw": pos,
+    }
+    RESEARCH_H_SPOT_LOG.parent.mkdir(parents=True, exist_ok=True)
+    with open(RESEARCH_H_SPOT_LOG, "a", encoding="utf-8") as f:
+        f.write(json.dumps(ev) + "\n")
+
+
+def _git_sha() -> str:
+    try:
+        root = Path(__file__).resolve().parents[3]
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=root,
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+        ).strip()
+    except Exception:
+        return "unknown"
+
+
+def _okx_get(path: str, params: dict) -> list:
+    import requests
+
+    resp = requests.get(
+        f"{OKX_BASE_URL}{path}",
+        params=params,
+        timeout=45,
+        headers={"User-Agent": "Mozilla/5.0"},
+    )
+    resp.raise_for_status()
+    body = resp.json()
+    if str(body.get("code")) != "0":
+        raise RuntimeError(f"OKX error for {path}: {body}")
+    return body.get("data") or []
+
+
+def _latest_okx_funding() -> tuple[int, float]:
+    rows = _okx_get(
+        "/api/v5/public/funding-rate-history",
+        {"instId": H_PERP_003_INST_SWAP, "limit": "3"},
+    )
+    if not rows:
+        raise RuntimeError("OKX funding-rate-history returned no rows")
+    latest = max(rows, key=lambda row: int(row["fundingTime"]))
+    return int(latest["fundingTime"]), float(latest["fundingRate"])
+
+
+def _recent_okx_candles(path: str, inst_id: str) -> dict[int, float]:
+    rows = _okx_get(path, {"instId": inst_id, "bar": "1H", "limit": "100"})
+    return {int(row[0]): float(row[4]) for row in rows}
+
+
+def _candle_covering(fts: int, closes: dict[int, float]) -> tuple[int | None, float | None, int | None]:
+    best_ts = None
+    for ts in sorted(closes):
+        if ts <= fts < ts + H_PERP_003_CANDLE_MS:
+            best_ts = ts
+    if best_ts is None:
+        return None, None, None
+    skew_ms = min(fts - best_ts, best_ts + H_PERP_003_CANDLE_MS - fts)
+    return best_ts, closes[best_ts], skew_ms
+
+
+def _last_h_perp_003_snapshot() -> dict | None:
+    if not RESEARCH_H_PERP_003_LOG.exists():
+        return None
+    last: dict | None = None
+    with open(RESEARCH_H_PERP_003_LOG, encoding="utf-8") as f:
+        for line in f:
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if row.get("type") == "research_h_perp_003":
+                last = row
+    return last
+
+
+def _append_h_perp_003_panel_row(ev: dict) -> None:
+    """Append-only mirror of a paper snapshot into the offline hedged panel CSV.
+
+    Dedupes on ``fundingTime``. Never mutates an existing row — matches the
+    ``daily_capture.py`` operating rule so paper + offline stay mergeable.
+    """
+    import csv
+
+    try:
+        funding_time = int(ev["fundingTime"])
+    except (KeyError, TypeError, ValueError):
+        return
+
+    panel_path = H_PERP_003_PANEL_CSV
+    panel_path.parent.mkdir(parents=True, exist_ok=True)
+
+    existing_ts: set[int] = set()
+    if panel_path.exists():
+        with open(panel_path, newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                try:
+                    existing_ts.add(int(row["fundingTime"]))
+                except (KeyError, TypeError, ValueError):
+                    continue
+    if funding_time in existing_ts:
+        return
+
+    out_row = {
+        "fundingTime": funding_time,
+        "fundingRate": ev.get("fundingRate", ""),
+        "mark_candle_ts": "" if ev.get("mark_candle_ts") is None else ev.get("mark_candle_ts"),
+        "mark_close": "" if ev.get("mark_close") is None else ev.get("mark_close"),
+        "spot_candle_ts": "" if ev.get("spot_candle_ts") is None else ev.get("spot_candle_ts"),
+        "spot_close": "" if ev.get("spot_close") is None else ev.get("spot_close"),
+        "align_ok": ev.get("align_ok", 0),
+        "mark_skew_ms": "" if ev.get("mark_skew_ms") is None else ev.get("mark_skew_ms"),
+        "spot_skew_ms": "" if ev.get("spot_skew_ms") is None else ev.get("spot_skew_ms"),
+    }
+    write_header = not panel_path.exists() or panel_path.stat().st_size == 0
+    with open(panel_path, "a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=H_PERP_003_PANEL_FIELDS)
+        if write_header:
+            writer.writeheader()
+        writer.writerow(out_row)
+
+
+def append_h_perp_003_paper_snapshot(scan_n: int) -> None:
+    """Log one H-PERP-003 funding-boundary snapshot (OKX public REST; no orders)."""
+    funding_time, funding_rate = _latest_okx_funding()
+    previous = _last_h_perp_003_snapshot()
+    if previous and int(previous.get("fundingTime") or 0) >= funding_time:
+        return
+
+    mark_closes = _recent_okx_candles(
+        "/api/v5/market/history-mark-price-candles",
+        H_PERP_003_INST_SWAP,
+    )
+    spot_closes = _recent_okx_candles(
+        "/api/v5/market/history-candles",
+        H_PERP_003_INST_SPOT,
+    )
+    mark_ts, mark_close, mark_skew = _candle_covering(funding_time, mark_closes)
+    spot_ts, spot_close, spot_skew = _candle_covering(funding_time, spot_closes)
+    align_ok = int(
+        mark_close is not None
+        and spot_close is not None
+        and mark_skew is not None
+        and spot_skew is not None
+        and mark_skew <= H_PERP_003_MAX_SKEW_MS
+        and spot_skew <= H_PERP_003_MAX_SKEW_MS
+    )
+
+    pnl_interval = None
+    cum_pnl = float(previous.get("cum_pnl_usdt") or 0.0) if previous else 0.0
+    if previous and align_ok:
+        prev_mark = float(previous["mark_close"])
+        prev_spot = float(previous["spot_close"])
+        spot_return = math.log(float(spot_close) / prev_spot)
+        perp_return = math.log(float(mark_close) / prev_mark)
+        pnl_interval = H_PERP_003_NOTIONAL_USDT * funding_rate + H_PERP_003_NOTIONAL_USDT * (
+            spot_return - perp_return
+        )
+        cum_pnl += pnl_interval
+
+    ev = {
+        "type": "research_h_perp_003",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "kalshi_scan": scan_n,
+        "fundingTime": funding_time,
+        "fundingRate": funding_rate,
+        "mark_candle_ts": mark_ts,
+        "mark_close": mark_close,
+        "spot_candle_ts": spot_ts,
+        "spot_close": spot_close,
+        "align_ok": align_ok,
+        "mark_skew_ms": mark_skew,
+        "spot_skew_ms": spot_skew,
+        "notional_usdt": H_PERP_003_NOTIONAL_USDT,
+        "pnl_interval_usdt": pnl_interval,
+        "cum_pnl_usdt": cum_pnl,
+        "git_sha": _git_sha(),
+        "code_version": "h-perp-003.paper.v1",
+    }
+    RESEARCH_H_PERP_003_LOG.parent.mkdir(parents=True, exist_ok=True)
+    with open(RESEARCH_H_PERP_003_LOG, "a", encoding="utf-8") as f:
+        f.write(json.dumps(ev, sort_keys=True) + "\n")
+    try:
+        _append_h_perp_003_panel_row(ev)
+    except Exception as exc:
+        # Paper evidence must still land even if the offline mirror fails.
+        logger.warning("H-PERP-003 panel dual-write skipped: %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -104,10 +358,15 @@ LIVE_SERIES = CRYPTO_SERIES + INDEX_SERIES + FX_COMMODITY_SERIES + MACRO_SERIES 
 FAST_SERIES = set(CRYPTO_SERIES + INDEX_SERIES + FX_COMMODITY_SERIES)
 MACRO_SERIES_SET = set(MACRO_SERIES + WEATHER_SERIES)
 
-# Default hybrid-mode settings
-HYBRID_FAST_HORIZON_HOURS = 72  # contracts closing within this window qualify as fast
-HYBRID_FAST_CAPITAL_FRAC = 0.60  # 60 % of budget reserved for fast-turnover sleeve
-HYBRID_FAST_POSITION_FRAC = 0.60  # 60 % of position slots reserved for fast sleeve
+# Default hybrid-mode settings -- tilted toward fast turnover so new capital
+# is preferentially recycled into short-dated markets.
+HYBRID_FAST_HORIZON_HOURS = 72
+HYBRID_FAST_CAPITAL_FRAC = 0.80
+HYBRID_FAST_POSITION_FRAC = 0.80
+# Absolute macro cap: macro sleeve cannot exceed this fraction of TOTAL
+# portfolio (exchange_total), not just max_total_deployed.  Prevents
+# macro lock-up from growing unbounded with repeated deposits.
+HYBRID_MACRO_MAX_PORTFOLIO_FRAC = 0.25
 
 
 def classify_sleeve(market: Dict, fast_horizon_hours: float = HYBRID_FAST_HORIZON_HOURS) -> str:
@@ -711,6 +970,18 @@ def run_paper_trading(
 
             except Exception as e:
                 logger.exception("Scan %d failed (continuing): %s", scan_n, e)
+
+            if os.getenv("RESEARCH_LOG_H_SPOT", "").lower() == "true":
+                try:
+                    append_h_spot_001_research_snapshot(scan_n)
+                except Exception as exc:
+                    logger.debug("H-SPOT-001 research log skipped: %s", exc)
+
+            if os.getenv("RESEARCH_LOG_H_PERP_003", "").lower() == "true":
+                try:
+                    append_h_perp_003_paper_snapshot(scan_n)
+                except Exception as exc:
+                    logger.debug("H-PERP-003 research log skipped: %s", exc)
 
             time.sleep(interval_seconds)
 

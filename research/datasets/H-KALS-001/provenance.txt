@@ -1,0 +1,15 @@
+H-KALS-001 — observation scan log
+=================================
+
+Artifact: scan_events.jsonl (append-only JSON lines from kals_001_probability_sum_scan.py)
+
+Before interpreting results, record here:
+- Host / OS (optional)
+- Date range of scans
+- KALSHI demo vs live (script --demo / --live)
+- Git commit (optional)
+
+Recorded run (automated stub — update as you add scans):
+- 2026-04-25: 1 demo scan, 74990 markets fetched, see 07_backtest_results_H-KALS-001.md
+
+Pre-registered rules: ../../06_backtest_design_H-KALS-001.md

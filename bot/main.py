@@ -1792,8 +1792,10 @@ def paper_status():
 @click.option('--series', default=None, help='Comma-separated series')
 @click.option('--dry-run', is_flag=True, help='Find edges + log but do NOT place orders')
 @click.option('--hybrid/--no-hybrid', default=True, help='Enable hybrid turnover mode (default: on)')
-@click.option('--fast-split', default=0.60, type=float, help='Fraction of capital/slots for fast sleeve (default 60%%)')
+@click.option('--fast-split', default=0.80, type=float, help='Fraction of capital/slots for fast sleeve (default 80%%)')
 @click.option('--fast-horizon', default=72.0, type=float, help='Max hours-to-close for fast sleeve (default 72h)')
+@click.option('--fast-only', is_flag=True, default=False, help='Fast sleeve only: no macro entries (sets fast-split=1.0)')
+@click.option('--macro-lite', is_flag=True, default=False, help='Macro-lite: 90/10 fast/macro split')
 @click.confirmation_option(
     prompt='\n⚠️  WARNING: This places REAL orders with REAL money on Kalshi.\n'
            '   Safety limits: $1/trade, $10 total, kill switch at 3 losses.\n'
@@ -1801,7 +1803,8 @@ def paper_status():
 )
 def live_trade(interval, max_cost, max_total, max_positions, max_loss_streak,
                max_daily_loss, min_edge, max_edge, min_price, max_price,
-               max_scans, series, dry_run, hybrid, fast_split, fast_horizon):
+               max_scans, series, dry_run, hybrid, fast_split, fast_horizon,
+               fast_only, macro_lite):
     """
     Live trade the crypto edge detector on Kalshi.
 
@@ -1820,6 +1823,13 @@ def live_trade(interval, max_cost, max_total, max_positions, max_loss_streak,
     Use --dry-run to see what trades would be placed without risking money.
     """
     from src.strategies.live_trader import run_live_trading
+
+    if fast_only:
+        fast_split = 1.0
+        hybrid = True
+    elif macro_lite:
+        fast_split = 0.90
+        hybrid = True
 
     mode = "DRY RUN" if dry_run else "LIVE"
     console.print(f"\n[bold {'cyan' if dry_run else 'red'}]Kalshi Live Trading ({mode})[/bold {'cyan' if dry_run else 'red'}]")
@@ -1872,16 +1882,18 @@ def fleet():
 
 
 @fleet.command("start")
-@click.option('--dry-run', is_flag=True, help='Kalshi dry-run + RL paper mode (no real money)')
+@click.option('--dry-run', is_flag=True, help='Paper / research mode (no real money)')
 @click.option('--skip-gates', is_flag=True, help='Skip promotion gate checks (dangerous for live)')
 @click.option('--kalshi-only', is_flag=True, help='Start only Kalshi bot')
 @click.option('--rl-only', is_flag=True, help='Start only RL Crypto bot')
+@click.option('--h-perp-003-only', is_flag=True, help='Start only H-PERP-003 paper logger')
 @click.option('--model', default=None, help='RL model path (e.g. models/best_model_run_171) overrides fleet.yaml')
-def fleet_start(dry_run, skip_gates, kalshi_only, rl_only, model):
-    """Start both trading bots in parallel.
+def fleet_start(dry_run, skip_gates, kalshi_only, rl_only, h_perp_003_only, model):
+    """Start fleet sleeves in parallel.
 
     Runs preflight promotion checks unless --skip-gates.
     Use --dry-run to test orchestration without real orders.
+    H-PERP-003 is always paper-only (public REST snapshots; no orders).
     """
     import subprocess
     import yaml
@@ -1900,13 +1912,14 @@ def fleet_start(dry_run, skip_gates, kalshi_only, rl_only, model):
     fleet_section = fleet_cfg.get("fleet", {})
     kalshi_cfg = fleet_cfg.get("kalshi", {})
     rl_cfg = fleet_cfg.get("rl_crypto", {})
+    h_perp_003_cfg = fleet_cfg.get("h_perp_003", {})
 
-    # Preflight: promotion gates
+    # Preflight: promotion gates (skipped for research-only H-PERP-003 sleeve)
     if not skip_gates and not dry_run:
         console.print("\n[bold]Running promotion gate checks...[/bold]")
         gates_ok = True
 
-        if kalshi_cfg.get("enabled", True) and not rl_only:
+        if kalshi_cfg.get("enabled", True) and not rl_only and not h_perp_003_only:
             result = subprocess.run(
                 [sys.executable, str(bot_dir / "scripts" / "paper_promotion_check.py")],
                 cwd=repo_root,
@@ -1921,7 +1934,7 @@ def fleet_start(dry_run, skip_gates, kalshi_only, rl_only, model):
             else:
                 console.print("[green]Kalshi gate: READY[/green]")
 
-        if rl_cfg.get("enabled", True) and not kalshi_only:
+        if rl_cfg.get("enabled", True) and not kalshi_only and not h_perp_003_only:
             result = subprocess.run(
                 [sys.executable, str(bot_dir / "scripts" / "rl_promotion_check.py")],
                 cwd=repo_root,
@@ -1953,7 +1966,7 @@ def fleet_start(dry_run, skip_gates, kalshi_only, rl_only, model):
     env = os.environ.copy()
 
     # Kalshi
-    if kalshi_cfg.get("enabled", True) and not rl_only:
+    if kalshi_cfg.get("enabled", True) and not rl_only and not h_perp_003_only:
         if dry_run:
             # Paper mode: full portfolio simulation, no real orders
             kalshi_args = [
@@ -2003,13 +2016,36 @@ def fleet_start(dry_run, skip_gates, kalshi_only, rl_only, model):
         console.print("[dim]Started Kalshi bot (PID %d)[/dim]" % p.pid)
 
     # RL Crypto
-    if rl_cfg.get("enabled", True) and not kalshi_only:
-        model_path_str = model or rl_cfg.get("model", "models/best_model_run_172.zip")
+    if rl_cfg.get("enabled", True) and not kalshi_only and not h_perp_003_only:
+        # Startup check (audit-03 B1): a missing/null model when the bot is
+        # enabled is an operator error, not a soft skip. Either the operator
+        # set `enabled: false` in fleet.yaml, or they own producing a real
+        # artifact via Track B.
+        cfg_model = rl_cfg.get("model")
+        cli_model = model
+        model_path_str = cli_model or cfg_model
+        if not model_path_str:
+            console.print(
+                "[bold red]Fleet abort:[/bold red] rl_crypto.enabled=true but "
+                "rl_crypto.model is null in `shared/config/fleet.yaml` and "
+                "no `--model` was passed.\n"
+                "Either set `enabled: false` (Track B repair, see "
+                "research/architecture-audit-03.md) or point `model` at a "
+                "real .zip artifact in bot/models/."
+            )
+            return
         model_path = Path(model_path_str)
         if not model_path.is_absolute():
             model_path = bot_dir / model_path_str
         if not model_path.exists():
-            console.print(f"[yellow]RL model not found: {model_path} — skipping RL bot[/yellow]")
+            console.print(
+                "[bold red]Fleet abort:[/bold red] RL model artifact not "
+                f"found at: {model_path}\n"
+                "This is the audit-01 §1 failure mode (config references a "
+                "non-existent model). Either fix `rl_crypto.model` in "
+                "fleet.yaml or set `enabled: false`."
+            )
+            return
         else:
             if dry_run:
                 # Paper mode: rl-paper-trade uses live Coinbase data with no real orders
@@ -2046,8 +2082,30 @@ def fleet_start(dry_run, skip_gates, kalshi_only, rl_only, model):
             procs.append(("RL Crypto", p))
             console.print("[dim]Started RL Crypto bot (PID %d)[/dim]" % p.pid)
 
+    # H-PERP-003 paper logger (always no orders; preferred dry-run sleeve)
+    if h_perp_003_cfg.get("enabled", False) and not kalshi_only and not rl_only:
+        h_args = [
+            sys.executable,
+            str(bot_dir / "scripts" / "run_h_perp_003_paper_logger.py"),
+            "--interval",
+            str(h_perp_003_cfg.get("interval", 300)),
+        ]
+        p = subprocess.Popen(
+            h_args,
+            cwd=str(bot_dir),
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
+        )
+        procs.append(("H-PERP-003 paper", p))
+        console.print("[dim]Started H-PERP-003 paper logger (PID %d)[/dim]" % p.pid)
+
     if not procs:
-        console.print("[yellow]No bots started[/yellow]")
+        console.print(
+            "[yellow]No bots started[/yellow] — check `enabled` flags in "
+            "`shared/config/fleet.yaml` (kalshi / rl_crypto / h_perp_003)."
+        )
         return
 
     # Start heartbeat so the dashboard knows the fleet is alive

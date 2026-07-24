@@ -611,6 +611,7 @@ class KalshiExecutionClient:
         ticker: str,
         contracts: Optional[int] = None,
         use_market: bool = False,
+        limit_price: Optional[int] = None,
     ) -> Optional[KalshiOrder]:
         """
         Sell (close) a position.
@@ -619,6 +620,9 @@ class KalshiExecutionClient:
             ticker: Market ticker
             contracts: Number to sell (None = entire position)
             use_market: If True, use market order
+            limit_price: Price in cents for limit sells (yes_price for YES
+                         positions, no_price for NO positions). Required when
+                         use_market is False.
         
         Returns:
             KalshiOrder if successful
@@ -628,7 +632,6 @@ class KalshiExecutionClient:
             logger.warning(f"No position to sell for {ticker}")
             return None
         
-        # Determine side and contracts
         if position.position > 0:
             side = OrderSide.YES
             num_contracts = contracts or position.position
@@ -647,8 +650,20 @@ class KalshiExecutionClient:
             "side": side.value,
             "count": num_contracts,
         }
+
+        if not use_market and limit_price is not None:
+            limit_price = int(round(max(1, min(99, limit_price))))
+            if side == OrderSide.YES:
+                body["yes_price"] = limit_price
+            else:
+                body["no_price"] = limit_price
         
-        logger.info(f"Selling position: {num_contracts} {side.value} {ticker}")
+        logger.info(
+            "Selling position: %d %s %s (%s @ %sc)",
+            num_contracts, side.value, ticker,
+            "market" if use_market else "limit",
+            limit_price if limit_price else "mkt",
+        )
         
         resp = self._request("POST", "/portfolio/orders", json_data=body)
         
@@ -662,7 +677,7 @@ class KalshiExecutionClient:
             ticker=ticker,
             side=side,
             order_type=OrderType.MARKET if use_market else OrderType.LIMIT,
-            price=int(order.get("average_fill_price", 50) or 50),
+            price=int(order.get("average_fill_price", limit_price or 50) or 50),
             contracts=num_contracts,
             filled_contracts=self._parse_fill_count(order),
             status=self._parse_order_status(order.get("status", "pending")),

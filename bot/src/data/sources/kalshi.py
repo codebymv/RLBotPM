@@ -17,7 +17,7 @@ import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Any, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 import requests
 import pandas as pd
@@ -260,6 +260,37 @@ class KalshiAdapter(ExchangeAdapter):
     
     # === Kalshi-Specific Methods ===
     
+    def get_markets_page(
+        self,
+        status: str = "open",
+        category: Optional[str] = None,
+        series_ticker: Optional[str] = None,
+        limit: int = 100,
+        cursor: Optional[str] = None,
+    ) -> Tuple[List[KalshiMarket], Optional[str]]:
+        """
+        One page of markets plus the API cursor for the next page (if any).
+
+        Returns:
+            (markets, next_cursor) — next_cursor is None when the listing is exhausted.
+        """
+        params: Dict[str, Any] = {
+            "status": status,
+            "limit": limit,
+        }
+        if category:
+            params["category"] = category
+        if series_ticker:
+            params["series_ticker"] = series_ticker
+        if cursor:
+            params["cursor"] = cursor
+
+        data = self._request("GET", "/markets", params=params)
+        markets_data = data.get("markets", [])
+        next_cursor = data.get("cursor") or None
+        markets = [self._parse_market(m) for m in markets_data]
+        return markets, next_cursor
+
     def get_markets(
         self,
         status: str = "open",
@@ -278,21 +309,48 @@ class KalshiAdapter(ExchangeAdapter):
             limit: Max results per page
             cursor: Pagination cursor
         """
-        params = {
-            "status": status,
-            "limit": limit,
-        }
-        if category:
-            params["category"] = category
-        if series_ticker:
-            params["series_ticker"] = series_ticker
-        if cursor:
-            params["cursor"] = cursor
-        
-        data = self._request("GET", "/markets", params=params)
-        markets_data = data.get("markets", [])
-        
-        return [self._parse_market(m) for m in markets_data]
+        markets, _ = self.get_markets_page(
+            status=status,
+            category=category,
+            series_ticker=series_ticker,
+            limit=limit,
+            cursor=cursor,
+        )
+        return markets
+
+    def list_open_markets_all_pages(
+        self,
+        category: Optional[str] = None,
+        series_ticker: Optional[str] = None,
+        limit_per_page: int = 200,
+        page_delay_sec: float = 0.25,
+    ) -> List[KalshiMarket]:
+        """
+        Walk the cursor until exhausted; returns all open markets for the filters.
+
+        Used by research scanners that must not silently read only the first page.
+        ``page_delay_sec`` spaces GETs to reduce 429 rate limits from Kalshi.
+        """
+        all_markets: List[KalshiMarket] = []
+        cursor: Optional[str] = None
+        first = True
+        while True:
+            if not first and page_delay_sec > 0:
+                time.sleep(page_delay_sec)
+            first = False
+            batch, cursor = self.get_markets_page(
+                status="open",
+                category=category,
+                series_ticker=series_ticker,
+                limit=limit_per_page,
+                cursor=cursor,
+            )
+            if not batch:
+                break
+            all_markets.extend(batch)
+            if not cursor:
+                break
+        return all_markets
     
     def get_market(self, ticker: str) -> KalshiMarket:
         """Get single market by ticker."""

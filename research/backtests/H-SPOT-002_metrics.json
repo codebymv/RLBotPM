@@ -1,0 +1,34 @@
+{
+  "hypothesis": "H-SPOT-002",
+  "n_rows": 950,
+  "days_span": 949.0,
+  "oos_days": 920,
+  "n_entries": 26,
+  "sharpe_oos": -1.3333,
+  "profit_factor_oos": 0.773,
+  "cum_pnl_oos": -1.050262,
+  "cum_pnl_oos_2x_fee": -1.662262,
+  "seg_means": [
+    6e-05,
+    -0.003154,
+    -0.000336
+  ],
+  "d1_calendar_depth_ge_730d": true,
+  "d4_week_density_ok": true,
+  "data_contract_ok": true,
+  "g1_sharpe": false,
+  "g2_pf": false,
+  "g3_2x_fee": false,
+  "g4_segpos": false,
+  "g5_concentration": true,
+  "g6_placebo_frac_beats": 0.984,
+  "g6_method": "random_sign_flip",
+  "g6_pass": false,
+  "verdict": "FAIL",
+  "params": {
+    "W": 30,
+    "Z_ENTER": 2.0,
+    "Z_EXIT": 0.5,
+    "taker_per_side": 0.006
+  }
+}

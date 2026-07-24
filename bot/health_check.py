@@ -34,21 +34,26 @@ def run_health_check():
 
     client = KalshiExecutionClient(demo=False)
 
-    # 1. Balance
+    # 1. Balance + Positions (fetch together so balance section can reference positions)
     avail, total = client.get_balance()
-    print(f"\n1. BALANCE")
-    print(f"   Cash available:  ${avail:.2f}")
-    print(f"   Portfolio total: ${total:.2f}")
-    if avail < 1.0:
-        print("   !! WARNING: Cash below $1.00 minimum trade cost")
-
-    # 2. Positions
     positions = client.get_positions(strict=True)
     active = [p for p in positions if p.position != 0]
     settled_with_pnl = [p for p in positions if p.position == 0 and abs(p.realized_pnl or 0) > 1e-9]
-
     total_cost = sum(p.total_cost for p in active)
     total_realized = sum(p.realized_pnl for p in positions)
+
+    deployed_cost = total_cost
+    implied_free = total - deployed_cost if total > deployed_cost else 0
+
+    print(f"\n1. BALANCE")
+    print(f"   Exchange cash:   ${avail:.2f}")
+    print(f"   Portfolio total: ${total:.2f}")
+    print(f"   Deployed cost:   ${deployed_cost:.2f}")
+    print(f"   Implied free:    ${implied_free:.2f}")
+    if abs(avail - implied_free) > 1.0:
+        print(f"   !! MISMATCH: exchange cash vs implied free differs by ${abs(avail - implied_free):.2f}")
+    if avail < 1.0:
+        print("   !! WARNING: Cash below $1.00 minimum trade cost")
 
     print(f"\n2. POSITIONS")
     print(f"   Active:     {len(active)} (${total_cost:.2f} cost basis)")

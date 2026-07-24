@@ -1,0 +1,12 @@
+H-KALS-001b — rule set B scan log (contiguous between ladders only)
+
+Pre-registered design: ../../06_backtest_design_H-KALS-001b.md
+
+Append-only: scan_events.jsonl from:
+  python research/scanners/kals_001_probability_sum_scan.py --variant 001b --once
+
+Record demo vs live and date range here as you accumulate scans.
+
+2026-04-25: 1 demo scan appended (77048 markets, 7 rule-B ladders, 7 violations) — see 07_backtest_results_H-KALS-001b.md
+2026-04-25–26: +9 demo scans (`--repeat 9`); **10 total** lines in scan_events.jsonl — G3 batch complete per 07_backtest_results_H-KALS-001b.md
+2026-04-26: **PARKED** in NEXT_HYPOTHESIS.md — no routine demo scanning unless reopening science or explicit live study.

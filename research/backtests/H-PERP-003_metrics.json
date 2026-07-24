@@ -1,0 +1,40 @@
+{
+  "hypothesis": "H-PERP-003",
+  "n_funding_rows": 1108,
+  "n_intervals_used": 1107,
+  "n_oos_intervals": 831,
+  "days_span": 369.0,
+  "d1_calendar_depth_ge_365d": true,
+  "d4_weeks_gt_half_missing": 0,
+  "d4_bad_weeks_sample": [],
+  "data_contract_ok": true,
+  "align_ok_frac": 1.0,
+  "sharpe_oos": 7.9733,
+  "profit_factor_oos": 1.8826,
+  "cum_oos_gross_usdt": 2.925304,
+  "cum_oos_after_window_fees_usdt": 2.705304,
+  "cum_oos_2x_window_fees_usdt": 2.485304,
+  "seg_means_all_four": [
+    0.005262,
+    0.005828,
+    0.003372,
+    0.00136
+  ],
+  "oos_seg_means": [
+    0.005828,
+    0.003372,
+    0.00136
+  ],
+  "g1_sharpe": true,
+  "g2_pf": true,
+  "g3_2x_fee": true,
+  "g4_segpos": true,
+  "g5_concentration": true,
+  "g6_method": "random_sign_flip",
+  "g6_placebo_trials": 200,
+  "g6_placebo_seed": 42,
+  "g6_placebo_frac_beats": 0.0,
+  "g6_placebo_sum_mean": 0.026806,
+  "g6_pass": true,
+  "verdict": "PASS"
+}

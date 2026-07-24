@@ -498,6 +498,17 @@ class StatisticalEdgeDetector:
             0.1, 0.95,
         )) * liquidity_penalty
 
+        # Stamp spot, asset, and strikes onto market_data so downstream
+        # consumers (live_trader H1 filter, audit tools) can compute
+        # distance-from-strike without having to re-fetch the spot feed.
+        market["_h1_asset"] = asset
+        market["_h1_spot"] = float(spot)
+        market["_h1_strike_type"] = strike_type
+        if floor_strike is not None:
+            market["_h1_floor_strike"] = float(floor_strike)
+        if cap_strike is not None:
+            market["_h1_cap_strike"] = float(cap_strike)
+
         return Edge(
             ticker=market.get("ticker", ""),
             event_ticker=market.get("event_ticker", ""),

@@ -39,12 +39,31 @@ class Evaluator:
         sequence_length: int = 1,
         arbitrage_enabled: bool = False,
         use_specialist_router: bool = False,
+        dataset_split: str = "all",
+        held_out_days: int = 7,
     ):
+        """
+        Args:
+            dataset_split: "all" (legacy, full window), "train" (everything
+                           before the held-out tail), or "holdout" (just the
+                           held-out tail). Track B3 (architecture-audit-03)
+                           requires promotion to use `holdout` to avoid
+                           train-set leakage.
+            held_out_days: Size in days of the trailing held-out window. The
+                           env unwraps `REQUIRE_HISTORICAL_DAYS` from
+                           settings, so this must be < that horizon.
+        """
         self.settings = get_settings()
         self.model_path = model_path
         self.policy_type = policy_type
         self.sequence_length = int(sequence_length)
         self.arbitrage_enabled = arbitrage_enabled
+        if dataset_split not in ("all", "train", "holdout"):
+            raise ValueError(
+                f"dataset_split must be one of 'all'/'train'/'holdout', got {dataset_split!r}"
+            )
+        self.dataset_split = dataset_split
+        self.held_out_days = max(0, int(held_out_days))
 
         dataset = self._load_dataset()
         # Calculate sequence length for env (same logic as Trainer)
@@ -427,12 +446,35 @@ class Evaluator:
         if dataset is None or dataset.empty:
             raise DataUnavailableError("Dataset is empty after loading. Check data pipeline.")
 
+        # Held-out split (architecture-audit-03 §B3). The dataset is sorted by
+        # symbol then time; we slice on a global timestamp boundary so every
+        # symbol sees the same calendar split — no symbol-specific leakage.
+        if self.dataset_split != "all" and self.held_out_days > 0 and "timestamp" in dataset.columns:
+            cutoff = dataset["timestamp"].max() - timedelta(days=self.held_out_days)
+            if self.dataset_split == "train":
+                dataset = dataset[dataset["timestamp"] < cutoff].reset_index(drop=True)
+            elif self.dataset_split == "holdout":
+                dataset = dataset[dataset["timestamp"] >= cutoff].reset_index(drop=True)
+            if dataset.empty:
+                raise DataUnavailableError(
+                    f"Dataset empty after `{self.dataset_split}` split with "
+                    f"held_out_days={self.held_out_days}; check data range."
+                )
+
         min_rows = 500 + (self.sequence_length if self.policy_type == "MlpPolicy" else 1) + 1
         counts = dataset.groupby("symbol").size()
         valid_symbols = counts[counts >= min_rows].index.tolist()
         dataset = dataset[dataset["symbol"].isin(valid_symbols)].reset_index(drop=True)
         if dataset.empty:
-            raise DataUnavailableError("No symbols meet minimum row requirement for evaluation.")
+            # On the holdout split, this is most often "not enough days yet" —
+            # surface the cause cleanly so promotion check can mark INSUFFICIENT.
+            split_hint = (
+                f" (split={self.dataset_split!r}, held_out_days={self.held_out_days})"
+                if self.dataset_split != "all" else ""
+            )
+            raise DataUnavailableError(
+                f"No symbols meet minimum row requirement ({min_rows}) for evaluation{split_hint}."
+            )
 
         return dataset
 

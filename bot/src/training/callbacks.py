@@ -8,6 +8,28 @@ Callbacks allow injecting custom logic during training:
 - Custom metrics
 
 These integrate with Stable-Baselines3's callback system.
+
+================================================================================
+Checkpoint authority (architecture-audit-03 §B2, 2026-05-04)
+================================================================================
+Multiple writers used to land in the same `best_model_run_*` namespace, which
+caused the deployable artifact to flip silently (audit-01 §1). Authority is now
+unified per the table below — DO NOT add a new callback that writes
+`best_model_run_*` without first reading [research/architecture-audit-01.md](../../../research/architecture-audit-01.md).
+
+| Filename pattern                          | Written by               | Meaning                                             | Use for                  |
+|-------------------------------------------|--------------------------|-----------------------------------------------------|--------------------------|
+| `best_model_run_<id>`                     | `EarlyStoppingCallback`  | Best eval metric **AND** all hard gates pass        | **Deployment** (sole)    |
+| `eval_best_run_<id>`                      | `EarlyStoppingCallback`  | Best eval metric, gates ignored                     | Retrospective analysis   |
+| `reward_best_run_<id>`                    | `CheckpointCallback`     | Best running mean *training* reward                 | Diagnostics only         |
+| `reward_best_run_<id>_step_<n>`           | `CheckpointCallback`     | Same, snapshot per "new best" event                 | Diagnostics only         |
+| `checkpoint_run_<id>_step_<n>`            | `CheckpointCallback`     | Periodic timestep snapshot                          | Resume training          |
+| `early_stop_eval_run_<id>_step_<n>`       | `EarlyStoppingCallback`  | Transient pre-eval snapshot (deleted by SB3)        | Internal                 |
+
+Promotion / fleet code MUST consume `best_model_run_*` and never one of the
+diagnostic patterns. `bot/scripts/rl_promotion_check.py` and
+[shared/config/fleet.yaml](../../../shared/config/fleet.yaml) follow this.
+================================================================================
 """
 
 from stable_baselines3.common.callbacks import BaseCallback
@@ -202,10 +224,18 @@ class PerformanceLogCallback(BaseCallback):
 
 class CheckpointCallback(BaseCallback):
     """
-    Saves model checkpoints during training
-    
-    Saves best models and periodic checkpoints.
-    Now preserves the best model with step number to prevent overwriting.
+    Saves model checkpoints during training.
+
+    Diagnostic-only writer (architecture-audit-03 §B2):
+
+    - Periodic snapshots → `checkpoint_run_<id>_step_<n>` (resumable training).
+    - "New best mean training reward" snapshots → `reward_best_run_<id>_step_<n>`
+      AND a moving-latest pointer at `reward_best_run_<id>`.
+
+    This callback **never** writes `best_model_run_*` — that path is reserved
+    for `EarlyStoppingCallback` after a hard-gate-passing eval. Training-mean
+    reward is biased by curriculum and exploration, so `reward_best_*` is for
+    diagnostics, not deployment.
     """
     
     def __init__(
@@ -250,20 +280,26 @@ class CheckpointCallback(BaseCallback):
     
     def _save_checkpoint(self, is_best: bool = False):
         """
-        Save model checkpoint
-        
+        Save model checkpoint (diagnostics-only — see class docstring).
+
         Args:
-            is_best: Whether this is the best model so far
+            is_best: True for "new best running training-mean reward" event.
+                     Writes `reward_best_run_<id>_step_<n>` plus a moving
+                     pointer `reward_best_run_<id>`. Never writes the
+                     deployment artifact `best_model_run_<id>` — that is
+                     `EarlyStoppingCallback`'s exclusive responsibility per
+                     architecture-audit-03 §B2.
         """
-        # Generate filename - include step number for best models to preserve history
         if is_best:
-            filename = f"best_model_run_{self.training_run_id}_step_{self.n_calls}"
+            # Renamed from `best_model_run_*` to remove the namespace
+            # collision with EarlyStoppingCallback (audit-03 §B2 fix).
+            filename = f"reward_best_run_{self.training_run_id}_step_{self.n_calls}"
             latest_filename = f"reward_best_run_{self.training_run_id}"
             latest_filepath = self.save_path / latest_filename
             self.model.save(str(latest_filepath))
         else:
             filename = f"checkpoint_run_{self.training_run_id}_step_{self.n_calls}"
-        
+
         filepath = self.save_path / filename
         
         try:
@@ -312,6 +348,17 @@ class CheckpointCallback(BaseCallback):
 class EarlyStoppingCallback(BaseCallback):
     """
     Evaluates the model periodically and stops training if performance stalls.
+
+    Sole writer of the deployable artifact `best_model_run_<id>`
+    (architecture-audit-03 §B2). The artifact is written **only** when both
+    conditions hold:
+
+    1. The eval metric (`metric_name` / `golden_score`) sets a new best, and
+    2. All hard gates in `_passes_hard_gates()` pass.
+
+    A separate, ungated `eval_best_run_<id>` snapshot is kept for retrospective
+    analysis whenever the metric improves — this is **not** for deployment;
+    promotion / fleet code must consume `best_model_run_<id>` instead.
     """
 
     def __init__(
@@ -332,7 +379,27 @@ class EarlyStoppingCallback(BaseCallback):
         min_total_return: float = -1.0,
         max_drawdown: float = 1.0,
         max_fees_pct_of_gross_pnl: float = 1.0,
+        eval_dataset_split: str = "train",
+        held_out_days: int = 7,
+        drawdown_score_floor: float = 0.0,
     ):
+        """
+        Args:
+            eval_dataset_split: Which slice of the dataset is fed to the
+                inner Evaluator at each eval. `"train"` (default after
+                audit-03 §B3) holds out the trailing `held_out_days` window
+                so that the trainer never sees holdout signal during early
+                stopping. Use `"all"` only for legacy reproducibility runs.
+            held_out_days: Size of the trailing held-out window in days.
+            drawdown_score_floor: Audit-03 §B3 amendment to the drawdown
+                guard. The previous implementation zero'd out `profit_factor`
+                whenever drawdown exceeded the threshold, which made gates
+                effectively binary on a noisy quantity. The new default
+                applies a multiplicative score penalty in `_apply_drawdown_penalty`
+                instead — see that method's docstring. The score floor caps
+                how far the penalty can push a model below; default 0 means
+                "no extra floor, the penalty just multiplies".
+        """
         super().__init__(verbose)
         self.training_run_id = training_run_id
         self.eval_frequency = max(int(eval_frequency), 1)
@@ -350,6 +417,13 @@ class EarlyStoppingCallback(BaseCallback):
         self.min_total_return = float(min_total_return)
         self.max_drawdown = float(max_drawdown)
         self.max_fees_pct_of_gross_pnl = float(max_fees_pct_of_gross_pnl)
+        if eval_dataset_split not in ("train", "all"):
+            raise ValueError(
+                f"eval_dataset_split must be 'train' or 'all', got {eval_dataset_split!r}"
+            )
+        self.eval_dataset_split = eval_dataset_split
+        self.held_out_days = max(0, int(held_out_days))
+        self.drawdown_score_floor = float(drawdown_score_floor)
 
         self.best_metric = -np.inf
         self.best_gated_metric = -np.inf
@@ -398,6 +472,36 @@ class EarlyStoppingCallback(BaseCallback):
             failures.append(f"fees_pct={fees:.2%}>{self.max_fees_pct_of_gross_pnl:.0%}")
         return len(failures) == 0, failures
 
+    def _apply_drawdown_penalty(self, score: float, metrics: Dict[str, float]) -> float:
+        """
+        Multiplicative drawdown penalty (architecture-audit-03 §B3 amendment).
+
+        The previous implementation in the gym env zero'd out `profit_factor`
+        whenever drawdown crossed `drawdown_threshold`, turning a continuous
+        risk metric into a discontinuous gate. That made eval scores discrete
+        and punished borderline-good models the same as catastrophic ones.
+
+        New behavior:
+
+            penalty = max(0, 1 - (drawdown / max_drawdown))
+            score'  = score * penalty,  floored at `drawdown_score_floor`
+
+        - `drawdown == 0`        → penalty 1.0 → no change
+        - `drawdown == max_dd`   → penalty 0.0 → score multiplied by 0
+        - `drawdown > max_dd`    → penalty clipped at 0 (still won't go negative)
+
+        This preserves ranking among healthy models while still pushing
+        heavily-drawn models toward the bottom of the eval order. Hard
+        rejection still happens via `_passes_hard_gates` for the
+        `max_drawdown` line — this is just the soft signal for the metric.
+        """
+        if self.max_drawdown <= 0:
+            return score
+        dd = float(metrics.get("max_drawdown", 0.0))
+        penalty = max(0.0, 1.0 - (dd / self.max_drawdown))
+        adjusted = score * penalty
+        return max(adjusted, self.drawdown_score_floor)
+
     def _on_step(self) -> bool:
         if self.n_calls % self.eval_frequency != 0:
             return True
@@ -417,10 +521,13 @@ class EarlyStoppingCallback(BaseCallback):
                 policy_type=self.policy_type,
                 sequence_length=self.sequence_length,
                 arbitrage_enabled=self.arbitrage_enabled,
+                dataset_split=self.eval_dataset_split,
+                held_out_days=self.held_out_days,
             )
             metrics = evaluator.evaluate(num_episodes=self.eval_episodes, deterministic=True)
 
-        current_metric = self._compute_metric(metrics)
+        raw_metric = self._compute_metric(metrics)
+        current_metric = self._apply_drawdown_penalty(raw_metric, metrics)
         passes_gates, gate_failures = self._passes_hard_gates(metrics)
 
         trades_per_ep = float(metrics.get("trades_per_episode", 0.0))

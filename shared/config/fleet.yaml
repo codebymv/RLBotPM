@@ -3,6 +3,11 @@
 # Usage:
 #   python main.py fleet start --dry-run   (paper mode, no real money)
 #   python main.py fleet start             (live mode, requires promotion gates)
+#
+# Architecture policy (research/architecture-audit-03.md stop-doing list):
+# - Do not run Kalshi profit-seeking paper/live while strategies are parked.
+# - Do not enable rl_crypto until a promoted deployable artifact exists.
+# - H-PERP-003 paper logger is the active paper-observation path (no orders).
 
 fleet:
   # Global circuit breaker (orchestrator-level)
@@ -17,9 +22,10 @@ fleet:
 # Bot 1: Kalshi Prediction Markets
 #   --dry-run  → kalshi paper-trade --live (paper portfolio, no real orders)
 #   live       → kalshi live-trade (real orders)
+#   Disabled: strategy layer parked (architecture-audit-02 / audit-03 Track C).
 # -----------------------------------------------------------------------------
 kalshi:
-  enabled: true
+  enabled: false
   interval: 300
   min_edge: 0.015
   max_edge: 0.60
@@ -42,8 +48,11 @@ kalshi:
 #   live       → live_trader --mode live (real orders via Coinbase)
 # -----------------------------------------------------------------------------
 rl_crypto:
-  enabled: true
-  model: "models/best_model_run_174.zip"
+  # Disabled: run 174 / artifact best_model_run_176.zip failed walk-forward
+  # promotion (research/RL_RUN_174_RESULTS.md). Do not point fleet at a
+  # non-promoted zip — see research/architecture-audit-01.md / audit-03 §B.
+  enabled: false
+  model: null                    # set only after a promoted best_model_run_*.zip
   symbols: null                  # null = all from DATA_SYMBOLS env var
   interval: "1h"
   capital: 1000.0
@@ -51,3 +60,12 @@ rl_crypto:
   # live-trade only
   symbol: "BTC-USD"
   tick_interval: 60
+
+# -----------------------------------------------------------------------------
+# Research sleeve: H-PERP-003 hedged carry paper logger (OKX public REST)
+#   Always paper-only — never sends orders. Preferred dry-run path while
+#   Kalshi / RL sleeves remain disabled.
+# -----------------------------------------------------------------------------
+h_perp_003:
+  enabled: true
+  interval: 300                  # seconds between polls (funding is 8h)
