@@ -167,6 +167,29 @@ def test_live_g3_freeze_zero_violation_fail(m):
     assert freeze["capital_pass"] is False
 
 
+def test_live_g3_freeze_window_ignores_post_freeze_append(m):
+    """First-10 zero-violation FAIL must not flip when later scans violate."""
+    empty_live = {
+        "type": "kals_001b_scan",
+        "variant": "001b",
+        "demo": False,
+        "api_mode": "live",
+        "markets_fetched": 100,
+        "events_partition_candidates": 0,
+        "violation_count": 0,
+        "violations": [],
+    }
+    late_violation = _scan(demo=False, events=[("LATE-1", "UNDER", 0.2)])
+    live = [dict(empty_live) for _ in range(10)] + [late_violation]
+    freeze = m.live_g3_freeze_status(live, purity_ok=True)
+    assert freeze["successful_live_scans"] == 11
+    assert freeze["freeze_window_scans"] == 10
+    assert freeze["total_violation_rows"] == 0
+    assert freeze["existence_gate"] == "FAIL"
+    assert freeze["addendum_ready"] is True
+    assert freeze["capital_pass"] is False
+
+
 def test_cli_on_repo_jsonl(m):
     demo_path = m._DEFAULT_DEMO
     live_path = m._DEFAULT_LIVE

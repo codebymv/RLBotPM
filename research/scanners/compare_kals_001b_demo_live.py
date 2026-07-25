@@ -169,14 +169,21 @@ def live_g3_freeze_status(
     Parallel bookkeeping for Option B live vs demo's 10-scan G3 freeze.
 
     Pre-registered meaning (06 G3): after ``target`` successful scans, zero
-    OVER/UNDER violations across the window → existence FAIL; ≥1 → continue
-    logging (not a tradeable PASS). Never invents capital PASS.
+    OVER/UNDER violations across the **first** ``target`` scans → existence
+    FAIL; ≥1 → continue logging (not a tradeable PASS). Never invents capital
+    PASS.
+
+    Existence counts only the freeze window (``live_rows[:target]``). Later
+    appends must not flip a zero-violation FAIL into VIOLATIONS_OBSERVED.
     """
     n = len(live_rows)
-    total_viol = sum(int(r.get("violation_count") or 0) for r in live_rows)
-    scans_with_viol = sum(1 for r in live_rows if int(r.get("violation_count") or 0) > 0)
-    remaining = max(0, int(target) - n)
-    freeze_ready = n >= int(target) and purity_ok
+    target_n = int(target)
+    # Pre-registered freeze window is the first N successful scans only.
+    window = list(live_rows[:target_n])
+    total_viol = sum(int(r.get("violation_count") or 0) for r in window)
+    scans_with_viol = sum(1 for r in window if int(r.get("violation_count") or 0) > 0)
+    remaining = max(0, target_n - n)
+    freeze_ready = n >= target_n and purity_ok
 
     if not purity_ok:
         existence = "INCONCLUSIVE_DATA"
@@ -187,16 +194,16 @@ def live_g3_freeze_status(
     elif n == 0:
         existence = "PENDING"
         note = "No live scans yet; append production --live rows first."
-    elif n < int(target):
+    elif n < target_n:
         existence = "PENDING"
         note = (
-            f"{n}/{target} successful live scans; need {remaining} more before a "
+            f"{n}/{target_n} successful live scans; need {remaining} more before a "
             "G3-style freeze addendum. Not a capital gate."
         )
     elif total_viol == 0:
         existence = "FAIL"
         note = (
-            f"First {target} live scans have zero OVER/UNDER violations — "
+            f"First {target_n} live scans have zero OVER/UNDER violations — "
             "pre-registered G3 existence FAIL for this live window. Demo G3 stays "
             "PARKED; no retune; no capital."
         )
@@ -204,14 +211,17 @@ def live_g3_freeze_status(
         # Match demo 07 language: zero-violation FAIL branch does not apply.
         existence = "VIOLATIONS_OBSERVED"
         note = (
-            f"First {target} live scans frozen for bookkeeping: {total_viol} "
-            f"violation rows across {scans_with_viol}/{n} scans. Zero-violation "
-            "FAIL branch does not apply. Not a Phase-4/5 PASS; do not promote."
+            f"First {target_n} live scans frozen for bookkeeping: {total_viol} "
+            f"violation rows across {scans_with_viol}/{target_n} scans"
+            + (f" ({n} total appended)" if n > target_n else "")
+            + ". Zero-violation FAIL branch does not apply. "
+            "Not a Phase-4/5 PASS; do not promote."
         )
 
     return {
-        "target_scans": int(target),
+        "target_scans": target_n,
         "successful_live_scans": n,
+        "freeze_window_scans": len(window),
         "scans_remaining_to_freeze": remaining,
         "total_violation_rows": total_viol,
         "scans_with_violations": scans_with_viol,

@@ -27,5 +27,6 @@ research stack and the standard library.
 - `test_kals_001_live_sigma_p.py` — Option B Kalshi Σp: demo/live path separation,
   mix-refusal, rule-B UNDER/OVER fixtures, JSONL purity audit (no network).
 - `test_kals_001b_demo_live_compare.py` — demo vs live compare labels, purity gate,
-  live G3 10-scan freeze bookkeeping (no capital PASS; no network).
+  live G3 10-scan freeze bookkeeping (first-N window only; post-freeze appends
+  cannot flip zero-violation FAIL; no capital PASS; no network).
 - `test_h_spot_002_signal.py` — H-SPOT-002 band signal / G6 method guards.
