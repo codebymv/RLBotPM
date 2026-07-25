@@ -261,8 +261,9 @@ def replication_verdict(
 
     freeze = freeze or {}
     g3_style_ready = bool(freeze.get("g3_style_10_scan_freeze_ready"))
+    existence = freeze.get("existence_gate")
     zero_violation_fail_branch_possible = (
-        freeze.get("existence_gate") == "FAIL"
+        existence == "FAIL"
         or (live_total == 0 and live_scans >= _G3_FREEZE_TARGET and purity_ok)
     )
 
@@ -275,6 +276,15 @@ def replication_verdict(
     elif live_scans == 0:
         label = "NO_LIVE_DATA"
         note = "No live scans to compare; append --live JSONL first."
+    elif existence == "FAIL":
+        # Freeze-window existence FAIL wins over whole-stream kind counts so
+        # post-freeze appends cannot reopen STRUCTURAL_* / LIVE_EMPTY labels.
+        label = "LIVE_G3_EXISTENCE_FAIL"
+        note = (
+            "Live G3-style freeze window has zero OVER/UNDER violations — "
+            "pre-registered existence FAIL. Late appends do not reopen structural "
+            "replication labels. Demo G3 stays PARKED; no capital."
+        )
     elif not live_has_violations:
         label = "LIVE_EMPTY_VIOLATIONS"
         note = (

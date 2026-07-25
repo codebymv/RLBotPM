@@ -28,5 +28,6 @@ research stack and the standard library.
   mix-refusal, rule-B UNDER/OVER fixtures, JSONL purity audit (no network).
 - `test_kals_001b_demo_live_compare.py` — demo vs live compare labels, purity gate,
   live G3 10-scan freeze bookkeeping (first-N window only; post-freeze appends
-  cannot flip zero-violation FAIL; no capital PASS; no network).
+  cannot flip zero-violation FAIL or reopen STRUCTURAL_* via whole-stream kinds;
+  verdict `LIVE_G3_EXISTENCE_FAIL`; no capital PASS; no network).
 - `test_h_spot_002_signal.py` — H-SPOT-002 band signal / G6 method guards.

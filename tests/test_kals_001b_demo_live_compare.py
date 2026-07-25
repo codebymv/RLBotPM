@@ -160,11 +160,17 @@ def test_live_g3_freeze_zero_violation_fail(m):
         "violation_count": 0,
         "violations": [],
     }
+    demo = [_scan(demo=True, events=[("DEMO-1", "UNDER", 0.2)])]
     live = [dict(empty_live) for _ in range(10)]
     freeze = m.live_g3_freeze_status(live, purity_ok=True)
     assert freeze["existence_gate"] == "FAIL"
     assert freeze["addendum_ready"] is True
     assert freeze["capital_pass"] is False
+    report = m.compare_demo_live(demo, live, purity_ok=True)
+    assert report["verdict"]["label"] == "LIVE_G3_EXISTENCE_FAIL"
+    assert report["verdict"]["promising_for_more_live_batches"] is False
+    assert report["verdict"]["zero_violation_fail_branch_possible"] is True
+    assert report["verdict"]["capital_pass"] is False
 
 
 def test_live_g3_freeze_window_ignores_post_freeze_append(m):
@@ -179,6 +185,7 @@ def test_live_g3_freeze_window_ignores_post_freeze_append(m):
         "violation_count": 0,
         "violations": [],
     }
+    demo = [_scan(demo=True, events=[("DEMO-1", "UNDER", 0.2)])]
     late_violation = _scan(demo=False, events=[("LATE-1", "UNDER", 0.2)])
     live = [dict(empty_live) for _ in range(10)] + [late_violation]
     freeze = m.live_g3_freeze_status(live, purity_ok=True)
@@ -188,6 +195,12 @@ def test_live_g3_freeze_window_ignores_post_freeze_append(m):
     assert freeze["existence_gate"] == "FAIL"
     assert freeze["addendum_ready"] is True
     assert freeze["capital_pass"] is False
+    # Whole-stream kinds see the late row, but verdict must stay existence FAIL.
+    report = m.compare_demo_live(demo, live, purity_ok=True)
+    assert report["live"]["kind_counts"].get("UNDER", 0) == 1
+    assert report["verdict"]["label"] == "LIVE_G3_EXISTENCE_FAIL"
+    assert report["verdict"]["promising_for_more_live_batches"] is False
+    assert report["verdict"]["label"] != "STRUCTURAL_REPLICATION_PROMISING"
 
 
 def test_cli_on_repo_jsonl(m):
