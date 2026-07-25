@@ -26,8 +26,12 @@ Inputs:
   (the same CSV ``H-PERP-003.py`` consumes).
 - Phase 4 metrics: ``research/backtests/H-PERP-003_metrics.json``.
 
-Exit code is ``0`` for PASS and ``1`` for FAIL so this script can be wired
-into a CI / cron sanity check later.
+Exit code is ``0`` for PASS / INSUFFICIENT and ``1`` for FAIL so this script
+can be wired into a CI / cron sanity check later.
+
+JSON output always includes ``fail_reasons`` (stable codes) and ``diagnosis``
+(one-line human summary). Phase 4 drift also reports
+``relative_sharpe_drift`` / ``relative_profit_factor_drift`` when computable.
 """
 from __future__ import annotations
 
@@ -300,8 +304,15 @@ def _phase4_drift_check(
             return None
         return abs(actual - ref) / abs(ref) <= drift_pct
 
+    def _rel_drift(actual: float | None, ref: float | None) -> float | None:
+        if actual is None or ref is None or ref == 0:
+            return None
+        return abs(actual - ref) / abs(ref)
+
     sharpe_ok = _within(paper_stats["sharpe"], phase4_sharpe)
     pf_ok = _within(paper_stats["profit_factor"], phase4_pf)
+    sharpe_rel = _rel_drift(paper_stats["sharpe"], phase4_sharpe)
+    pf_rel = _rel_drift(paper_stats["profit_factor"], phase4_pf)
     sufficient_sample = paper_stats["n"] >= drift_min_intervals
     can_evaluate = sufficient_sample and sharpe_ok is not None and pf_ok is not None
     skip_reason: str | None = None
@@ -322,12 +333,110 @@ def _phase4_drift_check(
         "offline_window_sharpe": window_stats["sharpe"],
         "offline_window_profit_factor": window_stats["profit_factor"],
         "drift_tolerance_pct": drift_pct,
+        "relative_sharpe_drift": sharpe_rel,
+        "relative_profit_factor_drift": pf_rel,
         "sharpe_within_drift": sharpe_ok,
         "profit_factor_within_drift": pf_ok,
         "evaluable": can_evaluate,
         "skip_reason": skip_reason,
         "pass": bool(can_evaluate and sharpe_ok and pf_ok),
     }
+
+
+def _fail_reasons(
+    per_interval: dict,
+    daily: dict,
+    drift: dict,
+    *,
+    insufficient: bool,
+) -> list[str]:
+    """Stable, machine-readable FAIL / INSUFFICIENT reason codes.
+
+    Nested pass flags alone force operators to dig; Phase 5 close-out and
+    fundability item 9 need an explicit list of which gates blocked promotion
+    without inventing a PASS.
+    """
+    if insufficient:
+        return ["insufficient_matched_intervals"]
+
+    reasons: list[str] = []
+    if not per_interval.get("pass"):
+        reasons.append("per_interval_pnl_mismatch")
+    if not daily.get("pass"):
+        reasons.append("daily_cum_pnl_drift")
+    if drift.get("evaluable") and not drift.get("pass"):
+        if drift.get("sharpe_within_drift") is False:
+            reasons.append("phase4_sharpe_drift")
+        if drift.get("profit_factor_within_drift") is False:
+            reasons.append("phase4_profit_factor_drift")
+        # Metrics missing / non-comparable while evaluable should be rare, but
+        # never collapse to an empty FAIL reason list.
+        if not any(r.startswith("phase4_") for r in reasons):
+            reasons.append("phase4_drift_gate")
+    elif drift.get("phase4_metrics_present") is False:
+        reasons.append("phase4_metrics_missing")
+    return reasons
+
+
+def _diagnosis(
+    verdict: str,
+    reasons: list[str],
+    per_interval: dict,
+    drift: dict,
+) -> str:
+    """One-line human summary for cron / 09 paste-ups."""
+    if verdict == "PASS":
+        return "All tracking and Phase 4 drift gates passed."
+    if verdict == "INSUFFICIENT":
+        return (
+            "Too few matched paper/offline intervals to evaluate; "
+            "not a promotion FAIL."
+        )
+    parts: list[str] = []
+    for code in reasons:
+        if code == "phase4_sharpe_drift":
+            rel = drift.get("relative_sharpe_drift")
+            tol = drift.get("drift_tolerance_pct")
+            paper = drift.get("paper_sharpe")
+            ref = drift.get("phase4_sharpe_oos")
+            if rel is not None and paper is not None and ref is not None:
+                parts.append(
+                    f"Sharpe drift {rel:.1%} "
+                    f"(paper={paper:.4f} vs Phase4={ref:.4f}; "
+                    f"tol={tol:.0%})"
+                )
+            else:
+                parts.append("Sharpe outside Phase 4 drift band")
+        elif code == "phase4_profit_factor_drift":
+            rel = drift.get("relative_profit_factor_drift")
+            paper = drift.get("paper_profit_factor")
+            ref = drift.get("phase4_profit_factor_oos")
+            if rel is not None and paper is not None and ref is not None:
+                parts.append(
+                    f"PF drift {rel:.1%} "
+                    f"(paper={paper:.4f} vs Phase4={ref:.4f})"
+                )
+            else:
+                parts.append("profit factor outside Phase 4 drift band")
+        elif code == "per_interval_pnl_mismatch":
+            max_diff = per_interval.get("max_abs_diff_usdt")
+            tol = per_interval.get("abs_tolerance_usdt")
+            if max_diff is not None and tol is not None:
+                parts.append(
+                    f"per-interval PnL mismatch "
+                    f"(max_abs_diff={max_diff} > tol={tol})"
+                )
+            else:
+                parts.append("per-interval paper vs offline PnL mismatch")
+        elif code == "daily_cum_pnl_drift":
+            parts.append("daily cumulative PnL outside tolerance")
+        elif code == "phase4_metrics_missing":
+            parts.append("Phase 4 metrics file missing")
+        else:
+            parts.append(code.replace("_", " "))
+    if not parts:
+        return "FAIL (see nested gate fields)."
+    return "FAIL - " + "; ".join(parts) + ". DO NOT PROMOTE."
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -389,12 +498,20 @@ def main(argv: list[str] | None = None) -> int:
     matched_intervals = per_interval["matched"]
     insufficient = matched_intervals < args.require_min_intervals
     drift_blocking = drift.get("evaluable") and not drift.get("pass")
+    metrics_missing = drift.get("phase4_metrics_present") is False
     if insufficient:
         verdict = "INSUFFICIENT"
-    elif per_interval["pass"] and daily["pass"] and not drift_blocking:
+    elif per_interval["pass"] and daily["pass"] and not drift_blocking and not metrics_missing:
         verdict = "PASS"
     else:
         verdict = "FAIL"
+
+    fail_reasons = _fail_reasons(
+        per_interval, daily, drift, insufficient=insufficient
+    )
+    # PASS must never carry blocking reason codes.
+    if verdict == "PASS":
+        fail_reasons = []
 
     summary = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -405,6 +522,8 @@ def main(argv: list[str] | None = None) -> int:
         "n_offline_intervals": len(offline_pnl),
         "n_matched_intervals": matched_intervals,
         "verdict": verdict,
+        "fail_reasons": fail_reasons,
+        "diagnosis": _diagnosis(verdict, fail_reasons, per_interval, drift),
         "per_interval": per_interval,
         "daily_cum_pnl": daily,
         "phase4_drift": drift,

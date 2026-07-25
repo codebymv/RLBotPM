@@ -241,6 +241,13 @@ def test_phase4_drift_gate_fails_on_low_sharpe_window() -> None:
     assert result["phase4_drift"]["sharpe_within_drift"] is False
     assert result["verdict"] == "FAIL", json.dumps(result, indent=2, default=str)
     assert result["_exit_code"] == 1
+    # Clear FAIL diagnostics: codes + relative drift + DO NOT PROMOTE line.
+    assert "phase4_sharpe_drift" in result["fail_reasons"]
+    assert "phase4_profit_factor_drift" in result["fail_reasons"]
+    assert result["phase4_drift"]["relative_sharpe_drift"] is not None
+    assert result["phase4_drift"]["relative_sharpe_drift"] > 0.30
+    assert "DO NOT PROMOTE" in result["diagnosis"]
+    assert "Sharpe drift" in result["diagnosis"]
     # Paper Sharpe reported by the verifier must be 8h-annualized (not ~sqrt(n)).
     paper_sharpe = result["phase4_drift"]["paper_sharpe"]
     assert paper_sharpe is not None
@@ -249,3 +256,80 @@ def test_phase4_drift_gate_fails_on_low_sharpe_window() -> None:
     stdev = statistics.pstdev(series)
     expected = (mean / stdev) * math.sqrt(365.0 * INTERVALS_PER_DAY)
     assert abs(paper_sharpe - expected) < 1e-9
+
+
+def test_fail_reasons_on_per_interval_mismatch() -> None:
+    panel = _load_panel()
+    log_rows = _synthesize_paper_log(panel, n_intervals=24)
+    for row in log_rows:
+        if row.get("pnl_interval_usdt") is not None:
+            row["pnl_interval_usdt"] += 0.10
+            break
+    with tempfile.TemporaryDirectory() as tmp:
+        log_path = Path(tmp) / "paper_research_H-PERP-003.jsonl"
+        _write_log(log_path, log_rows)
+        result = _run_verifier(log_path)
+    assert result["verdict"] == "FAIL"
+    # Perturbing an interval also breaks the daily cum gate; both must be named.
+    assert result["fail_reasons"][0] == "per_interval_pnl_mismatch"
+    assert "per_interval_pnl_mismatch" in result["fail_reasons"]
+    assert "daily_cum_pnl_drift" in result["fail_reasons"]
+    assert "per-interval PnL mismatch" in result["diagnosis"]
+    assert "DO NOT PROMOTE" in result["diagnosis"]
+
+
+def test_pass_has_empty_fail_reasons() -> None:
+    panel = _load_panel()
+    log_rows = _synthesize_paper_log(panel, n_intervals=24)
+    with tempfile.TemporaryDirectory() as tmp:
+        log_path = Path(tmp) / "paper_research_H-PERP-003.jsonl"
+        _write_log(log_path, log_rows)
+        result = _run_verifier(log_path)
+    assert result["verdict"] == "PASS"
+    assert result["fail_reasons"] == []
+    assert "passed" in result["diagnosis"].lower()
+
+
+def test_drift_gate_honest_below_min_intervals() -> None:
+    """n < drift-min must not FAIL via Phase 4 drift (INSUFFICIENT sample)."""
+    panel = _load_panel()
+    log_rows = _synthesize_paper_log(panel, n_intervals=24)
+    phase4 = json.loads(PHASE4_METRICS.read_text(encoding="utf-8"))
+    fake_phase4 = {**phase4, "sharpe_oos": 50.0, "profit_factor_oos": 50.0}
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        log_path = tmp_path / "paper_research_H-PERP-003.jsonl"
+        metrics_path = tmp_path / "phase4.json"
+        _write_log(log_path, log_rows)
+        metrics_path.write_text(json.dumps(fake_phase4), encoding="utf-8")
+        result = _run_verifier(
+            log_path,
+            extra_args=[
+                "--phase4-metrics",
+                str(metrics_path),
+                "--drift-min-intervals",
+                "90",
+            ],
+        )
+    assert result["phase4_drift"]["evaluable"] is False
+    assert result["verdict"] == "PASS", json.dumps(result, indent=2, default=str)
+    assert result["fail_reasons"] == []
+    assert result["_exit_code"] == 0
+
+
+def test_missing_phase4_metrics_is_fail_not_silent_pass() -> None:
+    """Missing Phase 4 metrics must not collapse to a silent PASS."""
+    panel = _load_panel()
+    log_rows = _synthesize_paper_log(panel, n_intervals=24)
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        log_path = tmp_path / "paper_research_H-PERP-003.jsonl"
+        missing = tmp_path / "does_not_exist.json"
+        _write_log(log_path, log_rows)
+        result = _run_verifier(
+            log_path,
+            extra_args=["--phase4-metrics", str(missing)],
+        )
+    assert result["verdict"] == "FAIL"
+    assert "phase4_metrics_missing" in result["fail_reasons"]
+    assert result["_exit_code"] == 1

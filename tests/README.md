@@ -18,8 +18,10 @@ research stack and the standard library.
   append-only / `align_ok` invariants. Will need an update once D1 is met
   (track A5 of [architecture-audit-03](../research/architecture-audit-03.md)).
 - `test_h_perp_003_tracking.py` — Phase 5 verifier: formula PASS/FAIL, Sharpe
-  annualization parity with Phase 4 `sharpe_8h`, and drift-gate FAIL when
-  paper Sharpe is far from OOS.
+  annualization parity with Phase 4 `sharpe_8h`, drift-gate FAIL when paper
+  Sharpe is far from OOS, clear `fail_reasons` / `diagnosis`, honest
+  non-blocking drift below `--drift-min-intervals`, and FAIL (not silent PASS)
+  when Phase 4 metrics are missing.
 - `test_h_perp_003_panel_dual_write.py` — paper logger append-only panel mirror.
 - `test_kals_001_live_sigma_p.py` — Option B Kalshi Σp: demo/live path separation,
   mix-refusal, rule-B UNDER/OVER fixtures, JSONL purity audit (no network).
