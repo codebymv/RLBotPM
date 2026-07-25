@@ -32,6 +32,8 @@ can be wired into a CI / cron sanity check later.
 JSON output always includes ``fail_reasons`` (stable codes) and ``diagnosis``
 (one-line human summary). Phase 4 drift also reports
 ``relative_sharpe_drift`` / ``relative_profit_factor_drift`` when computable.
+Missing *or* incomplete Phase 4 metrics (null / non-comparable
+``sharpe_oos`` / ``profit_factor_oos``) FAIL — never silent PASS.
 """
 from __future__ import annotations
 
@@ -264,6 +266,19 @@ def _stats(intervals: Iterable[float]) -> dict:
     return {"n": len(series), "sharpe": sharpe, "profit_factor": pf}
 
 
+def _phase4_ref(value: object) -> float | None:
+    """Finite non-zero Phase 4 OOS reference, or None if not comparable."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        v = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(v) or v == 0.0:
+        return None
+    return v
+
+
 def _phase4_drift_check(
     paper_rows: list[dict],
     offline_pnl: dict[int, float],
@@ -290,22 +305,51 @@ def _phase4_drift_check(
         return {
             "n_paper_intervals": paper_stats["n"],
             "phase4_metrics_present": False,
+            "phase4_metrics_complete": False,
             "pass": False,
             "skip_reason": f"Phase 4 metrics not found at {phase4_path}",
         }
 
     with open(phase4_path, encoding="utf-8") as f:
         phase4 = json.load(f)
-    phase4_sharpe = phase4.get("sharpe_oos")
-    phase4_pf = phase4.get("profit_factor_oos")
+    phase4_sharpe = _phase4_ref(phase4.get("sharpe_oos"))
+    phase4_pf = _phase4_ref(phase4.get("profit_factor_oos"))
+    metrics_complete = phase4_sharpe is not None and phase4_pf is not None
+
+    # File present but unusable refs must not collapse to silent PASS (sibling of
+    # the missing-file honesty gate).
+    if not metrics_complete:
+        return {
+            "n_paper_intervals": paper_stats["n"],
+            "drift_min_intervals": drift_min_intervals,
+            "phase4_metrics_present": True,
+            "phase4_metrics_complete": False,
+            "phase4_sharpe_oos": phase4.get("sharpe_oos"),
+            "phase4_profit_factor_oos": phase4.get("profit_factor_oos"),
+            "paper_sharpe": paper_stats["sharpe"],
+            "paper_profit_factor": paper_stats["profit_factor"],
+            "offline_window_sharpe": window_stats["sharpe"],
+            "offline_window_profit_factor": window_stats["profit_factor"],
+            "drift_tolerance_pct": drift_pct,
+            "relative_sharpe_drift": None,
+            "relative_profit_factor_drift": None,
+            "sharpe_within_drift": None,
+            "profit_factor_within_drift": None,
+            "evaluable": False,
+            "skip_reason": (
+                "Phase 4 metrics missing usable sharpe_oos and/or "
+                "profit_factor_oos (null, non-numeric, non-finite, or zero)"
+            ),
+            "pass": False,
+        }
 
     def _within(actual: float | None, ref: float | None) -> bool | None:
-        if actual is None or ref is None or ref == 0:
+        if actual is None or ref is None:
             return None
         return abs(actual - ref) / abs(ref) <= drift_pct
 
     def _rel_drift(actual: float | None, ref: float | None) -> float | None:
-        if actual is None or ref is None or ref == 0:
+        if actual is None or ref is None:
             return None
         return abs(actual - ref) / abs(ref)
 
@@ -326,6 +370,7 @@ def _phase4_drift_check(
         "n_paper_intervals": paper_stats["n"],
         "drift_min_intervals": drift_min_intervals,
         "phase4_metrics_present": True,
+        "phase4_metrics_complete": True,
         "phase4_sharpe_oos": phase4_sharpe,
         "phase4_profit_factor_oos": phase4_pf,
         "paper_sharpe": paper_stats["sharpe"],
@@ -375,6 +420,8 @@ def _fail_reasons(
             reasons.append("phase4_drift_gate")
     elif drift.get("phase4_metrics_present") is False:
         reasons.append("phase4_metrics_missing")
+    elif drift.get("phase4_metrics_complete") is False:
+        reasons.append("phase4_metrics_incomplete")
     return reasons
 
 
@@ -432,6 +479,11 @@ def _diagnosis(
             parts.append("daily cumulative PnL outside tolerance")
         elif code == "phase4_metrics_missing":
             parts.append("Phase 4 metrics file missing")
+        elif code == "phase4_metrics_incomplete":
+            parts.append(
+                "Phase 4 metrics incomplete "
+                "(need usable sharpe_oos and profit_factor_oos)"
+            )
         else:
             parts.append(code.replace("_", " "))
     if not parts:
@@ -498,10 +550,13 @@ def main(argv: list[str] | None = None) -> int:
     matched_intervals = per_interval["matched"]
     insufficient = matched_intervals < args.require_min_intervals
     drift_blocking = drift.get("evaluable") and not drift.get("pass")
-    metrics_missing = drift.get("phase4_metrics_present") is False
+    metrics_unusable = (
+        drift.get("phase4_metrics_present") is False
+        or drift.get("phase4_metrics_complete") is False
+    )
     if insufficient:
         verdict = "INSUFFICIENT"
-    elif per_interval["pass"] and daily["pass"] and not drift_blocking and not metrics_missing:
+    elif per_interval["pass"] and daily["pass"] and not drift_blocking and not metrics_unusable:
         verdict = "PASS"
     else:
         verdict = "FAIL"

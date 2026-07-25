@@ -333,3 +333,36 @@ def test_missing_phase4_metrics_is_fail_not_silent_pass() -> None:
     assert result["verdict"] == "FAIL"
     assert "phase4_metrics_missing" in result["fail_reasons"]
     assert result["_exit_code"] == 1
+
+
+def test_incomplete_phase4_metrics_is_fail_not_silent_pass() -> None:
+    """File present but null/unusable OOS refs must not silent-PASS."""
+    panel = _load_panel()
+    log_rows = _synthesize_paper_log(panel, n_intervals=24)
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        log_path = tmp_path / "paper_research_H-PERP-003.jsonl"
+        metrics_path = tmp_path / "phase4.json"
+        _write_log(log_path, log_rows)
+        metrics_path.write_text(
+            json.dumps(
+                {
+                    "hypothesis": "H-PERP-003",
+                    "sharpe_oos": None,
+                    "profit_factor_oos": None,
+                }
+            ),
+            encoding="utf-8",
+        )
+        result = _run_verifier(
+            log_path,
+            extra_args=["--phase4-metrics", str(metrics_path)],
+        )
+    assert result["verdict"] == "FAIL", json.dumps(result, indent=2, default=str)
+    assert result["phase4_drift"]["phase4_metrics_present"] is True
+    assert result["phase4_drift"]["phase4_metrics_complete"] is False
+    assert result["phase4_drift"]["evaluable"] is False
+    assert "phase4_metrics_incomplete" in result["fail_reasons"]
+    assert "incomplete" in result["diagnosis"].lower()
+    assert "DO NOT PROMOTE" in result["diagnosis"]
+    assert result["_exit_code"] == 1
